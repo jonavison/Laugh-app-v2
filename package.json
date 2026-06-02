@@ -1,0 +1,9 @@
+{
+  "name": "laugh",
+  "private": true,
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "dev:watch": "./scripts/dev.sh --watch",
+    "build": "swift build"
+  }
+}
