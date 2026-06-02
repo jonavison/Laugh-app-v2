@@ -60,10 +60,12 @@ No bulk matrix updates—**IncrementalCodecRollout** only.
 - [x] Detect render failures (no frames / black frame while audio plays) and show non-blocking banner with remediation hints.
 - [ ] Expand debug panel metadata (profile, bit depth) as needed for triage.
 
-### Phase 2 — Alternate decoder (opt-in, incremental)
+### Phase 2 — Alternate decoder (bundled for direct distribution)
 
-- [ ] On native failure (or audio-only / black video), show **“Try alternate decoder”** (user opts in; no silent auto-FFmpeg).
-- [ ] Integrate FFmpeg-based **AlternateDecoder** for profiles native cannot open.
+- [x] On native failure (or audio-only / black video), auto-attempt compatibility conversion fallback.
+- [x] Integrate FFmpeg-based **AlternateDecoder** path for profiles native cannot open.
+- [x] Prefer bundled codec helper tools in direct builds so users do not need manual installs.
+- [x] Keep App Store build on native AVFoundation path only.
 - [ ] Roll out one **VerifiedPlaybackPath** per change; update this matrix only after **PlaybackVerificationRecord**.
 
 #### Phase 2 rollout queue (verify each before the next)
@@ -80,10 +82,10 @@ Native engine will not grow arbitrary codecs; gaps move to **AlternateDecoder** 
 
 ## TODO (To Be Supported)
 
-- [ ] Improve `hev1` compatibility path within native engine (render-failure detection).
+- [x] Improve `hev1` compatibility path within native engine (render-failure detection).
 - [ ] Add richer codec parser (profile, level, bit depth, chroma subsampling).
 - [ ] Add in-app compatibility banner with remediation actions (non-blocking).
-- [ ] Add one-click conversion helper docs/commands in UI.
+- [x] Add compatibility conversion helper path (auto-fallback with FFmpeg, bundled-first for direct builds).
 - [ ] Add automated compatibility fixtures/tests for representative sample files.
 
 ## Debugging Notes

@@ -34,11 +34,8 @@ final class MediaLibraryController {
 
     init() {
         reloadRoots()
-        if roots.isEmpty {
-            selectSidebarRow(0)
-        } else {
-            selectSidebarRow(firstRootRowIndex())
-        }
+        // Start on Recents — do not scan Movies/Videos on the main thread at launch.
+        selectSidebarRow(0)
     }
 
     func reloadRoots() {
@@ -70,8 +67,8 @@ final class MediaLibraryController {
 
         switch sidebarRow {
         case .recentItem(let file):
-            openMedia(file)
             selectedSidebarRow = row
+            openMedia(file)
             onChange?()
             return
         case .recentHeader:

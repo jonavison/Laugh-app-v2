@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "dev": "./scripts/dev.sh",
+    "dev:logs": "./scripts/dev.sh --logs",
     "dev:watch": "./scripts/dev.sh --watch",
-    "build": "swift build"
+    "build": "./scripts/build-direct.sh",
+    "pkg": "./scripts/create-pkg.sh"
   }
 }

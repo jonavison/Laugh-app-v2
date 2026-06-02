@@ -4,15 +4,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
     private var preferencesWindowController: PreferencesWindowController?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        LaunchLog.emit("applicationWillFinishLaunching")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LaunchLog.emit("applicationDidFinishLaunching: begin")
         buildMainMenu()
 
+        LaunchLog.emit("applicationDidFinishLaunching: creating main window")
         let controller = MainWindowController()
-        controller.show()
         windowController = controller
+        LaunchLog.emit("applicationDidFinishLaunching: showing main window")
+        controller.show()
+
+        // Activate after the run loop has created the window (required for dev + Terminal launches).
+        DispatchQueue.main.async { [weak self] in
+            LaunchLog.emit("applicationDidFinishLaunching: bringMainWindowToFront")
+            self?.bringMainWindowToFront()
+        }
+        LaunchLog.emit("applicationDidFinishLaunching: end")
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let window = windowController?.window, !window.isMiniaturized else { return }
+        if !window.isVisible {
+            bringMainWindowToFront()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            windowController?.show()
+        }
+        bringMainWindowToFront()
+        return true
+    }
+
+    private func bringMainWindowToFront() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        windowController?.show()
+        guard let window = windowController?.window else { return }
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        FFmpegVideoFallback.terminateRunningProcesses()
         LibraryRootsStore.shared.stopAllSecurityScopedAccess()
     }
 
@@ -70,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.toggleFullScreen()
     }
 
-    @objc private func openPreferences() {
+    @objc func openPreferences() {
         if preferencesWindowController == nil {
             preferencesWindowController = PreferencesWindowController()
             preferencesWindowController?.onSettingsChange = { [weak self] in

@@ -32,6 +32,8 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     private let trailingDivider = NSBox()
     private let addFolderButton = NSButton(title: "", target: nil, action: nil)
     private let removeFolderButton = NSButton(title: "", target: nil, action: nil)
+    private var suppressSelectionAction = false
+    private var isUpdatingScrollerLayout = false
 
     init(controller: MediaLibraryController) {
         self.controller = controller
@@ -109,8 +111,11 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         addSubview(trailingDivider)
     }
 
-    override func layout() {
-        super.layout()
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        guard !isUpdatingScrollerLayout else { return }
+        isUpdatingScrollerLayout = true
+        defer { isUpdatingScrollerLayout = false }
         updateScrollerVisibility()
     }
 
@@ -137,21 +142,34 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     }
 
     private func updateScrollerVisibility() {
+        guard bounds.width > 1, bounds.height > 1 else { return }
+
         let rows = controller.sidebarRowCount()
         let contentHeight = sidebarContentHeight(rowCount: rows)
         let clipHeight = scroll.contentView.bounds.height
-        let needsScroller = contentHeight > clipHeight + 1
+        guard clipHeight > 0 else { return }
 
-        scroll.hasVerticalScroller = needsScroller
+        let needsScroller = contentHeight > clipHeight + 1
+        if scroll.hasVerticalScroller != needsScroller {
+            scroll.hasVerticalScroller = needsScroller
+        }
         if !needsScroller {
             scroll.contentView.scroll(to: .zero)
         }
 
+        let targetWidth = scroll.contentView.bounds.width
+        let targetHeight = max(contentHeight, clipHeight)
         var frame = table.frame
-        frame.size.width = scroll.contentView.bounds.width
-        frame.size.height = max(contentHeight, clipHeight)
+        let widthChanged = abs(frame.size.width - targetWidth) > 0.5
+        let heightChanged = abs(frame.size.height - targetHeight) > 0.5
+        guard widthChanged || heightChanged else { return }
+
+        frame.size.width = targetWidth
+        frame.size.height = targetHeight
         table.frame = frame
-        table.sizeLastColumnToFit()
+        if widthChanged {
+            table.sizeLastColumnToFit()
+        }
     }
 
     private func sidebarContentHeight(rowCount: Int) -> CGFloat {
@@ -196,6 +214,8 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     }
 
     func refresh() {
+        suppressSelectionAction = true
+        defer { suppressSelectionAction = false }
         table.reloadData()
         table.selectRowIndexes(IndexSet(integer: controller.selectedSidebarRow), byExtendingSelection: false)
         removeFolderButton.isEnabled = controller.canRemoveSelectedRoot
@@ -204,6 +224,7 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     }
 
     @objc private func selectionChanged() {
+        guard !suppressSelectionAction else { return }
         let row = table.selectedRow
         guard row >= 0 else { return }
         controller.selectSidebarRow(row)

@@ -38,19 +38,41 @@ enum VideoAssetLoader {
         var probeLog: [String] = []
 
         for (index, asset) in candidates.enumerated() {
-            do {
-                let playable = try await asset.load(.isPlayable)
-                let videoTracks = try await asset.loadTracks(withMediaType: .video)
-                let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-                probeLog.append(
-                    "candidate\(index): playable=\(playable) videoTracks=\(videoTracks.count) audioTracks=\(audioTracks.count)"
-                )
+            var playable = false
+            var videoTrackCount = 0
+            var audioTrackCount = 0
+            var errors: [String] = []
 
-                if playable, !videoTracks.isEmpty {
-                    return .success(asset)
-                }
+            do {
+                playable = try await asset.load(.isPlayable)
             } catch {
-                probeLog.append("candidate\(index): error=\(PlaybackErrorFormatter.describe(error))")
+                errors.append("isPlayable=\(PlaybackErrorFormatter.describe(error))")
+            }
+
+            do {
+                let videoTracks = try await asset.loadTracks(withMediaType: .video)
+                videoTrackCount = videoTracks.count
+            } catch {
+                errors.append("videoTracks=\(PlaybackErrorFormatter.describe(error))")
+            }
+
+            do {
+                let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+                audioTrackCount = audioTracks.count
+            } catch {
+                errors.append("audioTracks=\(PlaybackErrorFormatter.describe(error))")
+            }
+
+            probeLog.append(
+                "candidate\(index): playable=\(playable) videoTracks=\(videoTrackCount) audioTracks=\(audioTrackCount)"
+            )
+            if !errors.isEmpty {
+                probeLog.append("candidate\(index): errors=\(errors.joined(separator: ","))")
+            }
+
+            // Be permissive: some containers report partial probing errors but still play via AVPlayerItem.
+            if playable || videoTrackCount > 0 {
+                return .success(asset)
             }
         }
 
@@ -82,17 +104,7 @@ enum VideoAssetLoader {
         if ext == "mkv" {
             mimeHints = ["video/x-matroska", "video/matroska", nil]
         }
-
-        var assets: [AVURLAsset] = []
-        var seen = Set<ObjectIdentifier>()
-        for mime in mimeHints {
-            let asset = makeAsset(for: url, mimeHint: mime)
-            let id = ObjectIdentifier(asset)
-            guard !seen.contains(id) else { continue }
-            seen.insert(id)
-            assets.append(asset)
-        }
-        return assets
+        return mimeHints.map { makeAsset(for: url, mimeHint: $0) }
     }
 
     private static func makeAsset(for url: URL, mimeHint: String?) -> AVURLAsset {
