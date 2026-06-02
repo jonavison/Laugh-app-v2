@@ -5,12 +5,20 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Playback runtime/distribution abstraction (`PlaybackRuntime`, `PlaybackEngine`, `PlaybackEngineFactory`) with backend metadata in debug info.
+- Bundled codec tool discovery (`BundledCodecTools`) and direct/app-store build scripts:
+  - `scripts/build-direct.sh`
+  - `scripts/build-appstore.sh`
+  - `scripts/bundle-codec-tools.sh`
+- ADR `0002-dual-distribution-codec-strategy.md` documenting direct vs App Store codec approach.
 - Docked **MediaLibraryPanel** (Cursor-style): folders on the left, media list on the right; playback opens in the center container.
 - **UserLibraryFolder** support: add/remove custom folders via +/−; paths persist with security-scoped bookmarks.
 - Library scans videos and images under each **LibraryFolder** (up to 500 items); built-in Movies and ~/Videos roots remain.
 - Library transport control toggles the panel; center content resizes when the panel is open. Settings stay on the right only.
 
 ### Changed
+- FFmpeg fallback now prefers bundled codec tools in direct builds before system PATH tools.
+- Compatibility failure messaging now distinguishes direct-build bundled-tools missing vs App Store native-only behavior.
 - Drag-and-drop onto the main play area dismisses the settings sheet only (library panel stays available).
 
 ### Added

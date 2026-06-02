@@ -32,9 +32,13 @@ final class PlaybackRenderMonitor {
         let work = DispatchWorkItem { [weak self, weak player] in
             guard let self, let player, !self.didReport else { return }
             guard player.rate > 0 else { return }
+            if !item.isPlaybackLikelyToKeepUp && item.isPlaybackBufferEmpty {
+                print("[DEBUG-qos] render_monitor skipped: buffer still empty at check time")
+                return
+            }
 
             let time = item.currentTime()
-            guard CMTimeGetSeconds(time) > 0.5 else { return }
+            guard CMTimeGetSeconds(time) > 0.75 else { return }
 
             let message: String?
             if !self.hasVideoFrame(at: time) {
@@ -56,7 +60,7 @@ final class PlaybackRenderMonitor {
             }
         }
         workItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: work)
     }
 
     private func hasVideoFrame(at time: CMTime) -> Bool {
@@ -111,7 +115,7 @@ final class PlaybackRenderMonitor {
             text += "\n\nDetected video codec: \(codec)."
         }
 
-        text += "\n\nAlternate decoder support is planned for a future update."
+        text += "\n\nTrying bundled compatibility decoder..."
         return text
     }
 }

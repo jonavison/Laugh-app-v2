@@ -14,7 +14,14 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "LaughPlayer"
+            name: "LaughPlayer",
+            resources: [
+                .copy("Resources"),
+                .copy("codec-tools")
+            ],
+            swiftSettings: [
+                .define("DIRECT_BUILD")
+            ]
         )
     ]
 )

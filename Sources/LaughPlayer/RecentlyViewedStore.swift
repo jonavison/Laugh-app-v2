@@ -16,6 +16,7 @@ final class RecentlyViewedStore {
 
     func record(url: URL, kind: DroppedMediaKind) {
         guard kind == .video || kind == .image else { return }
+        guard !isGeneratedFallbackPath(url.standardizedFileURL.path) else { return }
 
         var items = loadStored()
         let path = url.standardizedFileURL.path
@@ -54,6 +55,14 @@ final class RecentlyViewedStore {
               let items = try? JSONDecoder().decode([StoredItem].self, from: data) else {
             return []
         }
-        return items
+        let filtered = items.filter { !isGeneratedFallbackPath($0.path) }
+        if filtered.count != items.count, let encoded = try? JSONEncoder().encode(filtered) {
+            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+        }
+        return filtered
+    }
+
+    private func isGeneratedFallbackPath(_ path: String) -> Bool {
+        path.contains("/LaughPlayerFallback/")
     }
 }
