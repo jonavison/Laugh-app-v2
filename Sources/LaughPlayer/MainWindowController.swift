@@ -92,6 +92,10 @@ final class MainWindowController: NSWindowController {
         playerViewController.refreshWindowAspectFromSettings()
     }
 
+    func advancePlaybackQueue() {
+        playerViewController.advancePlaybackQueue()
+    }
+
     func showDebugInfoPanel() {
         let info = playerViewController.debugInfo(window: window)
         let alert = NSAlert()

@@ -189,6 +189,50 @@ final class MediaLibraryController {
         return root.isUserAdded
     }
 
+    /// True when the browse grid has no folder context (Recents header selected).
+    var showsBrowsePlaceholder: Bool {
+        if case .recentHeader = sidebarMode { return true }
+        return false
+    }
+
+    /// Media files in the current browse folder, in the same order as the grid (respects sort).
+    func mediaFilesInBrowseOrder() -> [LibraryMediaFile] {
+        mediaFiles(in: nil)
+    }
+
+    /// Media in a folder (or the current browse folder when `directory` is nil), using the active sort.
+    func mediaFiles(in directory: URL?) -> [LibraryMediaFile] {
+        let targetDirectory: URL?
+        switch sidebarMode {
+        case .recentHeader:
+            return []
+        case .root:
+            targetDirectory = directory ?? currentDirectoryURL
+        }
+        guard let targetDirectory else { return [] }
+
+        let entries = MediaLibraryScanner.browseEntries(in: targetDirectory)
+        return LibraryBrowseItemSorter.sorted(entries, by: browseSort).compactMap { entry in
+            guard case .media(let file) = entry.kind else { return nil }
+            return file
+        }
+    }
+
+    func entry(at indexPath: IndexPath) -> LibraryBrowseEntry? {
+        let index = indexPath.item
+        guard index >= 0, index < displayedEntries.count else { return nil }
+        return displayedEntries[index]
+    }
+
+    func reloadAfterFilesystemChange() {
+        reloadGrid()
+        onChange?()
+    }
+
+    var canPlayAllInBrowse: Bool {
+        !showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty
+    }
+
     var emptyGridMessage: String {
         switch sidebarMode {
         case .recentHeader:

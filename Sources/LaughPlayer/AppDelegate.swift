@@ -73,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewItem.submenu = buildViewMenu()
         menu.addItem(viewItem)
 
+        let playbackItem = NSMenuItem()
+        playbackItem.submenu = buildPlaybackMenu()
+        menu.addItem(playbackItem)
+
         NSApplication.shared.mainMenu = menu
     }
 
@@ -89,6 +93,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let open = NSMenuItem(title: "Open Video…", action: #selector(openVideo), keyEquivalent: "o")
         open.keyEquivalentModifierMask = [.command]
         menu.addItem(open)
+        return menu
+    }
+
+    private func buildPlaybackMenu() -> NSMenu {
+        let menu = NSMenu(title: "Playback")
+        let next = NSMenuItem(title: "Next in Queue", action: #selector(advancePlaybackQueue), keyEquivalent: "]")
+        next.keyEquivalentModifierMask = [.command]
+        menu.addItem(next)
         return menu
     }
 
@@ -125,5 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showPlaybackDebugInfo() {
         windowController?.showDebugInfoPanel()
+    }
+
+    @objc private func advancePlaybackQueue() {
+        windowController?.advancePlaybackQueue()
     }
 }

@@ -372,20 +372,109 @@ private final class SidebarTableRowView: NSTableRowView {
     }
 }
 
+// MARK: - Browse placeholder (no folder selected)
+
+private final class LibraryBrowsePlaceholderView: NSView {
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "Select a folder to browse")
+    private let hintLabel = NSTextField(labelWithString: "Drop videos or images")
+    private let borderLayer = CAShapeLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
+
+        borderLayer.fillColor = nil
+        borderLayer.lineWidth = 1.5
+        borderLayer.lineDashPattern = [7, 5]
+        borderLayer.strokeColor = NSColor.tertiaryLabelColor.cgColor
+        layer?.addSublayer(borderLayer)
+
+        if let image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Drop files") {
+            let config = NSImage.SymbolConfiguration(pointSize: 34, weight: .light)
+            iconView.image = image.withSymbolConfiguration(config)
+            iconView.image?.isTemplate = true
+        }
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.alignment = .center
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        hintLabel.font = .systemFont(ofSize: 12)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.alignment = .center
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [iconView, titleLabel, hintLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 300),
+            heightAnchor.constraint(equalToConstant: 188),
+            iconView.widthAnchor.constraint(equalToConstant: 44),
+            iconView.heightAnchor.constraint(equalToConstant: 44),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        let inset: CGFloat = 1.5
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        borderLayer.path = CGPath(
+            roundedRect: rect,
+            cornerWidth: 12,
+            cornerHeight: 12,
+            transform: nil
+        )
+        borderLayer.frame = bounds
+    }
+}
+
 // MARK: - Browse grid (main content area)
+
+enum LibraryBrowseContextAction {
+    case play
+    case playNext
+    case addToQueue
+    case rename
+    case showInFinder
+    case remove
+}
 
 final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
     private let controller: MediaLibraryController
     private let backButton = NSButton(title: "", target: nil, action: nil)
     private let forwardButton = NSButton(title: "", target: nil, action: nil)
     private let openButton = NSButton(title: "Open…", target: nil, action: nil)
+    private let playAllButton = NSButton(title: "Play All", target: nil, action: nil)
     private let sortPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let gridScroll = NSScrollView()
-    private let collectionView = NSCollectionView()
+    private let collectionView = LibraryGridCollectionView()
     private let breadcrumbStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "Empty folder")
+    private let browsePlaceholder = LibraryBrowsePlaceholderView()
     private var thumbnailTasks: [IndexPath: URL] = [:]
     var onOpenMediaPanel: (() -> Void)?
+    var onPlayAll: (() -> Void)?
+    var onContextAction: ((LibraryBrowseContextAction, LibraryBrowseEntry) -> Void)?
 
     init(controller: MediaLibraryController) {
         self.controller = controller
@@ -404,10 +493,16 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         backButton.isEnabled = controller.canGoBack
         forwardButton.isEnabled = controller.canGoForward
         collectionView.reloadData()
-        emptyLabel.isHidden = !controller.displayedEntries.isEmpty
-        emptyLabel.stringValue = controller.emptyGridMessage
+        let showPlaceholder = controller.showsBrowsePlaceholder
+        browsePlaceholder.isHidden = !showPlaceholder
+        emptyLabel.isHidden = showPlaceholder || !controller.displayedEntries.isEmpty
+        if !showPlaceholder {
+            emptyLabel.stringValue = controller.emptyGridMessage
+        }
         updateBreadcrumb()
         selectSortInMenu(controller.browseSort)
+        playAllButton.isEnabled = controller.canPlayAllInBrowse
+        playAllButton.isHidden = controller.showsBrowsePlaceholder
     }
 
     func reloadContent() {
@@ -432,6 +527,13 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         openButton.action = #selector(openPressed)
         openButton.translatesAutoresizingMaskIntoConstraints = false
 
+        playAllButton.bezelStyle = .rounded
+        playAllButton.font = .systemFont(ofSize: 11)
+        playAllButton.toolTip = "Play every video and image in this folder, in sort order"
+        playAllButton.target = self
+        playAllButton.action = #selector(playAllPressed)
+        playAllButton.translatesAutoresizingMaskIntoConstraints = false
+
         for option in LibraryBrowseSort.allOptions() {
             sortPopUp.addItem(withTitle: option.menuTitle)
         }
@@ -445,8 +547,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         selectSortInMenu(controller.browseSort)
 
         let layout = NSCollectionViewGridLayout()
-        layout.minimumItemSize = NSSize(width: 120, height: 112)
-        layout.maximumItemSize = NSSize(width: 160, height: 132)
+        layout.minimumItemSize = NSSize(width: 120, height: 124)
+        layout.maximumItemSize = NSSize(width: 160, height: 140)
         layout.minimumInteritemSpacing = 8
         layout.minimumLineSpacing = 10
         layout.margins = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
@@ -454,8 +556,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         collectionView.collectionViewLayout = layout
         collectionView.backgroundColors = [.clear]
         collectionView.isSelectable = true
+        collectionView.allowsMultipleSelection = false
         collectionView.delegate = self
         collectionView.dataSource = self
+        collectionView.contextMenuProvider = { [weak self] event, collectionView in
+            self?.contextMenu(for: event, in: collectionView)
+        }
         collectionView.register(LibraryFolderGridItem.self, forItemWithIdentifier: LibraryFolderGridItem.reuseID)
         collectionView.register(LibraryMediaGridItem.self, forItemWithIdentifier: LibraryMediaGridItem.reuseID)
         collectionView.translatesAutoresizingMaskIntoConstraints = false
@@ -479,13 +585,18 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         emptyLabel.isHidden = true
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        browsePlaceholder.isHidden = true
+        browsePlaceholder.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(backButton)
         addSubview(forwardButton)
         addSubview(openButton)
+        addSubview(playAllButton)
         addSubview(sortPopUp)
         addSubview(gridScroll)
         addSubview(breadcrumbStack)
         addSubview(emptyLabel)
+        addSubview(browsePlaceholder)
     }
 
     private func activateLayout() {
@@ -499,9 +610,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             openButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             openButton.leadingAnchor.constraint(equalTo: forwardButton.trailingAnchor, constant: 12),
 
+            playAllButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            playAllButton.leadingAnchor.constraint(equalTo: openButton.trailingAnchor, constant: 8),
+
             sortPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             sortPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            sortPopUp.leadingAnchor.constraint(greaterThanOrEqualTo: openButton.trailingAnchor, constant: 12),
+            sortPopUp.leadingAnchor.constraint(greaterThanOrEqualTo: playAllButton.trailingAnchor, constant: 12),
 
             gridScroll.topAnchor.constraint(equalTo: backButton.bottomAnchor, constant: 12),
             gridScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -510,6 +624,9 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
 
             emptyLabel.centerXAnchor.constraint(equalTo: gridScroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: gridScroll.centerYAnchor),
+
+            browsePlaceholder.centerXAnchor.constraint(equalTo: gridScroll.centerXAnchor),
+            browsePlaceholder.centerYAnchor.constraint(equalTo: gridScroll.centerYAnchor),
 
             breadcrumbStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             breadcrumbStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
@@ -570,6 +687,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     @objc private func forwardPressed() { controller.goForward() }
     @objc private func openPressed() { onOpenMediaPanel?() }
 
+    @objc private func playAllPressed() { onPlayAll?() }
+
     @objc private func sortChanged() {
         let options = LibraryBrowseSort.allOptions()
         let index = sortPopUp.indexOfSelectedItem
@@ -605,6 +724,18 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         }
     }
 
+    func collectionView(
+        _ collectionView: NSCollectionView,
+        willDisplay item: NSCollectionViewItem,
+        forRepresentedObjectAt indexPath: IndexPath
+    ) {
+        guard let entry = controller.entry(at: indexPath) else {
+            item.view.menu = nil
+            return
+        }
+        item.view.menu = buildContextMenu(for: entry, itemIndex: indexPath.item)
+    }
+
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         guard let indexPath = indexPaths.first else { return }
         let entry = controller.displayedEntries[indexPath.item]
@@ -616,9 +747,127 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             controller.openMedia(file)
         }
     }
+
+    func collectionView(_ collectionView: NSCollectionView, menuFor event: NSEvent) -> NSMenu? {
+        contextMenu(for: event, in: collectionView)
+    }
+
+    private func contextMenu(for event: NSEvent, in collectionView: NSCollectionView) -> NSMenu? {
+        guard let indexPath = indexPath(for: event, in: collectionView),
+              let entry = controller.entry(at: indexPath) else {
+            return nil
+        }
+        return buildContextMenu(for: entry, itemIndex: indexPath.item)
+    }
+
+    private func indexPath(for event: NSEvent, in collectionView: NSCollectionView) -> IndexPath? {
+        let point = collectionView.convert(event.locationInWindow, from: nil)
+        if let indexPath = collectionView.indexPathForItem(at: point) {
+            return indexPath
+        }
+        // Fallback: hit-test item views (grid layout can miss indexPathForItem at edges).
+        for indexPath in collectionView.indexPathsForVisibleItems() {
+            guard let item = collectionView.item(at: indexPath) else { continue }
+            let pointInItem = item.view.convert(event.locationInWindow, from: nil)
+            if item.view.bounds.contains(pointInItem) {
+                return indexPath
+            }
+        }
+        return nil
+    }
+
+    private func buildContextMenu(for entry: LibraryBrowseEntry, itemIndex: Int) -> NSMenu {
+        let hasPlayableMedia = entryHasPlayableMedia(entry)
+        let menu = NSMenu()
+
+        func appendItem(_ title: String, action: Selector, enabled: Bool = true) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.tag = itemIndex
+            item.isEnabled = enabled
+        }
+
+        appendItem("Play", action: #selector(contextMenuPlay(_:)), enabled: hasPlayableMedia)
+        appendItem("Play Next", action: #selector(contextMenuPlayNext(_:)), enabled: hasPlayableMedia)
+        appendItem("Add to Queue", action: #selector(contextMenuAddToQueue(_:)), enabled: hasPlayableMedia)
+        menu.addItem(.separator())
+        appendItem("Rename", action: #selector(contextMenuRename(_:)))
+        appendItem("Show in Finder", action: #selector(contextMenuShowInFinder(_:)))
+        menu.addItem(.separator())
+        appendItem("Remove", action: #selector(contextMenuRemove(_:)))
+        return menu
+    }
+
+    private func entryHasPlayableMedia(_ entry: LibraryBrowseEntry) -> Bool {
+        switch entry.kind {
+        case .media:
+            return true
+        case .folder(let url):
+            return !controller.mediaFiles(in: url).isEmpty
+        }
+    }
+
+    private func entry(for menuItem: NSMenuItem) -> LibraryBrowseEntry? {
+        controller.entry(at: IndexPath(item: menuItem.tag, section: 0))
+    }
+
+    private func performContextAction(_ action: LibraryBrowseContextAction, sender: NSMenuItem) {
+        guard let entry = entry(for: sender) else { return }
+        onContextAction?(action, entry)
+    }
+
+    @objc private func contextMenuPlay(_ sender: NSMenuItem) { performContextAction(.play, sender: sender) }
+    @objc private func contextMenuPlayNext(_ sender: NSMenuItem) { performContextAction(.playNext, sender: sender) }
+    @objc private func contextMenuAddToQueue(_ sender: NSMenuItem) { performContextAction(.addToQueue, sender: sender) }
+    @objc private func contextMenuRename(_ sender: NSMenuItem) { performContextAction(.rename, sender: sender) }
+    @objc private func contextMenuShowInFinder(_ sender: NSMenuItem) { performContextAction(.showInFinder, sender: sender) }
+    @objc private func contextMenuRemove(_ sender: NSMenuItem) { performContextAction(.remove, sender: sender) }
+}
+
+// MARK: - Collection view (explicit right-click)
+
+private final class LibraryGridCollectionView: NSCollectionView {
+    var contextMenuProvider: ((NSEvent, NSCollectionView) -> NSMenu?)?
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let menu = contextMenuProvider?(event, self) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuProvider?(event, self) ?? super.menu(for: event)
+    }
 }
 
 // MARK: - Grid items
+
+private final class LibraryGridItemView: NSView {
+    override func rightMouseDown(with event: NSEvent) {
+        if let menu {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        menu ?? super.menu(for: event)
+    }
+}
+
+private func configureLibraryGridNameLabel(_ label: NSTextField, fontSize: CGFloat) {
+    label.font = .systemFont(ofSize: fontSize)
+    label.alignment = .center
+    label.lineBreakMode = .byWordWrapping
+    label.maximumNumberOfLines = 2
+    label.cell?.wraps = true
+    label.cell?.usesSingleLineMode = false
+    label.cell?.truncatesLastVisibleLine = false
+    label.translatesAutoresizingMaskIntoConstraints = false
+}
 
 private final class LibraryFolderGridItem: NSCollectionViewItem {
     static let reuseID = NSUserInterfaceItemIdentifier("LibraryFolderGridItem")
@@ -627,7 +876,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem {
     private let nameLabel = NSTextField(labelWithString: "")
 
     override func loadView() {
-        view = NSView()
+        view = LibraryGridItemView()
         view.wantsLayer = true
         view.layer?.cornerRadius = 8
 
@@ -639,11 +888,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem {
             iconView.contentTintColor = .secondaryLabelColor
         }
 
-        nameLabel.font = .systemFont(ofSize: 11)
-        nameLabel.alignment = .center
-        nameLabel.lineBreakMode = .byTruncatingMiddle
-        nameLabel.maximumNumberOfLines = 2
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureLibraryGridNameLabel(nameLabel, fontSize: 11)
 
         view.addSubview(iconView)
         view.addSubview(nameLabel)
@@ -651,8 +896,8 @@ private final class LibraryFolderGridItem: NSCollectionViewItem {
         NSLayoutConstraint.activate([
             iconView.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
             iconView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 72),
-            iconView.heightAnchor.constraint(equalToConstant: 72),
+            iconView.widthAnchor.constraint(equalToConstant: 68),
+            iconView.heightAnchor.constraint(equalToConstant: 68),
             nameLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 4),
             nameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
             nameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
@@ -674,7 +919,7 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
     private var loadToken = UUID()
 
     override func loadView() {
-        view = NSView()
+        view = LibraryGridItemView()
         view.wantsLayer = true
         view.layer?.cornerRadius = 8
         view.layer?.masksToBounds = true
@@ -691,11 +936,7 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
         }
         playButton.translatesAutoresizingMaskIntoConstraints = false
 
-        nameLabel.font = .systemFont(ofSize: 10)
-        nameLabel.alignment = .center
-        nameLabel.lineBreakMode = .byTruncatingMiddle
-        nameLabel.maximumNumberOfLines = 2
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureLibraryGridNameLabel(nameLabel, fontSize: 10)
 
         view.addSubview(thumbnailView)
         view.addSubview(playButton)
@@ -705,7 +946,7 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
             thumbnailView.topAnchor.constraint(equalTo: view.topAnchor),
             thumbnailView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             thumbnailView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            thumbnailView.heightAnchor.constraint(equalToConstant: 88),
+            thumbnailView.heightAnchor.constraint(equalToConstant: 84),
             playButton.centerXAnchor.constraint(equalTo: thumbnailView.centerXAnchor),
             playButton.centerYAnchor.constraint(equalTo: thumbnailView.centerYAnchor),
             nameLabel.topAnchor.constraint(equalTo: thumbnailView.bottomAnchor, constant: 4),

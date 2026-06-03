@@ -13,7 +13,7 @@ LaughPlayer aims for broad playback (near-VLC) but native macOS decoding cannot 
 1. **Product goal:** Near-VLC breadth over time, not “native checklist growth.”
 2. **Rollout rule:** **IncrementalCodecRollout** — one **VerifiedPlaybackPath** per change; no bulk matrix updates.
 3. **Verification:** **PlaybackVerificationRecord** required (fixture clip + manual play + Cmd+Shift+D snapshot in commit/PR notes).
-4. **Engine split:** **NativePlaybackEngine** stays try-then-fail on what macOS provides; new profiles that fail natively go to **AlternateDecoder** (FFmpeg, opt-in) only after the same verification bar.
+4. **Engine split:** **NativePlaybackEngine** (**SystemDecodeStack** via AVFoundation) stays try-then-fail on what macOS provides; new profiles that fail natively go to **AlternateDecoder** (**CompatibilityRemux** via bundled FFmpeg on direct builds) only after the same verification bar.
 
 ## Consequences
 
@@ -26,3 +26,4 @@ LaughPlayer aims for broad playback (near-VLC) but native macOS decoding cannot 
 - **Longer native fourcc list:** Does not fix OS decode limits; rejected as primary strategy.
 - **Big-bang FFmpeg integration then document:** Hard to triage regressions; rejected.
 - **Automated smoke tests first:** Valuable later; not the initial gate per team preference.
+- **Direct VideoToolbox decode pipeline:** Does not add demux/container coverage beyond AVFoundation; high engineering cost; rejected in favor of **CompatibilityRemux** then replay through **SystemDecodeStack** (see ADR 0003).

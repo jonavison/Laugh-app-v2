@@ -25,8 +25,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let openButton = NSButton(title: "Open Media", target: nil, action: nil)
     private let hintLabel = NSTextField(labelWithString: "Drop video or image to open. Drop video in bottom-right to queue.")
     private let imageSurfaceView = ImageSurfaceView()
-    private let controlsContainer = NSVisualEffectView()
-    private let imageControlsContainer = NSVisualEffectView()
+    private let controlsContainer = RoundedPlaybackBarView()
+    private let imageControlsContainer = RoundedPlaybackBarView()
     private let imageControlsStack = NSStackView()
     private let imageZoomOutButton = NSButton(title: "Zoom −", target: nil, action: nil)
     private let imageZoomInButton = NSButton(title: "Zoom +", target: nil, action: nil)
@@ -45,14 +45,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let transportSpeedLeftCluster = NSStackView()
     private let transportSpeedLeftSpacer = NSView()
     private let playbackSpeedSlowLabel = NSTextField(labelWithString: "")
-    private let previousButton = NSButton(title: "Previous", target: nil, action: nil)
+    private let queuePreviousButton = NSButton(title: "", target: nil, action: nil)
+    private let speedStepDownButton = NSButton(title: "", target: nil, action: nil)
     private let playPauseButton = NSButton(title: "Play", target: nil, action: nil)
     private let transportSpeedRightCluster = NSStackView()
-    private let nextButton = NSButton(title: "Next", target: nil, action: nil)
+    private let speedStepUpButton = NSButton(title: "", target: nil, action: nil)
+    private let queueNextButton = NSButton(title: "", target: nil, action: nil)
     private let playbackSpeedFastLabel = NSTextField(labelWithString: "")
     private let transportSpeedRightSpacer = NSView()
     private let queueButton = NSButton(title: "Queue", target: nil, action: nil)
     private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
+    private let playbackAccessoryCluster = NSStackView()
+    private let imageAccessoryCluster = NSStackView()
     private let libraryButton = NSButton(title: "Library", target: nil, action: nil)
     private let mediaLibraryController = MediaLibraryController()
     private lazy var librarySidebar = LibrarySidebarView(controller: mediaLibraryController)
@@ -98,8 +102,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var playToEndObserver: NSObjectProtocol?
     private var preferredPlaybackRate: Float = 1.0
     private var suppressPlaybackSourceAction = false
-    private var queue: [URL] = []
+    private var queue: [PlaybackQueueItem] = []
     private var playbackHistory: [URL] = []
+    private var suppressPlaybackHistoryAppend = false
+    private var queuePopover: NSPopover?
+    private var queueListViewController: PlaybackQueueListViewController?
     private var failedToPlayObserver: NSObjectProtocol?
     private var playbackStalledObserver: NSObjectProtocol?
     private var newAccessLogEntryObserver: NSObjectProtocol?
@@ -294,12 +301,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         configureTransportSpeedClusterSpacer(transportSpeedLeftSpacer)
         transportSpeedLeftCluster.addArrangedSubview(transportSpeedLeftSpacer)
         transportSpeedLeftCluster.addArrangedSubview(playbackSpeedSlowLabel)
-        transportSpeedLeftCluster.addArrangedSubview(previousButton)
+        transportSpeedLeftCluster.addArrangedSubview(speedStepDownButton)
 
         transportSpeedRightCluster.orientation = .horizontal
         transportSpeedRightCluster.alignment = .centerY
         transportSpeedRightCluster.spacing = 1
-        transportSpeedRightCluster.addArrangedSubview(nextButton)
+        transportSpeedRightCluster.addArrangedSubview(speedStepUpButton)
         transportSpeedRightCluster.addArrangedSubview(playbackSpeedFastLabel)
         configureTransportSpeedClusterSpacer(transportSpeedRightSpacer)
         transportSpeedRightCluster.addArrangedSubview(transportSpeedRightSpacer)
@@ -318,8 +325,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         playbackCenterClusterStack.orientation = .horizontal
         playbackCenterClusterStack.alignment = .centerY
-        playbackCenterClusterStack.distribution = .equalSpacing
+        playbackCenterClusterStack.distribution = .fill
         playbackCenterClusterStack.spacing = playbackControlClusterSpacing
+        playbackCenterClusterStack.setContentHuggingPriority(.required, for: .horizontal)
+        playbackCenterClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        transportClusterStack.setContentHuggingPriority(.required, for: .horizontal)
+        transportClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        transportSpeedLeftCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        transportSpeedRightCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         bottomLeftControlsStack.orientation = .horizontal
         bottomLeftControlsStack.alignment = .centerY
@@ -506,6 +520,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             guard let self else { return }
             self.delegate?.playerViewControllerDidRequestOpenVideo(self)
         }
+        libraryBrowse.onPlayAll = { [weak self] in
+            self?.playAllFromCurrentLibraryFolder()
+        }
+        libraryBrowse.onContextAction = { [weak self] action, entry in
+            self?.handleLibraryBrowseContextAction(action, entry: entry)
+        }
         playbackMiniPreview.isHidden = true
         playbackMiniPreview.translatesAutoresizingMaskIntoConstraints = false
         playbackMiniPreview.onExpand = { [weak self] in
@@ -613,39 +633,46 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         renderMonitor.videoCodecFourCC = nil
         updateVideoInfoLabels()
 
-        if replaceCurrent, let previousMediaURL, !isGeneratedFallbackURL(previousMediaURL) {
+        if replaceCurrent,
+           !suppressPlaybackHistoryAppend,
+           let previousMediaURL,
+           !isGeneratedFallbackURL(previousMediaURL) {
             playbackHistory.append(previousMediaURL)
         }
 
         preparePlayerForVideoSwitch()
 
         Task {
+            let route = await PlaybackRoutePlanner.route(for: url)
+            await MainActor.run {
+                guard generation == self.videoLoadGeneration else { return }
+                switch route {
+                case .compatibilityRemux(let reason):
+                    print("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
+                    self.startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
+                case .nativeAVFoundation:
+                    print("[DEBUG-route] planned native path=\(url.path)")
+                    self.startNativePlayback(url: url, generation: generation)
+                }
+            }
+        }
+    }
+
+    private func startPlannedCompatibilityPlayback(sourceURL: URL, generation: Int) {
+        attemptFFmpegFallbackIfNeeded(plannedRoute: true, generation: generation)
+    }
+
+    private func startNativePlayback(url: URL, generation: Int) {
+        Task {
             let result = await VideoAssetLoader.resolvePlayableAsset(for: url)
-            let preflightCodec = await Self.probePrimaryVideoFourCC(assetResult: result)
             await MainActor.run {
                 guard generation == self.videoLoadGeneration else { return }
                 switch result {
                 case .success(let asset):
-                    if self.shouldPreferOptimisticFallback(codec: preflightCodec),
-                       !self.isGeneratedFallbackURL(url) {
-                        if let cached = FFmpegVideoFallback.cachedPlayableURL(for: url) {
-                            print("[DEBUG-fallback] optimistic cache hit path=\(url.path)")
-                            self.resolveAndAttach(playableURL: cached, sourceURL: url, generation: generation)
-                            return
-                        }
-                        if let preflightCodec {
-                            print("[DEBUG-fallback] optimistic route codec=\(preflightCodec) path=\(url.path)")
-                            self.showCompatibilityFailure(
-                                "Detected codec \(preflightCodec). Routing directly to bundled compatibility decoder."
-                            )
-                        }
-                        self.attemptFFmpegFallbackIfNeeded()
-                        return
-                    }
                     self.attachResolvedVideo(asset: asset, url: url, generation: generation)
                 case .failure(let failure):
-                    print("[DEBUG-playback] open failed: \(failure.debugDetails)")
-                    self.showCompatibilityFailure(failure.userMessage)
+                    print("[DEBUG-playback] native open failed: \(failure.debugDetails)")
+                    self.handleNativePlaybackUnavailable(failure.userMessage)
                 }
             }
         }
@@ -956,7 +983,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastLoadRequestURL = url.path
         lastLoadRequestAt = now
         print("[DEBUG-playback] Loading image: \(url.path)")
-        if let currentMediaURL {
+        if !suppressPlaybackHistoryAppend, let currentMediaURL {
             playbackHistory.append(currentMediaURL)
         }
         currentMediaURL = url
@@ -1096,9 +1123,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 var message = "This video could not be played.\n\n\(item.error?.localizedDescription ?? "Playback failed.")"
                 message += "\n\n(\(details))"
                 if ext == "mkv" {
-                    message += "\n\nThis MKV may use a codec macOS cannot decode natively (common with HEVC 10-bit). Try remuxing to MP4 with ffmpeg -c copy -tag:v hvc1."
+                    message += "\n\nThis MKV may use a codec macOS cannot decode natively (common with HEVC 10-bit)."
                 }
-                self.showCompatibilityFailure(message)
+                self.handleNativePlaybackUnavailable(message)
             }
         case .unknown:
             break
@@ -1108,19 +1135,357 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func appendToQueue(_ urls: [URL]) {
-        let videos = MediaKindDetector.filterVideos(urls)
-        let skipped = urls.count - videos.count
-        if videos.isEmpty {
+        var items: [PlaybackQueueItem] = []
+        var skipped = 0
+        for url in urls {
+            let kind = MediaKindDetector.kind(for: url)
+            if kind == .video {
+                items.append(PlaybackQueueItem(url: url, kind: kind))
+            } else {
+                skipped += 1
+            }
+        }
+        if items.isEmpty {
             showUnsupportedFileMessage("Queue accepts videos only. Drop images in the main area.")
             return
         }
         if skipped > 0 {
-            showCodecWarning("Skipped \(skipped) non-video file(s). Queue is video-only.")
+            showCodecWarning("Skipped \(skipped) non-video file(s). Queue is for videos only.")
         }
-        queue.append(contentsOf: videos)
+        appendPlaybackQueueItems(items)
+    }
+
+    private func appendPlaybackQueueItems(_ items: [PlaybackQueueItem]) {
+        guard !items.isEmpty else { return }
+        queue.append(contentsOf: items)
+        syncQueueChrome()
+    }
+
+    private func insertPlaybackQueueItemsAtFront(_ items: [PlaybackQueueItem]) {
+        guard !items.isEmpty else { return }
+        queue.insert(contentsOf: items, at: 0)
+        syncQueueChrome()
+    }
+
+    private func playbackQueueItems(for files: [LibraryMediaFile]) -> [PlaybackQueueItem] {
+        files.map { PlaybackQueueItem(url: $0.url, kind: $0.kind) }
+    }
+
+    private func removeURLsFromQueue(_ urls: Set<URL>) {
+        let standardized = Set(urls.map(\.standardizedFileURL))
+        queue.removeAll { standardized.contains($0.url.standardizedFileURL) }
+        syncQueueChrome()
+    }
+
+    private func remapQueueURL(from oldURL: URL, to newURL: URL) {
+        let old = oldURL.standardizedFileURL
+        let new = newURL.standardizedFileURL
+        queue = queue.map { item in
+            guard item.url.standardizedFileURL == old else { return item }
+            return PlaybackQueueItem(url: new, kind: item.kind)
+        }
+        syncQueueChrome()
+    }
+
+    func handleLibraryBrowseContextAction(_ action: LibraryBrowseContextAction, entry: LibraryBrowseEntry) {
+        switch action {
+        case .play:
+            handleLibraryBrowsePlay(entry)
+        case .playNext:
+            handleLibraryBrowsePlayNext(entry)
+        case .addToQueue:
+            handleLibraryBrowseAddToQueue(entry)
+        case .rename:
+            handleLibraryBrowseRename(entry)
+        case .showInFinder:
+            handleLibraryBrowseShowInFinder(entry)
+        case .remove:
+            handleLibraryBrowseRemove(entry)
+        }
+    }
+
+    private func handleLibraryBrowsePlay(_ entry: LibraryBrowseEntry) {
+        switch entry.kind {
+        case .media(let file):
+            queue.removeAll()
+            playbackHistory.removeAll()
+            dismissSidePanelsForFocusedPlayback()
+            openQueuedMedia(file, replaceVideo: true)
+            syncQueueChrome()
+        case .folder(let url):
+            let files = mediaLibraryController.mediaFiles(in: url)
+            guard !files.isEmpty else { return }
+            playAllMedia(files)
+        }
+    }
+
+    private func handleLibraryBrowsePlayNext(_ entry: LibraryBrowseEntry) {
+        let files: [LibraryMediaFile]
+        switch entry.kind {
+        case .media(let file):
+            files = [file]
+        case .folder(let url):
+            files = mediaLibraryController.mediaFiles(in: url)
+        }
+        guard !files.isEmpty else { return }
+        let items = playbackQueueItems(for: files)
+        if activeMediaKind == .empty {
+            playAllMedia(files)
+        } else {
+            insertPlaybackQueueItemsAtFront(items)
+        }
+    }
+
+    private func handleLibraryBrowseAddToQueue(_ entry: LibraryBrowseEntry) {
+        let files: [LibraryMediaFile]
+        switch entry.kind {
+        case .media(let file):
+            files = [file]
+        case .folder(let url):
+            files = mediaLibraryController.mediaFiles(in: url)
+        }
+        guard !files.isEmpty else { return }
+        appendPlaybackQueueItems(playbackQueueItems(for: files))
+    }
+
+    private func handleLibraryBrowseShowInFinder(_ entry: LibraryBrowseEntry) {
+        guard let url = LibraryBrowseFileActions.itemURL(for: entry) else { return }
+        LibraryBrowseFileActions.showInFinder(url: url)
+    }
+
+    private func handleLibraryBrowseRename(_ entry: LibraryBrowseEntry) {
+        guard let url = LibraryBrowseFileActions.itemURL(for: entry) else { return }
+        guard let newName = LibraryBrowseFileActions.promptRename(currentName: entry.name) else { return }
+        guard newName != entry.name else { return }
+
+        do {
+            let newURL = try LibraryBrowseFileActions.renameItem(at: url, to: newName)
+            remapQueueURL(from: url, to: newURL)
+            if currentMediaURL?.standardizedFileURL == url.standardizedFileURL {
+                currentMediaURL = newURL
+            }
+            mediaLibraryController.reloadAfterFilesystemChange()
+        } catch {
+            LibraryBrowseFileActions.presentError(error, title: "Could Not Rename")
+        }
+    }
+
+    private func handleLibraryBrowseRemove(_ entry: LibraryBrowseEntry) {
+        guard let url = LibraryBrowseFileActions.itemURL(for: entry) else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            mediaLibraryController.reloadAfterFilesystemChange()
+            return
+        }
+
+        guard LibraryBrowseFileActions.confirmRemove(itemName: entry.name, isDirectory: isDirectory.boolValue) else {
+            return
+        }
+
+        do {
+            try LibraryBrowseFileActions.moveToTrash(url: url)
+            if isDirectory.boolValue {
+                let files = mediaLibraryController.mediaFiles(in: url)
+                removeURLsFromQueue(Set(files.map(\.url)))
+            } else {
+                removeURLsFromQueue([url])
+            }
+            if currentMediaURL?.standardizedFileURL == url.standardizedFileURL {
+                suspendPlayerOutputForStillOrEmpty()
+                showEmptySurface()
+            }
+            mediaLibraryController.reloadAfterFilesystemChange()
+        } catch {
+            LibraryBrowseFileActions.presentError(error, title: "Could Not Remove")
+        }
+    }
+
+    func playAllFromCurrentLibraryFolder() {
+        let files = mediaLibraryController.mediaFilesInBrowseOrder()
+        guard !files.isEmpty else { return }
+        playAllMedia(files)
+    }
+
+    func advancePlaybackQueue() {
+        playNextInQueue()
+    }
+
+    private func playAllMedia(_ files: [LibraryMediaFile]) {
+        guard let first = files.first else { return }
+        playbackHistory.removeAll()
+        queue = files.dropFirst().map { PlaybackQueueItem(url: $0.url, kind: $0.kind) }
+        dismissSidePanelsForFocusedPlayback()
+        openQueuedMedia(first, replaceVideo: true)
+        syncQueueChrome()
+    }
+
+    private func playNextInQueue() {
+        guard let next = queue.first else { return }
+        queue.removeFirst()
+        openQueuedMedia(LibraryMediaFile(url: next.url, kind: next.kind), replaceVideo: true)
+        syncQueueChrome()
+    }
+
+    private func playPreviousInQueue() {
+        guard let previousURL = playbackHistory.popLast() else { return }
+
+        if let current = currentMediaURL {
+            let kind = MediaKindDetector.kind(for: current)
+            if kind == .video || kind == .image {
+                queue.insert(PlaybackQueueItem(url: current, kind: kind), at: 0)
+            }
+        }
+
+        suppressPlaybackHistoryAppend = true
+        defer { suppressPlaybackHistoryAppend = false }
+
+        switch MediaKindDetector.kind(for: previousURL) {
+        case .video:
+            loadVideo(url: previousURL, replaceCurrent: true)
+        case .image:
+            loadImage(url: previousURL)
+        case .unsupported:
+            break
+        }
+        syncQueueChrome()
+    }
+
+    private func updateQueueTransportButtons() {
+        let show = !queue.isEmpty || !playbackHistory.isEmpty
+        queuePreviousButton.isHidden = !show
+        queueNextButton.isHidden = !show
+        queuePreviousButton.isEnabled = !playbackHistory.isEmpty
+        queueNextButton.isEnabled = !queue.isEmpty
+    }
+
+    private func openQueuedMedia(_ file: LibraryMediaFile, replaceVideo: Bool) {
+        switch file.kind {
+        case .video:
+            loadVideo(url: file.url, replaceCurrent: replaceVideo)
+        case .image:
+            loadImage(url: file.url)
+        case .unsupported:
+            break
+        }
+    }
+
+    private func syncQueueChrome() {
+        updateQueueTransportButtons()
+        updateQueueButtonState()
+        refreshQueuePopoverIfNeeded()
         if activeMediaKind == .video {
+            detachImageAccessoryClusterFromImageControls()
             rebuildControlsForTier(currentControlTier)
+            return
         }
+        if activeMediaKind == .image {
+            attachImageAccessoryClusterToImageControls()
+        }
+    }
+
+    private func attachImageAccessoryClusterToImageControls() {
+        moveQueueButtonToImageAccessoryCluster()
+        guard !imageControlsStack.arrangedSubviews.contains(imageAccessoryCluster) else { return }
+        imageControlsStack.addArrangedSubview(imageAccessoryCluster)
+    }
+
+    private func detachImageAccessoryClusterFromImageControls() {
+        guard imageControlsStack.arrangedSubviews.contains(imageAccessoryCluster) else { return }
+        imageControlsStack.removeArrangedSubview(imageAccessoryCluster)
+        imageAccessoryCluster.removeFromSuperview()
+        moveQueueButtonToPlaybackAccessoryCluster()
+    }
+
+    private func updateQueueButtonState() {
+        let hasListContent = currentMediaURL != nil || !queue.isEmpty
+        queueButton.isEnabled = hasListContent
+        queueButton.alphaValue = hasListContent ? 1 : 0.45
+    }
+
+    private func buildQueueListRows() -> [PlaybackQueueListRow] {
+        var rows: [PlaybackQueueListRow] = []
+        if let url = currentMediaURL {
+            let kind = MediaKindDetector.kind(for: url)
+            let kindLabel = kind == .image ? "Image" : "Video"
+            rows.append(
+                PlaybackQueueListRow(
+                    sectionTitle: "Now Playing · \(kindLabel)",
+                    fileName: url.lastPathComponent,
+                    queueItem: nil
+                )
+            )
+        }
+        if queue.isEmpty, rows.isEmpty {
+            rows.append(
+                PlaybackQueueListRow(
+                    sectionTitle: "Queue",
+                    fileName: "No items queued",
+                    queueItem: nil
+                )
+            )
+        } else {
+            for (index, item) in queue.enumerated() {
+                let kindLabel = item.kind == .image ? "Image" : "Video"
+                rows.append(
+                    PlaybackQueueListRow(
+                        sectionTitle: "Up Next \(index + 1) · \(kindLabel)",
+                        fileName: item.url.lastPathComponent,
+                        queueItem: item
+                    )
+                )
+            }
+        }
+        return rows
+    }
+
+    private func playQueuedItem(_ item: PlaybackQueueItem) {
+        let file = LibraryMediaFile(url: item.url, kind: item.kind)
+        guard let index = queue.firstIndex(where: { $0 == item }) else {
+            openQueuedMedia(file, replaceVideo: true)
+            return
+        }
+        queue.removeSubrange(0...index)
+        openQueuedMedia(file, replaceVideo: true)
+        syncQueueChrome()
+    }
+
+    private func toggleQueuePopover() {
+        if queuePopover?.isShown == true {
+            closeQueuePopover()
+            return
+        }
+        showQueuePopover()
+    }
+
+    private func showQueuePopover() {
+        closeQueuePopover()
+
+        let listController = PlaybackQueueListViewController()
+        listController.setRows(buildQueueListRows())
+        listController.onSelectQueueItem = { [weak self] item in
+            self?.playQueuedItem(item)
+            self?.closeQueuePopover()
+        }
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = listController
+        popover.show(relativeTo: queueButton.bounds, of: queueButton, preferredEdge: .maxY)
+
+        queuePopover = popover
+        queueListViewController = listController
+    }
+
+    private func closeQueuePopover() {
+        queuePopover?.close()
+        queuePopover = nil
+        queueListViewController = nil
+    }
+
+    private func refreshQueuePopoverIfNeeded() {
+        guard queuePopover?.isShown == true, let listController = queueListViewController else { return }
+        listController.setRows(buildQueueListRows())
     }
 
     @discardableResult
@@ -1200,6 +1565,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         raisePlaybackChromeToFront()
         updatePlaybackBarWidth()
         applyResponsiveControlsLayout()
+        syncQueueChrome()
     }
 
     private func showImageChrome() {
@@ -1215,6 +1581,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateSettingsContentBottomInset()
         raisePlaybackChromeToFront()
         updatePlaybackBarWidth()
+        syncQueueChrome()
     }
 
     private func setQueueDropZoneVisibleForDrag(_ visible: Bool) {
@@ -1464,37 +1831,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return String(cString: chars)
     }
 
-    private static func probePrimaryVideoFourCC(assetResult: VideoAssetLoader.ResolveResult) async -> String? {
-        guard case .success(let asset) = assetResult else { return nil }
-        do {
-            let tracks = try await asset.loadTracks(withMediaType: .video)
-            guard let track = tracks.first else { return nil }
-            let formatDescriptions = try await track.load(.formatDescriptions)
-            guard let formatDesc = formatDescriptions.first else { return nil }
-            let code = CMFormatDescriptionGetMediaSubType(formatDesc)
-            return fourCCStringStatic(code)
-        } catch {
-            return nil
-        }
-    }
-
-    private static func fourCCStringStatic(_ code: FourCharCode) -> String {
-        let n = code.bigEndian
-        let chars: [CChar] = [
-            CChar((n >> 24) & 0xff),
-            CChar((n >> 16) & 0xff),
-            CChar((n >> 8) & 0xff),
-            CChar(n & 0xff),
-            0
-        ]
-        return String(cString: chars)
-    }
-
-    private func shouldPreferOptimisticFallback(codec: String?) -> Bool {
-        guard let codec else { return false }
-        return Self.optimisticFallbackCodecs.contains(codec.lowercased())
-    }
-
     private func shouldMonitorVideoRendering(codec: String?) -> Bool {
         guard let codec = codec?.lowercased() else { return false }
         if Self.optimisticFallbackCodecs.contains(codec) { return false }
@@ -1548,6 +1884,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         raisePlaybackChromeToFront()
     }
 
+    /// When bundled ffmpeg is available, remux and retry; otherwise show the user-facing explanation.
+    private func handleNativePlaybackUnavailable(_ message: String) {
+        guard PlaybackRuntime.canUseBundledCodecStack else {
+            showCompatibilityFailure(message)
+            return
+        }
+        guard let inputURL = currentMediaURL, !isGeneratedFallbackURL(inputURL) else {
+            showCompatibilityFailure(message)
+            return
+        }
+        if FFmpegVideoFallback.isAvailable() {
+            attemptFFmpegFallbackIfNeeded()
+        } else {
+            showCompatibilityFailure(message)
+        }
+    }
+
     private func hideCompatibilityFailure() {
         compatibilityBanner.hideBanner()
     }
@@ -1565,16 +1918,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         attemptFFmpegFallbackIfNeeded()
     }
 
-    private func attemptFFmpegFallbackIfNeeded() {
+    private func attemptFFmpegFallbackIfNeeded(plannedRoute: Bool = false, generation: Int? = nil) {
         guard !fallbackInProgress else { return }
         guard let inputURL = currentMediaURL else { return }
         guard !isGeneratedFallbackURL(inputURL) else { return }
-        if let cached = FFmpegVideoFallback.cachedPlayableURL(for: inputURL) {
-            print("[DEBUG-fallback] using cached remux path=\(cached.path)")
-            let generation = videoLoadGeneration
-            resolveAndAttach(playableURL: cached, sourceURL: inputURL, generation: generation)
-            return
-        }
+
+        let activeGeneration = generation ?? videoLoadGeneration
+
         guard FFmpegVideoFallback.isAvailable() else {
             let lookup = BundledCodecTools.diagnosticSummary(for: "ffmpeg")
             showCompatibilityFailure(
@@ -1587,49 +1937,122 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             preparePlayerForVideoSwitch()
         }
         FFmpegVideoFallback.terminateRunningProcesses()
+
+        let resumeTime = currentPlayerItemMatchesSource(inputURL) ? player.currentTime() : .zero
+        let rawResumeTargetSec = CMTimeGetSeconds(resumeTime)
+
+        let outputURL: URL
+        switch FFmpegVideoFallback.beginRemux(inputURL: inputURL) {
+        case .cacheHit(let cachedURL):
+            print("[DEBUG-fallback] cache hit path=\(cachedURL.path)")
+            if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
+                pendingStartTimeAfterLoad = resumeTime
+            }
+            resolveAndAttach(playableURL: cachedURL, sourceURL: inputURL, generation: activeGeneration)
+            return
+        case .failed:
+            showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
+            return
+        case .progressive(let progressiveOutput):
+            outputURL = progressiveOutput
+        }
+
         fallbackInProgress = true
         fallbackSessionToken += 1
         let sessionToken = fallbackSessionToken
-        let resumeTime = currentPlayerItemMatchesSource(inputURL) ? player.currentTime() : .zero
-        let rawResumeTargetSec = CMTimeGetSeconds(resumeTime)
-        let resumeTargetSec = rawResumeTargetSec.isFinite ? max(0, rawResumeTargetSec) : 0
         fallbackStartedAt = CFAbsoluteTimeGetCurrent()
         fallbackResumeTargetSec = rawResumeTargetSec.isFinite ? max(0, rawResumeTargetSec) : nil
-        fallbackLastMethod = nil
+        fallbackLastMethod = "remux-progressive"
         updatePlayPauseButtonIcon()
-        showCompatibilityFailure("Trying compatibility fallback decoder...\n\nConverting this file for playback.")
-        print(String(format: "[DEBUG-fallback] started for %@ at %.3fs", inputURL.path, resumeTargetSec))
 
-        Task.detached(priority: .userInitiated) {
+        var showedPreparingBanner = false
+        let preparingBannerWork = DispatchWorkItem { [weak self] in
+            guard let self, sessionToken == self.fallbackSessionToken else { return }
+            showedPreparingBanner = true
+            let text = plannedRoute ? "Preparing playback…" : "Trying compatibility fallback decoder…"
+            self.showCompatibilityFailure(text)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: preparingBannerWork)
+
+        print("[DEBUG-fallback] progressive remux poll output=\(outputURL.path)")
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            var attached = false
+            let pollIntervalNs: UInt64 = 200_000_000
+            let maxWaitNs: UInt64 = 600 * 1_000_000_000
+            var waited: UInt64 = 0
+
+            while waited < maxWaitNs {
+                if Task.isCancelled { return }
+
+                let stillValid = await MainActor.run {
+                    sessionToken == self.fallbackSessionToken
+                        && activeGeneration == self.videoLoadGeneration
+                }
+                guard stillValid else { return }
+
+                if await FFmpegVideoFallback.isReadableEnoughForPlayback(url: outputURL), !attached {
+                    attached = true
+                    let waitedMs = Double(waited) / 1_000_000
+                    await MainActor.run {
+                        preparingBannerWork.cancel()
+                        self.fallbackInProgress = false
+                        self.fallbackLastMethod = "remux-progressive"
+                        self.fallbackConvertedOutputPaths.insert(outputURL.path)
+                        self.hideCompatibilityFailure()
+                        if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
+                            self.pendingStartTimeAfterLoad = resumeTime
+                        }
+                        print("[DEBUG-fallback] progressive playback start waitedMs=\(waitedMs)")
+                        self.resolveAndAttach(
+                            playableURL: outputURL,
+                            sourceURL: inputURL,
+                            generation: activeGeneration
+                        )
+                    }
+                }
+
+                let remuxRunning = FFmpegVideoFallback.isRemuxing(outputURL: outputURL)
+                if attached && !remuxRunning { return }
+                if !remuxRunning && !attached {
+                    break
+                }
+
+                try? await Task.sleep(nanoseconds: pollIntervalNs)
+                waited += pollIntervalNs
+            }
+
+            if attached { return }
+
             let result = FFmpegVideoFallback.convertToPlayable(inputURL: inputURL)
             await MainActor.run {
-                guard sessionToken == self.fallbackSessionToken else {
-                    print("[DEBUG-fallback] ignored stale conversion result (session mismatch)")
-                    return
-                }
+                preparingBannerWork.cancel()
+                guard sessionToken == self.fallbackSessionToken else { return }
                 self.fallbackInProgress = false
                 guard let result else {
-                    print("[DEBUG-fallback] conversion failed for \(inputURL.path)")
-                    self.showCompatibilityFailure(
-                        "Native playback failed and fast remux fallback could not convert this file.\n\nHeavy transcode is disabled by default to avoid high CPU spikes."
-                    )
+                    if showedPreparingBanner || plannedRoute {
+                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
+                    }
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
                     self.fallbackLastMethod = nil
                     return
                 }
                 self.fallbackLastMethod = result.method
-                print(String(format: "[DEBUG-fallback] conversion succeeded method=%@ conversion=%.2fms output=%@", result.method, result.elapsedMs, result.outputURL.path))
                 self.fallbackConvertedOutputPaths.insert(result.outputURL.path)
-                self.showCompatibilityFailure("Opened with compatibility fallback (\(result.method)).")
+                if !plannedRoute {
+                    self.showCompatibilityFailure("Opened with compatibility fallback (\(result.method)).")
+                } else {
+                    self.hideCompatibilityFailure()
+                }
                 if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
                     self.pendingStartTimeAfterLoad = resumeTime
                 }
-                let generation = self.videoLoadGeneration
                 self.resolveAndAttach(
                     playableURL: result.outputURL,
                     sourceURL: inputURL,
-                    generation: generation
+                    generation: activeGeneration
                 )
             }
         }
@@ -1648,7 +2071,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         styleIconButton(imageZoomOutButton, symbol: "minus.magnifyingglass", label: "Zoom out")
         styleIconButton(imageZoomInButton, symbol: "plus.magnifyingglass", label: "Zoom in")
         styleIconButton(imageFitButton, symbol: "arrow.up.left.and.arrow.down.right", label: "Fit")
-        styleIconButton(imageSettingsButton, symbol: "gearshape", label: "Settings")
         imageZoomOutButton.target = self
         imageZoomInButton.target = self
         imageFitButton.target = self
@@ -1664,18 +2086,58 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageControlsStack.addArrangedSubview(imageZoomOutButton)
         imageControlsStack.addArrangedSubview(imageZoomInButton)
         imageControlsStack.addArrangedSubview(imageFitButton)
-        imageControlsStack.addArrangedSubview(imageSettingsButton)
+
+        imageAccessoryCluster.orientation = .horizontal
+        imageAccessoryCluster.alignment = .centerY
+        imageAccessoryCluster.spacing = 0
+        imageAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
+        imageAccessoryCluster.addArrangedSubview(imageSettingsButton)
+    }
+
+    private func configurePlaybackAccessoryClusters() {
+        playbackAccessoryCluster.orientation = .horizontal
+        playbackAccessoryCluster.alignment = .centerY
+        playbackAccessoryCluster.spacing = 0
+        playbackAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
+        playbackAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
+        playbackAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        imageAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
+        imageAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        moveQueueButtonToPlaybackAccessoryCluster()
+    }
+
+    private func moveQueueButtonToPlaybackAccessoryCluster() {
+        if queueButton.superview === playbackAccessoryCluster { return }
+        queueButton.removeFromSuperview()
+        playbackAccessoryCluster.insertArrangedSubview(queueButton, at: 0)
+        if !playbackAccessoryCluster.arrangedSubviews.contains(settingsButton) {
+            playbackAccessoryCluster.addArrangedSubview(settingsButton)
+        }
+    }
+
+    private func moveQueueButtonToImageAccessoryCluster() {
+        if queueButton.superview === imageAccessoryCluster { return }
+        queueButton.removeFromSuperview()
+        imageAccessoryCluster.insertArrangedSubview(queueButton, at: 0)
+        if !imageAccessoryCluster.arrangedSubviews.contains(imageSettingsButton) {
+            imageAccessoryCluster.addArrangedSubview(imageSettingsButton)
+        }
     }
 
     private func configureControls() {
-        styleIconButton(previousButton, symbol: "backward.fill", label: "Slower", pointSize: 13)
-        styleIconButton(nextButton, symbol: "forward.fill", label: "Faster", pointSize: 13)
+        configurePlaybackAccessoryClusters()
+        styleIconButton(queuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: 13)
+        styleIconButton(speedStepDownButton, symbol: "backward.fill", label: "Slower", pointSize: 13)
+        styleIconButton(speedStepUpButton, symbol: "forward.fill", label: "Faster", pointSize: 13)
+        styleIconButton(queueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: 13)
         configureTransportSpeedLabel(playbackSpeedSlowLabel, alignment: .right)
         configureTransportSpeedLabel(playbackSpeedFastLabel, alignment: .left)
-        styleIconButton(queueButton, symbol: "list.bullet", label: "Queue")
-        styleIconButton(settingsButton, symbol: "gearshape", label: "Settings")
-        styleIconButton(libraryButton, symbol: "folder", label: "Library")
-        queueButton.isHidden = true
+        configurePlaybackBarAccessoryButton(libraryButton, symbol: "folder", label: "Library")
+        configurePlaybackBarAccessoryButton(queueButton, symbol: "list.bullet", label: "Queue")
+        configurePlaybackBarAccessoryButton(settingsButton, symbol: "gearshape", label: "Settings")
+        configurePlaybackBarAccessoryButton(imageSettingsButton, symbol: "gearshape", label: "Settings")
 
         playPauseButton.bezelStyle = .accessoryBarAction
         playPauseButton.isBordered = false
@@ -1683,17 +2145,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playPauseButton.action = #selector(togglePlayPause)
         playPauseButton.setButtonType(.momentaryPushIn)
         pinTransportIconButtonSize(playPauseButton, width: 32, height: 28)
-        pinTransportIconButtonSize(previousButton)
-        pinTransportIconButtonSize(nextButton)
+        pinTransportIconButtonSize(queuePreviousButton)
+        pinTransportIconButtonSize(speedStepDownButton)
+        pinTransportIconButtonSize(speedStepUpButton)
+        pinTransportIconButtonSize(queueNextButton)
         updatePlayPauseButtonIcon()
 
-        previousButton.target = self
-        nextButton.target = self
+        queuePreviousButton.target = self
+        speedStepDownButton.target = self
+        speedStepUpButton.target = self
+        queueNextButton.target = self
         queueButton.target = self
         settingsButton.target = self
         libraryButton.target = self
-        previousButton.action = #selector(previousPressed)
-        nextButton.action = #selector(nextPressed)
+        queuePreviousButton.action = #selector(queuePreviousPressed)
+        speedStepDownButton.action = #selector(speedStepDownPressed)
+        speedStepUpButton.action = #selector(speedStepUpPressed)
+        queueNextButton.action = #selector(queueNextPressed)
+        queuePreviousButton.isHidden = true
+        queueNextButton.isHidden = true
         queueButton.action = #selector(queuePressed)
         settingsButton.action = #selector(settingsPressed)
         libraryButton.action = #selector(libraryPressed)
@@ -2009,27 +2479,35 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let isFastSpeed = preferredPlaybackRate > 1.01
 
         if isSlowSpeed {
-            playbackSpeedSlowLabel.stringValue = formattedPlaybackSpeed(preferredPlaybackRate)
+            setTransportSpeedLabelText(
+                formattedPlaybackSpeed(preferredPlaybackRate),
+                on: playbackSpeedSlowLabel,
+                alignment: .right
+            )
             playbackSpeedSlowLabel.alphaValue = 1
         } else {
-            playbackSpeedSlowLabel.stringValue = ""
+            clearTransportSpeedLabel(playbackSpeedSlowLabel)
             playbackSpeedSlowLabel.alphaValue = 0
         }
 
         if isFastSpeed {
-            playbackSpeedFastLabel.stringValue = formattedPlaybackSpeed(preferredPlaybackRate)
+            setTransportSpeedLabelText(
+                formattedPlaybackSpeed(preferredPlaybackRate),
+                on: playbackSpeedFastLabel,
+                alignment: .left
+            )
             playbackSpeedFastLabel.alphaValue = 1
         } else {
-            playbackSpeedFastLabel.stringValue = ""
+            clearTransportSpeedLabel(playbackSpeedFastLabel)
             playbackSpeedFastLabel.alphaValue = 0
         }
 
-        previousButton.isEnabled = index > 0
-        nextButton.isEnabled = index < PlaybackSpeedSteps.rates.count - 1
+        speedStepDownButton.isEnabled = index > 0
+        speedStepUpButton.isEnabled = index < PlaybackSpeedSteps.rates.count - 1
 
         if isNormalSpeed {
-            previousButton.alphaValue = 1
-            nextButton.alphaValue = 1
+            speedStepDownButton.alphaValue = 1
+            speedStepUpButton.alphaValue = 1
         }
     }
 
@@ -2162,8 +2640,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func handlePlaybackEnded(_ notification: Notification) {
-        guard SettingsStore.shared.loopPlaybackEnabled else { return }
         guard let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
+
+        if !queue.isEmpty {
+            playNextInQueue()
+            return
+        }
+
+        guard SettingsStore.shared.loopPlaybackEnabled else { return }
         player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.startPlaybackAtPreferredRate()
             self?.updatePlayPauseButtonIcon()
@@ -2378,6 +2862,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     func mediaLibraryDidSelectMedia(url: URL, kind: DroppedMediaKind) {
+        queue.removeAll()
+        playbackHistory.removeAll()
         switch kind {
         case .video:
             loadVideo(url: url, replaceCurrent: true)
@@ -2478,7 +2964,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
 
+    private static let transportControlRowHeight: CGFloat = 28
+
     private func configureTransportSpeedLabel(_ label: NSTextField, alignment: NSTextAlignment) {
+        label.isBezeled = false
+        label.drawsBackground = false
+        label.isEditable = false
+        label.isSelectable = false
         label.font = .monospacedDigitSystemFont(ofSize: 9, weight: .medium)
         label.textColor = .secondaryLabelColor
         label.alignment = alignment
@@ -2487,6 +2979,28 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.widthAnchor.constraint(equalToConstant: Self.transportSpeedLabelReservedWidth).isActive = true
+        label.heightAnchor.constraint(equalToConstant: Self.transportControlRowHeight).isActive = true
+    }
+
+    private func setTransportSpeedLabelText(_ text: String, on label: NSTextField, alignment: NSTextAlignment) {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        let style = NSMutableParagraphStyle()
+        style.alignment = alignment
+        style.minimumLineHeight = Self.transportControlRowHeight
+        style.maximumLineHeight = Self.transportControlRowHeight
+        label.attributedStringValue = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style
+            ]
+        )
+    }
+
+    private func clearTransportSpeedLabel(_ label: NSTextField) {
+        label.attributedStringValue = NSAttributedString()
+        label.stringValue = ""
     }
 
     /// Fixed slot so transport controls do not shift when a speed label appears.
@@ -2502,6 +3016,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let width = samples.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 28
         return ceil(width) + 2
     }()
+
+    private static let playbackBarAccessoryButtonSize = NSSize(width: 24, height: 24)
+    private static let playbackBarAccessoryIconPointSize: CGFloat = 12
+
+    private func configurePlaybackBarAccessoryButton(_ button: NSButton, symbol: String, label: String) {
+        styleIconButton(
+            button,
+            symbol: symbol,
+            label: label,
+            pointSize: Self.playbackBarAccessoryIconPointSize
+        )
+        pinTransportIconButtonSize(
+            button,
+            width: Self.playbackBarAccessoryButtonSize.width,
+            height: Self.playbackBarAccessoryButtonSize.height
+        )
+        button.imagePosition = .imageOnly
+    }
 
     private func styleIconButton(_ button: NSButton, symbol: String, label: String, pointSize: CGFloat = 15) {
         button.bezelStyle = .accessoryBarAction
@@ -2582,32 +3114,31 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         controlsStack.addArrangedSubview(topControlsStack)
         controlsStack.addArrangedSubview(bottomControlsStack)
 
+        detachImageAccessoryClusterFromImageControls()
+        moveQueueButtonToPlaybackAccessoryCluster()
+
         transportClusterStack.arrangedSubviews.forEach {
             transportClusterStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
+        transportClusterStack.addArrangedSubview(queuePreviousButton)
         transportClusterStack.addArrangedSubview(transportSpeedLeftCluster)
         transportClusterStack.addArrangedSubview(playPauseButton)
         transportClusterStack.addArrangedSubview(transportSpeedRightCluster)
+        transportClusterStack.addArrangedSubview(queueNextButton)
         updatePlaybackSpeedTransportLabels()
-
-        queueButton.isHidden = queue.isEmpty
+        updateQueueTransportButtons()
 
         playbackCenterClusterStack.addArrangedSubview(libraryButton)
         playbackCenterClusterStack.addArrangedSubview(transportClusterStack)
-        playbackCenterClusterStack.addArrangedSubview(settingsButton)
-        if !queue.isEmpty {
-            playbackCenterClusterStack.addArrangedSubview(queueButton)
-        }
+        playbackCenterClusterStack.addArrangedSubview(playbackAccessoryCluster)
+        updateQueueButtonState()
 
         if playbackTopRowView.superview != topControlsStack {
             topControlsStack.addArrangedSubview(playbackTopRowView)
             playbackTopRowView.widthAnchor.constraint(equalTo: topControlsStack.widthAnchor).isActive = true
         }
         playbackTopRowView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        playbackCenterClusterStack.setContentHuggingPriority(.required, for: .horizontal)
-        playbackCenterClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
-        transportClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         bottomLeftControlsStack.addArrangedSubview(currentTimeLabel)
         bottomRightControlsStack.addArrangedSubview(totalTimeLabel)
@@ -2808,22 +3339,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         print(String(format: "[DEBUG-playback] volume safety restore=%.2f", desiredPlaybackVolume))
     }
 
-    @objc private func previousPressed() {
+    @objc private func queuePreviousPressed() {
+        playPreviousInQueue()
+    }
+
+    @objc private func queueNextPressed() {
+        playNextInQueue()
+    }
+
+    @objc private func speedStepDownPressed() {
         stepPlaybackSpeed(by: -1)
     }
 
-    @objc private func nextPressed() {
+    @objc private func speedStepUpPressed() {
         stepPlaybackSpeed(by: 1)
     }
 
     @objc private func queuePressed() {
-        let list = queue.map(\.lastPathComponent).joined(separator: "\n")
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Queued Videos"
-        alert.informativeText = list.isEmpty ? "Queue is empty." : list
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        toggleQueuePopover()
     }
 
     @objc private func settingsPressed() {
