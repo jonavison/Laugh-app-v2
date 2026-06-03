@@ -18,7 +18,7 @@ struct MpvEngine: PlaybackEngine {
     let backend: PlaybackBackend = .mpv
 
     func resolveVideoAsset(for url: URL) async -> VideoAssetLoader.ResolveResult {
-        // Until libmpv surface is fully integrated, keep compatibility behavior via AVFoundation probing.
+        // In-player mpv is wired via PlaybackRoutePlanner + MpvPlaybackController; probing stays on AVFoundation.
         await VideoAssetLoader.resolvePlayableAsset(for: url)
     }
 }

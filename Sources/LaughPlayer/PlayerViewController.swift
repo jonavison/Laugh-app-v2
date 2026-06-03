@@ -7,6 +7,7 @@ protocol PlayerViewControllerDelegate: AnyObject {
     func playerViewController(_ controller: PlayerViewController, didRequestWindowAspectRatio ratio: CGFloat?)
     func playerViewControllerDidRequestOpenVideo(_ controller: PlayerViewController)
     func playerViewControllerDidRequestOpenSettings(_ controller: PlayerViewController)
+    func playerViewController(_ controller: PlayerViewController, setImmersiveChromeVisible visible: Bool, animated: Bool)
 }
 
 final class PlayerViewController: NSViewController, MediaLibraryDelegate {
@@ -19,6 +20,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     weak var delegate: PlayerViewControllerDelegate?
 
     private let player = AVPlayer()
+    private let mpvController = MpvPlaybackController()
+    private var mpvBackendActive = false
+    private var mpvPlaybackStarted = false
+    private var activeSession: ActivePlaybackSession?
+    private var mpvTimelineTimer: Timer?
     private let playerSurfaceView = PlayerSurfaceView()
     private let queueDropZone = QueueDropZoneView()
     private let dragHostView = DragHostView()
@@ -62,6 +68,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private lazy var librarySidebar = LibrarySidebarView(controller: mediaLibraryController)
     private lazy var libraryBrowse = LibraryBrowseView(controller: mediaLibraryController)
     private let playbackMiniPreview = PlaybackMiniPreviewView()
+    private let titleBarChromeStrip = NSVisualEffectView()
+    private var titleBarChromeHeightConstraint: NSLayoutConstraint?
     private let rightSettingsSheet = NSVisualEffectView()
     private let videoSettingsTabsRow = NSStackView()
     private let imageSettingsTabsRow = NSStackView()
@@ -72,19 +80,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let settingsContentContainer = NSView()
     private let videoTabView = NSStackView()
     private let audioTabView = NSStackView()
+    private let audioSettings = AudioSettingsControls()
+    private var cachedAudioTracks: [AudioTrackInfo] = []
+    private var suppressAudioTrackPopUpAction = false
+    private var pendingAudioTrackBackendID: AudioTrackInfo.BackendID?
+    private var pendingResumePlayingAfterLoad: Bool?
     private let subtitlesTabView = NSStackView()
     private let imageTabView = NSStackView()
     private let imageFitTabView = NSStackView()
     private var activeMediaKind: ActiveMediaKind = .empty
     private let seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let volumeCluster = NSStackView()
+    private let volumeMuteButton = NSButton(title: "", target: nil, action: nil)
     private let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let currentTimeLabel = NSTextField(labelWithString: "00:00")
     private let totalTimeLabel = NSTextField(labelWithString: "00:00")
-    private let videoFormatLabel = NSTextField(labelWithString: "Format: --")
-    private let aspectRatioLabel = NSTextField(labelWithString: "Aspect: --")
-    private let videoTrackLabel = NSTextField(labelWithString: "Tracks: --")
-    private let audioInfoLabel = NSTextField(labelWithString: "Audio: --")
-    private let sourceFileLabel = NSTextField(labelWithString: "File: --")
     private let playbackSourcePopUp = NSPopUpButton()
     private let videoFitModeControl = NSSegmentedControl(labels: ["Fit", "Fill"], trackingMode: .selectOne, target: nil, action: nil)
     private let windowAspectControl = NSSegmentedControl(
@@ -130,6 +140,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var seekGeneration = 0
     private var currentControlTier: ControlDensityTier = .regular
     private var outsideClickMonitor: Any?
+    private var keyboardShortcutMonitor: Any?
+    private var videoDoubleClickMonitor: Any?
+    private var immersiveChromeHideWorkItem: DispatchWorkItem?
+    private var immersiveChromeVisible = false
+    private var dragSessionActive = false
+    /// Brief pause before edge-hover opens a side panel (avoids accidental opens).
+    private static let edgePanelOpenDelay: TimeInterval = 0.4
+    private var pendingLeftEdgePanelOpen: DispatchWorkItem?
+    private var pendingRightEdgePanelOpen: DispatchWorkItem?
     private var settingsContentBottomConstraint: NSLayoutConstraint?
     private var securityScopedMediaURL: URL?
     private var videoLoadGeneration = 0
@@ -149,6 +168,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var lastBufferEmpty: Bool?
     private var lastBufferFull: Bool?
     private var desiredPlaybackVolume: Float = 1.0
+    private var isUserVolumeMuted = false
+    private var volumeLevelBeforeUserMute: Float = 1.0
     private var volumeRampToken: Int = 0
     private var isMutedForSwitch: Bool = false
     private var pendingVideoLoadWorkItem: DispatchWorkItem?
@@ -158,7 +179,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var librarySidebarWidthConstraint: NSLayoutConstraint?
     private var settingsPanelWidthConstraint: NSLayoutConstraint?
     private var volumeSliderWidthConstraint: NSLayoutConstraint?
+    private var playbackCenterToVolumeConstraint: NSLayoutConstraint?
+    private var playbackCenterToEdgeConstraint: NSLayoutConstraint?
     private var playbackTopRowLayoutConfigured = false
+    private var audioOutputEnabled = true
     private var playerInterfaceInstalled = false
     private var libraryChromeInstalled = false
     private let playbackControlClusterSpacing: CGFloat = 20
@@ -171,6 +195,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private var playbackLibraryOverlay: PlaybackLibraryOverlay = .closed
     private let settingsPanelInnerInset: CGFloat = 12
+    private let settingsTabsTopInset: CGFloat = 24
     private let settingsContentBottomClearance: CGFloat = 108
 
     private enum ControlDensityTier {
@@ -195,6 +220,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         installLibraryChromeIfNeeded()
         if activeMediaKind == .empty {
             showFullMediaLibrary()
+            setImmersiveChromeVisible(true, animated: false)
         }
         view.layoutSubtreeIfNeeded()
         LaunchLog.emit("prepareInterfaceForDisplay: bounds=\(view.bounds)")
@@ -220,6 +246,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         playerSurfaceView.videoGravity = .resizeAspect
         playerSurfaceView.translatesAutoresizingMaskIntoConstraints = false
+        playerSurfaceView.onMpvLayoutChanged = { [weak self] in
+            guard let self, self.mpvBackendActive else { return }
+            let wid = self.playerSurfaceView.mpvEmbeddingWindowID
+            guard wid > 0 else { return }
+            self.mpvController.setEmbeddingWindowID(wid)
+        }
         view.addSubview(playerSurfaceView)
 
         imageSurfaceView.translatesAutoresizingMaskIntoConstraints = false
@@ -264,6 +296,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         mediaLibraryController.delegate = self
 
+        styleTitleBarChromeStrip()
+        titleBarChromeStrip.isHidden = true
+        titleBarChromeStrip.alphaValue = 0
+        titleBarChromeStrip.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(titleBarChromeStrip)
+        titleBarChromeHeightConstraint = titleBarChromeStrip.heightAnchor.constraint(equalToConstant: 28)
+        NSLayoutConstraint.activate([
+            titleBarChromeStrip.topAnchor.constraint(equalTo: view.topAnchor),
+            titleBarChromeStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleBarChromeStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            titleBarChromeHeightConstraint!
+        ])
+
         styleRightSettingsPanel()
         rightSettingsSheet.isHidden = true
         rightSettingsSheet.translatesAutoresizingMaskIntoConstraints = false
@@ -279,6 +324,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         settingsContentContainer.translatesAutoresizingMaskIntoConstraints = false
         rightSettingsSheet.addSubview(settingsContentContainer)
+        ensureSettingsTabRowsAboveContent()
 
         configureSettingsTabViews()
         LaunchLog.emit("installPlayerInterfaceIfNeeded: settings tabs")
@@ -406,15 +452,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             rightSettingsSheet.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             settingsPanelWidthConstraint!,
 
-            videoSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsPanelInnerInset + 4),
+            videoSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsTabsTopInset),
+            videoSettingsTabsRow.heightAnchor.constraint(equalToConstant: 34),
             videoSettingsTabsRow.centerXAnchor.constraint(equalTo: rightSettingsSheet.centerXAnchor),
-            videoSettingsTabsRow.leadingAnchor.constraint(greaterThanOrEqualTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
-            videoSettingsTabsRow.trailingAnchor.constraint(lessThanOrEqualTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
+            videoSettingsTabsRow.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
+            videoSettingsTabsRow.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
 
-            imageSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsPanelInnerInset + 4),
+            imageSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsTabsTopInset),
+            imageSettingsTabsRow.heightAnchor.constraint(equalToConstant: 34),
             imageSettingsTabsRow.centerXAnchor.constraint(equalTo: rightSettingsSheet.centerXAnchor),
-            imageSettingsTabsRow.leadingAnchor.constraint(greaterThanOrEqualTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
-            imageSettingsTabsRow.trailingAnchor.constraint(lessThanOrEqualTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
+            imageSettingsTabsRow.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
+            imageSettingsTabsRow.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
 
             settingsContentContainer.topAnchor.constraint(equalTo: videoSettingsTabsRow.bottomAnchor, constant: settingsPanelInnerInset + 14),
             settingsContentContainer.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset),
@@ -438,14 +486,30 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         dragHostView.onPerformDrop = { [weak self] urls, locationInView in
             guard let self else { return false }
-            let shouldQueue = self.queueDropZone.frame.contains(locationInView)
+            let inDropZone = self.queueDropZone.frame.contains(locationInView)
+            let shouldQueue = inDropZone && self.canAcceptQueueDrop
             return self.handleDroppedURLs(urls, queueOnly: shouldQueue)
         }
         dragHostView.onDragSessionActive = { [weak self] active in
-            self?.setQueueDropZoneVisibleForDrag(active)
+            guard let self else { return }
+            self.dragSessionActive = active
+            self.setQueueDropZoneVisibleForDrag(active)
+            if active {
+                self.cancelEdgePanelHoverTimers()
+                self.hideSettingsSheet()
+                self.refreshImmersiveChromePinnedState()
+            } else {
+                self.scheduleImmersiveChromeHide()
+            }
         }
         dragHostView.onMouseMoved = { [weak self] point in
             self?.handleMouseMoved(point)
+        }
+        dragHostView.onMouseEnteredView = { [weak self] in
+            self?.noteImmersiveChromePointerActivity()
+        }
+        dragHostView.onMouseExitedView = { [weak self] in
+            self?.handlePointerLeftContentView()
         }
 
         failedToPlayObserver = NotificationCenter.default.addObserver(
@@ -504,6 +568,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         updateSettingsContentBottomInset()
+        installKeyboardShortcutMonitor()
+        installVideoDoubleClickFullscreenMonitor()
+
         LaunchLog.emit("installPlayerInterfaceIfNeeded: end")
     }
 
@@ -530,6 +597,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackMiniPreview.translatesAutoresizingMaskIntoConstraints = false
         playbackMiniPreview.onExpand = { [weak self] in
             self?.collapsePlaybackLibraryOverlay()
+        }
+        playbackMiniPreview.onClose = { [weak self] in
+            self?.closePlaybackFromMiniPreview()
         }
 
         view.addSubview(librarySidebar)
@@ -573,10 +643,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }
 
-    private func performLoadVideo(url: URL, replaceCurrent: Bool, startAt: CMTime?) {
+    private func performLoadVideo(url: URL, replaceCurrent: Bool, startAt: CMTime?, forceReload: Bool = false) {
         let now = CFAbsoluteTimeGetCurrent()
         let samePath = lastLoadRequestURL == url.path
-        if samePath, (now - lastLoadRequestAt) < 0.35 {
+        if !forceReload, samePath, (now - lastLoadRequestAt) < 0.35 {
             print("[DEBUG-playback] skipped duplicate load request path=\(url.path)")
             return
         }
@@ -584,7 +654,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             print("[DEBUG-fallback] ignored load; conversion already running for \(url.lastPathComponent)")
             return
         }
-        if !isGeneratedFallbackURL(url), isActivelyPlayingSource(url) {
+        if !forceReload, !isGeneratedFallbackURL(url), isActivelyPlayingSource(url) {
             if let cached = FFmpegVideoFallback.cachedPlayableURL(for: url),
                activePlaybackFileURL == cached {
                 print("[DEBUG-playback] already playing cached copy of \(url.lastPathComponent)")
@@ -603,6 +673,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             FFmpegVideoFallback.terminateRunningProcesses()
             print("[DEBUG-fallback] invalidated due to switch to \(url.lastPathComponent)")
         }
+        if mpvBackendActive {
+            stopMpvBackend()
+        }
         lastLoadRequestURL = url.path
         lastLoadRequestAt = now
         print("[DEBUG-playback] Loading video: \(url.path)")
@@ -618,6 +691,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         hideCompatibilityFailure()
         renderMonitor.reset()
+        audioOutputEnabled = true
+        isUserVolumeMuted = false
         lastPlaybackStartedItemID = nil
         committedPlayerItemID = nil
         let previousMediaURL = currentMediaURL
@@ -647,6 +722,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             await MainActor.run {
                 guard generation == self.videoLoadGeneration else { return }
                 switch route {
+                case .directMpv(let reason):
+                    print("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
+                    self.startDirectMpvPlayback(sourceURL: url, generation: generation)
                 case .compatibilityRemux(let reason):
                     print("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
                     self.startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
@@ -662,7 +740,170 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         attemptFFmpegFallbackIfNeeded(plannedRoute: true, generation: generation)
     }
 
+    private func startDirectMpvPlayback(sourceURL: URL, generation: Int) {
+        FFmpegVideoFallback.terminateRunningProcesses()
+        beginSecurityScopedAccess(for: sourceURL)
+        detachCurrentPlayerItemObserver()
+        committedPlayerItemID = nil
+        lastPlaybackStartedItemID = nil
+        activePlaybackFileURL = sourceURL
+        mpvBackendActive = true
+        mpvPlaybackStarted = false
+        activeSession = nil
+
+        activeMediaKind = .video
+        showVideoChrome(hideOpenHint: false)
+        RecentlyViewedStore.shared.record(url: sourceURL, kind: .video)
+        disconnectPlayerFromVideoSurfaces()
+        playerSurfaceView.setMpvEmbeddingActive(true)
+        view.layoutSubtreeIfNeeded()
+
+        let wid = playerSurfaceView.mpvEmbeddingWindowID
+        guard wid > 0 else {
+            print("[DEBUG-mpv] embedding wid unavailable; falling back to remux")
+            mpvBackendActive = false
+            playerSurfaceView.setMpvEmbeddingActive(false)
+            startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
+            return
+        }
+
+        wireMpvCallbacks(generation: generation, sourceURL: sourceURL)
+
+        mpvController.load(url: sourceURL, wid: wid) { [weak self] result in
+            guard let self, generation == self.videoLoadGeneration else { return }
+            switch result {
+            case .success:
+                self.finishMpvPlaybackStart(sourceURL: sourceURL, generation: generation)
+            case .failed(let message):
+                print("[DEBUG-mpv] load failed: \(message); falling back to remux")
+                self.stopMpvBackend()
+                self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
+            }
+        }
+    }
+
+    private func wireMpvCallbacks(generation: Int, sourceURL: URL) {
+        mpvController.onTimeUpdate = { [weak self] _, _ in
+            guard let self, generation == self.videoLoadGeneration, self.mpvBackendActive else { return }
+            self.updateTimelineUI()
+        }
+        mpvController.onPauseChanged = { [weak self] _ in
+            guard let self, generation == self.videoLoadGeneration else { return }
+            self.updatePlayPauseButtonIcon()
+        }
+        mpvController.onPlaybackEnded = { [weak self] in
+            guard let self, generation == self.videoLoadGeneration, self.mpvBackendActive else { return }
+            self.handleMpvPlaybackEnded()
+        }
+        mpvController.onReady = nil
+    }
+
+    private func finishMpvPlaybackStart(sourceURL: URL, generation: Int) {
+        guard generation == videoLoadGeneration, mpvBackendActive else { return }
+        activeSession = MpvPlaybackSession(controller: mpvController)
+        mpvPlaybackStarted = true
+        activePlaybackFileURL = sourceURL
+        isMutedForSwitch = false
+        if audioOutputEnabled {
+            applyEffectivePlaybackVolume()
+            updateVolumeMuteButtonIcon()
+        }
+        activeSession?.setRate(preferredPlaybackRate)
+        updatePlayPauseButtonIcon()
+
+        let pending = pendingStartTimeAfterLoad
+        pendingStartTimeAfterLoad = nil
+        let pendingSec = pending.map { CMTimeGetSeconds($0) } ?? 0
+        let targetSec = (pendingSec.isFinite && pendingSec >= 0) ? pendingSec : 0
+
+        let shouldPlay = pendingResumePlayingAfterLoad ?? true
+        pendingResumePlayingAfterLoad = nil
+
+        let start = { [weak self] in
+            guard let self, generation == self.videoLoadGeneration, self.mpvBackendActive else { return }
+            let resumePlayback = {
+                if shouldPlay {
+                    self.activeSession?.play()
+                } else {
+                    self.activeSession?.pause()
+                }
+                self.updatePlayPauseButtonIcon()
+                self.updateTimelineUI()
+            }
+            if targetSec > 0.05 {
+                self.activeSession?.seek(to: targetSec, exact: true) { _ in
+                    resumePlayback()
+                }
+            } else {
+                resumePlayback()
+            }
+            self.startMpvTimelinePolling()
+            self.refreshMpvDebugMetadata()
+            self.applyPlaybackEQToActiveMpv()
+            Task { await self.refreshAudioTrackPicker() }
+            print("[DEBUG-mpv] playback started path=\(sourceURL.path)")
+        }
+        start()
+    }
+
+    private func refreshMpvDebugMetadata() {
+        lastVideoTrackSummary = "mpv"
+        lastAudioSummary = "mpv"
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, self.mpvBackendActive else { return }
+            let codec = self.mpvController.videoCodecTag()
+            DispatchQueue.main.async {
+                guard self.mpvBackendActive else { return }
+                if let codec {
+                    self.lastVideoCodecFourCC = codec
+                    self.renderMonitor.videoCodecFourCC = codec
+                }
+                self.updateVideoInfoLabels()
+            }
+        }
+    }
+
+    private func handleMpvPlaybackEnded() {
+        if !queue.isEmpty {
+            playNextInQueue()
+            return
+        }
+        guard SettingsStore.shared.loopPlaybackEnabled else { return }
+        activeSession?.seek(to: 0, exact: true) { [weak self] _ in
+            self?.activeSession?.play()
+            self?.updatePlayPauseButtonIcon()
+        }
+    }
+
+    private func stopMpvBackend() {
+        stopMpvTimelinePolling()
+        mpvController.onTimeUpdate = nil
+        mpvController.onPauseChanged = nil
+        mpvController.onPlaybackEnded = nil
+        mpvController.onReady = nil
+        mpvController.terminate()
+        mpvBackendActive = false
+        mpvPlaybackStarted = false
+        if activeSession is MpvPlaybackSession {
+            activeSession = nil
+        }
+        playerSurfaceView.setMpvEmbeddingActive(false)
+    }
+
+    private func startMpvTimelinePolling() {
+        stopMpvTimelinePolling()
+        mpvTimelineTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+            self?.updateTimelineUI()
+        }
+    }
+
+    private func stopMpvTimelinePolling() {
+        mpvTimelineTimer?.invalidate()
+        mpvTimelineTimer = nil
+    }
+
     private func startNativePlayback(url: URL, generation: Int) {
+        stopMpvBackend()
         Task {
             let result = await VideoAssetLoader.resolvePlayableAsset(for: url)
             await MainActor.run {
@@ -707,6 +948,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         generation: Int,
         recentsURL: URL? = nil
     ) {
+        stopMpvBackend()
         beginSecurityScopedAccess(for: url)
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 4
@@ -826,6 +1068,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func isActivelyPlayingSource(_ url: URL) -> Bool {
         guard activeMediaKind == .video else { return false }
         guard playbackSourceURL?.standardizedFileURL == url.standardizedFileURL else { return false }
+        if mpvBackendActive {
+            return mpvPlaybackStarted
+        }
         guard committedPlayerItemID != nil, player.currentItem != nil else { return false }
         return lastPlaybackStartedItemID != nil || player.rate > 0
     }
@@ -864,7 +1109,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ))
             let finishStart = {
                 self.restoreAudioAfterSwitchSmoothly()
-                self.startPlaybackAtPreferredRate()
+                let shouldPlay = self.pendingResumePlayingAfterLoad ?? true
+                self.pendingResumePlayingAfterLoad = nil
+                if shouldPlay {
+                    self.startPlaybackAtPreferredRate()
+                } else {
+                    self.player.pause()
+                }
                 if let startedAt = self.fallbackStartedAt {
                     let totalMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
                     let currentSec = CMTimeGetSeconds(target)
@@ -884,6 +1135,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         self?.handleRenderFailure(message)
                     }
                 }
+                Task { await self.refreshAudioTrackPicker() }
             }
             self.schedulePlaybackStartWhenBuffered(item: item, generation: generation, start: finishStart)
         }
@@ -903,7 +1155,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     /// Pause Laugh, seek with loose tolerance, then resume — avoids hammering the shared audio HAL on macOS.
-    private func performCooperativeSeek(
+    func performCooperativeSeek(
         to target: CMTime,
         precise: Bool = false,
         completion: ((Bool) -> Void)? = nil
@@ -916,6 +1168,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard seconds.isFinite, seconds >= 0 else {
             isSeekingFromUI = false
             completion?(false)
+            return
+        }
+
+        if mpvBackendActive, let session = activeSession {
+            let wasPlaying = session.isPlaying && !isMutedForSwitch
+            if wasPlaying { session.pause() }
+            session.seek(to: seconds, exact: precise) { [weak self] finished in
+                guard let self, generation == self.seekGeneration else {
+                    completion?(false)
+                    return
+                }
+                self.isSeekingFromUI = false
+                self.updateTimelineUI()
+                if wasPlaying, finished, !self.isMutedForSwitch {
+                    self.startPlaybackAtPreferredRate()
+                }
+                completion?(finished)
+            }
             return
         }
 
@@ -989,6 +1259,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         currentMediaURL = url
         playbackSourceURL = nil
         activePlaybackFileURL = nil
+        stopMpvBackend()
         suspendPlayerOutputForStillOrEmpty()
 
         lastImageSize = loaded.pixelSize
@@ -1032,9 +1303,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             aspect = "Unknown"
         }
         let codec = lastVideoCodecFourCC ?? "Unknown"
-        let currentTime = CMTimeGetSeconds(player.currentTime())
+        let backendLabel = mpvBackendActive ? "mpv" : "avfoundation"
+        let currentTime = activeSession?.currentTimeSec ?? CMTimeGetSeconds(player.currentTime())
         let timeString = currentTime.isFinite ? String(format: "%.2fs", currentTime) : "Unknown"
-        let rateString = String(format: "%.2f", player.rate)
+        let rateValue = mpvBackendActive ? (activeSession?.isPlaying == true ? preferredPlaybackRate : 0) : player.rate
+        let rateString = String(format: "%.2f", rateValue)
         let mediaPath = currentMediaURL?.path ?? "None"
         let queueCount = "\(queue.count)"
         let mediaKindLabel: String
@@ -1052,6 +1325,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         return """
         File: \(mediaPath)
+        Playback backend: \(backendLabel)
         Window size: \(windowSize)
         Content size: \(contentSize)
         Video size: \(videoSize)
@@ -1069,6 +1343,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     deinit {
+        mpvController.terminate()
         FFmpegVideoFallback.terminateRunningProcesses()
         if let observer = failedToPlayObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -1319,14 +1594,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         syncQueueChrome()
     }
 
-    private func playNextInQueue() {
+    func playNextInQueue() {
         guard let next = queue.first else { return }
         queue.removeFirst()
         openQueuedMedia(LibraryMediaFile(url: next.url, kind: next.kind), replaceVideo: true)
         syncQueueChrome()
     }
 
-    private func playPreviousInQueue() {
+    func playPreviousInQueue() {
         guard let previousURL = playbackHistory.popLast() else { return }
 
         if let current = currentMediaURL {
@@ -1372,6 +1647,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func syncQueueChrome() {
         updateQueueTransportButtons()
         updateQueueButtonState()
+        if dragSessionActive {
+            setQueueDropZoneVisibleForDrag(true)
+        }
         refreshQueuePopoverIfNeeded()
         if activeMediaKind == .video {
             detachImageAccessoryClusterFromImageControls()
@@ -1449,7 +1727,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         syncQueueChrome()
     }
 
-    private func toggleQueuePopover() {
+    func toggleQueuePopover() {
         if queuePopover?.isShown == true {
             closeQueuePopover()
             return
@@ -1475,11 +1753,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         queuePopover = popover
         queueListViewController = listController
+        refreshImmersiveChromePinnedState()
     }
 
     private func closeQueuePopover() {
         queuePopover?.close()
         queuePopover = nil
+        if usesImmersiveChrome {
+            scheduleImmersiveChromeHide()
+        }
         queueListViewController = nil
     }
 
@@ -1520,7 +1802,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    private func showEmptySurface() {
+    func showEmptySurface() {
         activeMediaKind = .empty
         hideCompatibilityFailure()
         renderMonitor.reset()
@@ -1548,15 +1830,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         applyContextualSettingsTabs()
         updateSettingsContentBottomInset()
         raisePlaybackChromeToFront()
+        syncPlayingWindowTitle()
+        setImmersiveChromeVisible(true, animated: false)
     }
 
     private func showVideoChrome(hideOpenHint: Bool) {
         activeMediaKind = .video
         hideMediaLibrary()
         imageSurfaceView.isHidden = true
-        connectPlayerToVideoSurfaces()
+        if !mpvBackendActive {
+            connectPlayerToVideoSurfaces()
+        }
         playerSurfaceView.isHidden = false
-        controlsContainer.isHidden = false
         imageControlsContainer.isHidden = true
         openButton.isHidden = hideOpenHint
         hintLabel.isHidden = hideOpenHint
@@ -1565,7 +1850,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         raisePlaybackChromeToFront()
         updatePlaybackBarWidth()
         applyResponsiveControlsLayout()
+        updatePlaybackVolumeChromeVisibility()
         syncQueueChrome()
+        syncPlayingWindowTitle()
+        resetImmersiveChromeAfterMediaChange()
     }
 
     private func showImageChrome() {
@@ -1573,8 +1861,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         hideMediaLibrary()
         imageSurfaceView.isHidden = false
         playerSurfaceView.isHidden = true
-        controlsContainer.isHidden = true
-        imageControlsContainer.isHidden = false
         openButton.isHidden = true
         hintLabel.isHidden = true
         applyContextualSettingsTabs()
@@ -1582,31 +1868,31 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         raisePlaybackChromeToFront()
         updatePlaybackBarWidth()
         syncQueueChrome()
+        syncPlayingWindowTitle()
+        resetImmersiveChromeAfterMediaChange()
+    }
+
+    /// Queue drop target is shown only when something is already playing or queued.
+    private var canAcceptQueueDrop: Bool {
+        currentMediaURL != nil || !queue.isEmpty
     }
 
     private func setQueueDropZoneVisibleForDrag(_ visible: Bool) {
-        let shouldHide = !visible
+        let shouldShow = visible && canAcceptQueueDrop
+        let shouldHide = !shouldShow
         guard queueDropZone.isHidden != shouldHide else { return }
         queueDropZone.isHidden = shouldHide
-        if visible {
+        if shouldShow {
             raisePlaybackChromeToFront()
         }
     }
 
+    private func styleTitleBarChromeStrip() {
+        ImmersiveWindowChrome.applyFrostedPanelStyle(to: titleBarChromeStrip, leadingShadow: false)
+    }
+
     private func styleRightSettingsPanel() {
-        rightSettingsSheet.material = .menu
-        rightSettingsSheet.blendingMode = .behindWindow
-        rightSettingsSheet.state = .active
-        rightSettingsSheet.wantsLayer = true
-        rightSettingsSheet.layer?.cornerRadius = 0
-        rightSettingsSheet.layer?.masksToBounds = false
-        rightSettingsSheet.layer?.borderWidth = 0
-        rightSettingsSheet.layer?.borderColor = nil
-        rightSettingsSheet.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.78).cgColor
-        rightSettingsSheet.layer?.shadowColor = NSColor.black.withAlphaComponent(0.22).cgColor
-        rightSettingsSheet.layer?.shadowOpacity = 1
-        rightSettingsSheet.layer?.shadowRadius = 16
-        rightSettingsSheet.layer?.shadowOffset = NSSize(width: -3, height: 0)
+        ImmersiveWindowChrome.applyFrostedPanelStyle(to: rightSettingsSheet, leadingShadow: true)
     }
 
     private func configureSettingsTabsAppearance() {
@@ -1648,7 +1934,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         for (index, payload) in titlesAndSymbols.enumerated() {
             let button = HoverTextButton()
-            button.title = payload.0
+            button.tabLabel = payload.0
             button.symbolName = payload.1
             button.tag = index
             button.target = self
@@ -1670,20 +1956,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         for (index, button) in videoSettingsTabButtons.enumerated() {
             let color = index == selectedVideoSettingsTabIndex ? activeColor : (button.isHovered ? hoverColor : baseColor)
             button.textColor = color
-            button.fontWeight = index == selectedVideoSettingsTabIndex ? .semibold : .medium
         }
 
         for (index, button) in imageSettingsTabButtons.enumerated() {
             let color = index == selectedImageSettingsTabIndex ? activeColor : (button.isHovered ? hoverColor : baseColor)
             button.textColor = color
-            button.fontWeight = index == selectedImageSettingsTabIndex ? .semibold : .medium
         }
     }
 
+    private func raiseSettingsSheetAbovePlaybackChrome() {
+        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: controlsContainer)
+        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: imageControlsContainer)
+        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: queueDropZone)
+        ensureSettingsTabRowsAboveContent()
+    }
+
     private func raisePlaybackChromeToFront() {
-        view.addSubview(controlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
-        view.addSubview(imageControlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
-        view.addSubview(queueDropZone, positioned: .above, relativeTo: rightSettingsSheet)
+        if !rightSettingsSheet.isHidden {
+            raiseSettingsSheetAbovePlaybackChrome()
+        } else {
+            view.addSubview(controlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
+            view.addSubview(imageControlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
+            view.addSubview(queueDropZone, positioned: .above, relativeTo: rightSettingsSheet)
+        }
         if libraryChromeInstalled {
             if !openButton.isHidden {
                 view.addSubview(openButton, positioned: .above, relativeTo: libraryBrowse)
@@ -1692,6 +1987,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             view.addSubview(librarySidebar, positioned: .above, relativeTo: playerSurfaceView)
             view.addSubview(libraryBrowse, positioned: .above, relativeTo: playerSurfaceView)
             view.addSubview(playbackMiniPreview, positioned: .above, relativeTo: libraryBrowse)
+        }
+        raiseTitleBarChromeToFront()
+    }
+
+    private func raiseTitleBarChromeToFront() {
+        guard !titleBarChromeStrip.isHidden else { return }
+        view.addSubview(titleBarChromeStrip, positioned: .above, relativeTo: libraryBrowse)
+        view.addSubview(titleBarChromeStrip, positioned: .above, relativeTo: librarySidebar)
+        view.addSubview(titleBarChromeStrip, positioned: .above, relativeTo: playbackMiniPreview)
+        if !rightSettingsSheet.isHidden {
+            view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: titleBarChromeStrip)
         }
     }
 
@@ -1788,6 +2094,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     override func viewDidLayout() {
         super.viewDidLayout()
         guard playerInterfaceInstalled else { return }
+        updateTitleBarChromeLayout()
         applyUIScaleIfNeeded()
         updatePlaybackBarWidth()
         applyResponsiveControlsLayout()
@@ -1936,9 +2243,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if !isMutedForSwitch {
             preparePlayerForVideoSwitch()
         }
+        let mpvResumeSec = mpvBackendActive ? (activeSession?.currentTimeSec ?? 0) : nil
+        stopMpvBackend()
         FFmpegVideoFallback.terminateRunningProcesses()
 
-        let resumeTime = currentPlayerItemMatchesSource(inputURL) ? player.currentTime() : .zero
+        let resumeTime: CMTime
+        if let mpvResumeSec, mpvResumeSec.isFinite, mpvResumeSec > 0 {
+            resumeTime = CMTime(seconds: mpvResumeSec, preferredTimescale: 600)
+        } else {
+            resumeTime = currentPlayerItemMatchesSource(inputURL) ? player.currentTime() : .zero
+        }
         let rawResumeTargetSec = CMTimeGetSeconds(resumeTime)
 
         let outputURL: URL
@@ -2172,10 +2486,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         seekSlider.action = #selector(seekSliderChanged)
         seekSlider.isContinuous = false
         seekSlider.controlSize = .mini
+        seekSlider.useFlatBarAppearance(trackHeight: 3)
+
+        volumeCluster.orientation = .horizontal
+        volumeCluster.alignment = .centerY
+        volumeCluster.spacing = 6
+        volumeCluster.addArrangedSubview(volumeMuteButton)
+        volumeCluster.addArrangedSubview(volumeSlider)
+
+        volumeMuteButton.target = self
+        volumeMuteButton.action = #selector(volumeMuteButtonPressed)
+        styleIconButton(volumeMuteButton, symbol: "speaker.wave.2.fill", label: "Mute", pointSize: 13)
+        pinTransportIconButtonSize(volumeMuteButton, width: 24, height: 24)
 
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeSliderChanged)
         volumeSlider.controlSize = .mini
+        volumeSlider.useFlatBarAppearance(trackHeight: 3)
         volumeSliderWidthConstraint = volumeSlider.widthAnchor.constraint(equalToConstant: 58)
         volumeSliderWidthConstraint?.isActive = true
         volumeSlider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2184,6 +2511,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         player.volume = 1
         player.isMuted = false
         desiredPlaybackVolume = 1
+        updateVolumeMuteButtonIcon()
 
         currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         currentTimeLabel.textColor = .secondaryLabelColor
@@ -2194,9 +2522,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         currentTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
         totalTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
         seekSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        for label in [videoFormatLabel, aspectRatioLabel, videoTrackLabel, audioInfoLabel, sourceFileLabel] {
-            styleSettingsInfoLabel(label)
-        }
         configureVideoSettingsControls()
         preferredPlaybackRate = SettingsStore.shared.playbackSpeed
         player.defaultRate = preferredPlaybackRate
@@ -2215,15 +2540,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             stack.translatesAutoresizingMaskIntoConstraints = false
         }
 
-        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Source"))
-        videoTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Play from", control: playbackSourcePopUp))
-        sourceFileLabel.lineBreakMode = .byTruncatingMiddle
-        sourceFileLabel.maximumNumberOfLines = 2
-        videoTabView.addArrangedSubview(sourceFileLabel)
-        videoTabView.addArrangedSubview(videoFormatLabel)
-        videoTabView.addArrangedSubview(aspectRatioLabel)
-        videoTabView.addArrangedSubview(videoTrackLabel)
-        videoTabView.addArrangedSubview(audioInfoLabel)
+        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Decode"))
+        videoTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Path", control: playbackSourcePopUp))
 
         videoTabView.addArrangedSubview(makeSettingsSectionHeader("Playback"))
         videoTabView.addArrangedSubview(makePlaybackSpeedRow())
@@ -2234,13 +2552,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         videoTabView.addArrangedSubview(makeSettingsSegmentedRow(title: "Aspect", control: windowAspectControl))
         videoTabView.addArrangedSubview(lockAspectCheckbox)
 
-        let audioTitle = NSTextField(labelWithString: "Audio Settings")
-        audioTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        let audioHint = NSTextField(labelWithString: "Track selection and output options will appear here.")
-        audioHint.textColor = .secondaryLabelColor
-        audioHint.maximumNumberOfLines = 0
-        audioTabView.addArrangedSubview(audioTitle)
-        audioTabView.addArrangedSubview(audioHint)
+        configureAudioSettingsTab()
 
         let subtitlesTitle = NSTextField(labelWithString: "Subtitles Settings")
         subtitlesTitle.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -2292,53 +2604,43 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updateSettingsTabVisibility() {
-        videoTabView.isHidden = true
-        audioTabView.isHidden = true
-        subtitlesTabView.isHidden = true
-        imageTabView.isHidden = true
-        imageFitTabView.isHidden = true
+        let videoTabs = [videoTabView, audioTabView, subtitlesTabView]
+        let imageTabs = [imageTabView, imageFitTabView]
+        (videoTabs + imageTabs).forEach { tab in
+            tab.isHidden = true
+            tab.alphaValue = 0
+        }
 
         switch activeMediaKind {
         case .video:
-            let index = selectedVideoSettingsTabIndex
-            videoTabView.isHidden = index != 0
-            audioTabView.isHidden = index != 1
-            subtitlesTabView.isHidden = index != 2
+            let index = max(0, min(selectedVideoSettingsTabIndex, videoTabs.count - 1))
+            selectedVideoSettingsTabIndex = index
+            let activeTab = videoTabs[index]
+            activeTab.isHidden = false
+            activeTab.alphaValue = 1
+            settingsContentContainer.addSubview(activeTab, positioned: .above, relativeTo: nil)
         case .image:
-            let index = selectedImageSettingsTabIndex
-            imageTabView.isHidden = index != 0
-            imageFitTabView.isHidden = index != 1
+            let index = max(0, min(selectedImageSettingsTabIndex, imageTabs.count - 1))
+            selectedImageSettingsTabIndex = index
+            let activeTab = imageTabs[index]
+            activeTab.isHidden = false
+            activeTab.alphaValue = 1
+            settingsContentContainer.addSubview(activeTab, positioned: .above, relativeTo: nil)
         case .empty:
             break
         }
+        settingsContentContainer.layoutSubtreeIfNeeded()
     }
 
     private func updateVideoInfoLabels() {
-        if let source = playbackSourceURL ?? currentMediaURL {
-            sourceFileLabel.stringValue = source.path
-        } else {
-            sourceFileLabel.stringValue = "—"
-        }
         refreshPlaybackSourceOptions()
-
-        let codec = lastVideoCodecFourCC ?? "—"
-        if let size = lastVideoSize {
-            videoFormatLabel.stringValue = "\(codec) · \(Int(size.width))×\(Int(size.height))"
-            let ratio = size.width / max(size.height, 1)
-            aspectRatioLabel.stringValue = "Detected: \(formattedAspectRatioName(ratio))"
-        } else {
-            videoFormatLabel.stringValue = codec
-            aspectRatioLabel.stringValue = "Detected: —"
-        }
-
-        videoTrackLabel.stringValue = "Video: \(lastVideoTrackSummary)"
-        audioInfoLabel.stringValue = "Audio: \(lastAudioSummary)"
     }
 
     private func configureVideoSettingsControls() {
         playbackSourcePopUp.target = self
         playbackSourcePopUp.action = #selector(playbackSourceChanged)
         playbackSourcePopUp.controlSize = .small
+        playbackSourcePopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         configureSettingsSegmentedControl(videoFitModeControl, action: #selector(videoFitChanged))
         configureSettingsSegmentedControl(windowAspectControl, action: #selector(windowAspectChanged))
@@ -2388,21 +2690,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func refreshPlaybackSourceOptions() {
         playbackSourcePopUp.removeAllItems()
-        guard let source = playbackSourceURL ?? currentMediaURL else {
+        guard playbackSourceURL != nil || currentMediaURL != nil else {
             playbackSourcePopUp.addItem(withTitle: "—")
             playbackSourcePopUp.isEnabled = false
             return
         }
 
-        playbackSourcePopUp.addItem(withTitle: "Original file")
-        if let cached = FFmpegVideoFallback.cachedPlayableURL(for: source),
-           cached.standardizedFileURL != source.standardizedFileURL,
-           FileManager.default.fileExists(atPath: cached.path) {
-            playbackSourcePopUp.addItem(withTitle: "Compatibility copy")
+        let details = playbackSourceFormatDetails()
+        let hasCompatibilityRemux = compatibilityRemuxURL(for: playbackSourceURL ?? currentMediaURL) != nil
+
+        if hasCompatibilityRemux {
+            playbackSourcePopUp.addItem(withTitle: "Native · \(details)")
+            playbackSourcePopUp.addItem(withTitle: "Compatibility remux · \(details)")
+        } else {
+            playbackSourcePopUp.addItem(withTitle: "\(activeDecodePathLabel()) · \(details)")
         }
 
         playbackSourcePopUp.isEnabled = playbackSourcePopUp.numberOfItems > 1
         suppressPlaybackSourceAction = true
+        let source = playbackSourceURL ?? currentMediaURL
         if isPlayingFromCompatibilityCopy(for: source) {
             playbackSourcePopUp.selectItem(at: min(1, playbackSourcePopUp.numberOfItems - 1))
         } else {
@@ -2411,10 +2717,51 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         suppressPlaybackSourceAction = false
     }
 
-    private func isPlayingFromCompatibilityCopy(for source: URL) -> Bool {
-        guard let active = activePlaybackFileURL else { return false }
+    /// Temp MP4 from **CompatibilityRemux** when FFmpeg already built one for this file.
+    private func compatibilityRemuxURL(for source: URL?) -> URL? {
+        guard let source else { return nil }
+        guard let cached = FFmpegVideoFallback.cachedPlayableURL(for: source),
+              cached.standardizedFileURL != source.standardizedFileURL,
+              FileManager.default.fileExists(atPath: cached.path) else {
+            return nil
+        }
+        return cached
+    }
+
+    private func activeDecodePathLabel() -> String {
+        if isPlayingFromCompatibilityCopy(for: playbackSourceURL ?? currentMediaURL) {
+            return "Compatibility remux"
+        }
+        if mpvBackendActive {
+            return "Extended (mpv)"
+        }
+        return "Native (macOS)"
+    }
+
+    /// Codec / stream summary for the decode-path popup (no file path).
+    private func playbackSourceFormatDetails() -> String {
+        var parts: [String] = []
+        if let codec = lastVideoCodecFourCC, !codec.isEmpty, codec != "—" {
+            parts.append(codec)
+        }
+        if let size = lastVideoSize {
+            parts.append("\(Int(size.width))×\(Int(size.height))")
+            let ratio = size.width / max(size.height, 1)
+            parts.append(formattedAspectRatioName(ratio))
+        }
+        if lastVideoTrackSummary != "Unknown" {
+            parts.append(lastVideoTrackSummary)
+        }
+        if lastAudioSummary != "Unknown" {
+            parts.append(lastAudioSummary)
+        }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    private func isPlayingFromCompatibilityCopy(for source: URL?) -> Bool {
+        guard let source, let active = activePlaybackFileURL else { return false }
         if isGeneratedFallbackURL(active) { return true }
-        if let cached = FFmpegVideoFallback.cachedPlayableURL(for: source) {
+        if let cached = compatibilityRemuxURL(for: source) {
             return active.standardizedFileURL == cached.standardizedFileURL
         }
         return false
@@ -2449,23 +2796,27 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return String(format: "%.2f×", rounded)
     }
 
-    private func applyPlaybackSpeed(_ speed: Float, persist: Bool = true) {
+    func applyPlaybackSpeed(_ speed: Float, persist: Bool = true) {
         let rate = PlaybackSpeedSteps.nearestRate(to: speed)
         let index = PlaybackSpeedSteps.index(for: rate)
         playbackSpeedSlider.integerValue = index
         playbackSpeedValueLabel.stringValue = formattedPlaybackSpeed(rate)
         preferredPlaybackRate = rate
-        player.defaultRate = rate
         if persist {
             SettingsStore.shared.playbackSpeed = rate
         }
-        if player.rate > 0 {
-            player.rate = rate
+        if mpvBackendActive {
+            activeSession?.setRate(rate)
+        } else {
+            player.defaultRate = rate
+            if player.rate > 0 {
+                player.rate = rate
+            }
         }
         updatePlaybackSpeedTransportLabels()
     }
 
-    private func stepPlaybackSpeed(by delta: Int) {
+    func stepPlaybackSpeed(by delta: Int) {
         let index = PlaybackSpeedSteps.index(for: preferredPlaybackRate)
         let newIndex = max(0, min(index + delta, PlaybackSpeedSteps.rates.count - 1))
         guard newIndex != index else { return }
@@ -2511,11 +2862,327 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    private func styleSettingsInfoLabel(_ label: NSTextField) {
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byTruncatingMiddle
-        label.maximumNumberOfLines = 2
+    private func configureAudioSettingsTab() {
+        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Track"))
+        audioSettings.trackPopUp.target = self
+        audioSettings.trackPopUp.action = #selector(audioTrackPopUpChanged)
+        audioTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Audio", control: audioSettings.trackPopUp))
+
+        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Equalizer"))
+        audioSettings.eqPresetPopUp.target = self
+        audioSettings.eqPresetPopUp.action = #selector(audioEQPresetChanged)
+        audioTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Preset", control: audioSettings.eqPresetPopUp))
+        audioTabView.addArrangedSubview(audioSettings.eqUnavailableLabel)
+        audioTabView.addArrangedSubview(audioSettings.eqBandsRow)
+        for slider in audioSettings.eqBandSliders {
+            slider.target = self
+            slider.action = #selector(audioEQBandChanged)
+        }
+        audioSettings.loadBandsFromStore()
+        updateAudioEQAvailability()
+    }
+
+    @MainActor
+    private func refreshAudioTrackPicker() async {
+        guard activeMediaKind == .video else {
+            populateAudioTrackPopUp(tracks: [], selected: nil)
+            updateAudioEQAvailability()
+            return
+        }
+
+        var tracks: [AudioTrackInfo] = []
+        if mpvBackendActive, mpvPlaybackStarted {
+            tracks = await Task.detached { [mpvController] in
+                mpvController.audioTracks()
+            }.value
+        } else if let item = player.currentItem, committedPlayerItemID != nil {
+            do {
+                tracks = try await AudioTrackCatalog.tracks(from: item.asset)
+            } catch {
+                tracks = []
+            }
+        } else if let url = playbackSourceURL ?? currentMediaURL {
+            let asset = AVURLAsset(url: url)
+            do {
+                tracks = try await AudioTrackCatalog.tracks(from: asset)
+            } catch {
+                tracks = []
+            }
+        }
+
+        cachedAudioTracks = tracks
+        if tracks.isEmpty {
+            audioOutputEnabled = false
+        } else {
+            audioOutputEnabled = await isEngineAudioOutputEnabled()
+        }
+        let selected = audioOutputEnabled ? await currentSelectedAudioTrack(in: tracks) : nil
+        populateAudioTrackPopUp(tracks: tracks, selected: selected)
+        updatePlaybackVolumeChromeVisibility()
+        updateAudioEQAvailability()
+        await applyPendingAudioTrackSelectionIfNeeded()
+    }
+
+    @MainActor
+    private func isEngineAudioOutputEnabled() async -> Bool {
+        if mpvBackendActive, mpvPlaybackStarted {
+            return await Task.detached { [mpvController] in
+                !mpvController.isAudioTrackDisabled()
+            }.value
+        }
+        if let item = player.currentItem, committedPlayerItemID != nil {
+            return !(await NativeAudioTrackSelection.isAudioDisabled(for: item))
+        }
+        return audioOutputEnabled
+    }
+
+    @MainActor
+    private func currentSelectedAudioTrack(in tracks: [AudioTrackInfo]) async -> AudioTrackInfo? {
+        guard !tracks.isEmpty, audioOutputEnabled else { return nil }
+        if mpvBackendActive, mpvPlaybackStarted {
+            let selectedID = await Task.detached { [mpvController] in
+                mpvController.selectedAudioTrackID()
+            }.value
+            if let selectedID, let match = tracks.first(where: {
+                if case .mpv(let id) = $0.backendID { return id == selectedID }
+                return false
+            }) {
+                return match
+            }
+            return tracks.first
+        }
+        if let item = player.currentItem, let index = await NativeAudioTrackSelection.selectedOptionIndex(for: item),
+           index >= 0, index < tracks.count {
+            return tracks[index]
+        }
+        return tracks.first
+    }
+
+    private func populateAudioTrackPopUp(tracks: [AudioTrackInfo], selected: AudioTrackInfo?) {
+        suppressAudioTrackPopUpAction = true
+        audioSettings.trackPopUp.removeAllItems()
+        audioSettings.trackPopUp.addItem(withTitle: AudioTrackPickerOption.noneMenuTitle)
+        for track in tracks {
+            audioSettings.trackPopUp.addItem(withTitle: track.menuTitle)
+        }
+
+        if tracks.isEmpty || !audioOutputEnabled {
+            audioSettings.trackPopUp.selectItem(at: 0)
+        } else if let selected, let index = tracks.firstIndex(of: selected) {
+            audioSettings.trackPopUp.selectItem(at: index + 1)
+        } else {
+            audioSettings.trackPopUp.selectItem(at: 1)
+        }
+        suppressAudioTrackPopUpAction = false
+    }
+
+    @MainActor
+    private func applyPendingAudioTrackSelectionIfNeeded() async {
+        guard let pending = pendingAudioTrackBackendID else { return }
+        pendingAudioTrackBackendID = nil
+        guard let track = cachedAudioTracks.first(where: { $0.backendID == pending }) else { return }
+        audioOutputEnabled = true
+        _ = await performAudioTrackHotSwap(track)
+        restorePlaybackVolumeAfterAudioEnabled()
+        updatePlaybackVolumeChromeVisibility()
+        await refreshAudioTrackPicker()
+    }
+
+    @objc func audioTrackPopUpChanged(_ sender: NSPopUpButton) {
+        guard !suppressAudioTrackPopUpAction else { return }
+        let index = sender.indexOfSelectedItem
+        guard index >= 0 else { return }
+        if index == 0 {
+            Task { await setAudioOutputEnabled(false) }
+            return
+        }
+        let trackIndex = index - 1
+        guard trackIndex < cachedAudioTracks.count else { return }
+        let track = cachedAudioTracks[trackIndex]
+        Task { await setAudioOutputEnabled(true, track: track) }
+    }
+
+    @MainActor
+    private func setAudioOutputEnabled(_ enabled: Bool, track: AudioTrackInfo? = nil) async {
+        audioOutputEnabled = enabled
+        if enabled {
+            if let track {
+                if await performAudioTrackHotSwap(track) {
+                    restorePlaybackVolumeAfterAudioEnabled()
+                } else if let url = playbackSourceURL ?? currentMediaURL {
+                    await reloadForAudioTrackChange(track: track, url: url)
+                    return
+                } else {
+                    restorePlaybackVolumeAfterAudioEnabled()
+                }
+            } else {
+                restorePlaybackVolumeAfterAudioEnabled()
+            }
+        } else {
+            _ = await applyAudioOutputDisabled()
+        }
+        updatePlaybackVolumeChromeVisibility()
+        let selectedTrack: AudioTrackInfo?
+        if enabled {
+            if let track {
+                selectedTrack = track
+            } else {
+                selectedTrack = await currentSelectedAudioTrack(in: cachedAudioTracks)
+            }
+        } else {
+            selectedTrack = nil
+        }
+        populateAudioTrackPopUp(tracks: cachedAudioTracks, selected: selectedTrack)
+    }
+
+    @MainActor
+    private func reloadForAudioTrackChange(track: AudioTrackInfo, url: URL) async {
+        let resumeSec = activeSession?.currentTimeSec ?? CMTimeGetSeconds(player.currentTime())
+        let wasPlaying = mpvBackendActive
+            ? (activeSession?.isPlaying == true)
+            : (player.rate > 0)
+        pendingAudioTrackBackendID = track.backendID
+        pendingResumePlayingAfterLoad = wasPlaying
+        pendingStartTimeAfterLoad = CMTime(
+            seconds: resumeSec.isFinite && resumeSec >= 0 ? resumeSec : 0,
+            preferredTimescale: 600
+        )
+        performLoadVideo(url: url, replaceCurrent: false, startAt: pendingStartTimeAfterLoad, forceReload: true)
+    }
+
+    @MainActor
+    private func applyAudioOutputDisabled() async -> Bool {
+        if mpvBackendActive, mpvPlaybackStarted {
+            return await Task.detached { [mpvController] in
+                mpvController.disableAudioTrack()
+            }.value
+        }
+        if let item = player.currentItem, item.status == .readyToPlay {
+            _ = await NativeAudioTrackSelection.disableAudio(on: item)
+            player.isMuted = true
+            player.volume = 0
+            return true
+        }
+        player.isMuted = true
+        player.volume = 0
+        return false
+    }
+
+    private func restorePlaybackVolumeAfterAudioEnabled() {
+        volumeSlider.doubleValue = Double(desiredPlaybackVolume)
+        applyEffectivePlaybackVolume()
+        updateVolumeMuteButtonIcon()
+    }
+
+    private func updatePlaybackVolumeChromeVisibility() {
+        let showVolume = activeMediaKind == .video && audioOutputEnabled
+        volumeCluster.isHidden = !showVolume
+        playbackCenterToVolumeConstraint?.isActive = showVolume
+        playbackCenterToEdgeConstraint?.isActive = !showVolume
+        if showVolume, playbackTopRowLayoutConfigured {
+            let tier = currentControlTier
+            volumeSliderWidthConstraint?.constant = volumeSliderWidth(for: tier)
+        }
+        if showVolume {
+            updateVolumeMuteButtonIcon()
+        }
+    }
+
+    private func effectivePlaybackVolume() -> Float {
+        isUserVolumeMuted ? 0 : desiredPlaybackVolume
+    }
+
+    func applyEffectivePlaybackVolume() {
+        guard audioOutputEnabled, !isMutedForSwitch else { return }
+        let volume = effectivePlaybackVolume()
+        if mpvBackendActive {
+            activeSession?.setVolume(volume)
+        } else {
+            player.isMuted = volume < 0.01
+            player.volume = volume
+        }
+    }
+
+    private func volumeSpeakerSymbolName() -> String {
+        if isUserVolumeMuted {
+            return "speaker.slash.fill"
+        }
+        if desiredPlaybackVolume < 0.05 {
+            return "speaker.fill"
+        }
+        if desiredPlaybackVolume < 0.34 {
+            return "speaker.wave.1.fill"
+        }
+        if desiredPlaybackVolume < 0.67 {
+            return "speaker.wave.2.fill"
+        }
+        return "speaker.wave.3.fill"
+    }
+
+    func updateVolumeMuteButtonIcon() {
+        let symbol = volumeSpeakerSymbolName()
+        let label = isUserVolumeMuted ? "Unmute" : "Mute"
+        styleIconButton(volumeMuteButton, symbol: symbol, label: label, pointSize: 13)
+    }
+
+    @objc func volumeMuteButtonPressed() {
+        guard audioOutputEnabled, !isMutedForSwitch else { return }
+        if isUserVolumeMuted {
+            isUserVolumeMuted = false
+            desiredPlaybackVolume = max(0.05, volumeLevelBeforeUserMute)
+            volumeSlider.doubleValue = Double(desiredPlaybackVolume)
+        } else {
+            volumeLevelBeforeUserMute = max(desiredPlaybackVolume, 0.05)
+            isUserVolumeMuted = true
+        }
+        applyEffectivePlaybackVolume()
+        updateVolumeMuteButtonIcon()
+    }
+
+    @MainActor
+    private func performAudioTrackHotSwap(_ track: AudioTrackInfo) async -> Bool {
+        if mpvBackendActive, mpvPlaybackStarted, case .mpv(let trackID) = track.backendID {
+            return await Task.detached { [mpvController] in
+                mpvController.setAudioTrackID(trackID)
+            }.value
+        }
+        if let item = player.currentItem, item.status == .readyToPlay {
+            return await NativeAudioTrackSelection.select(track: track, on: item)
+        }
+        return false
+    }
+
+    private func updateAudioEQAvailability() {
+        let available = mpvBackendActive && mpvPlaybackStarted
+        audioSettings.setEQControlsEnabled(available)
+    }
+
+    func applyPlaybackEQToActiveMpv() {
+        guard mpvBackendActive, mpvPlaybackStarted else { return }
+        let bands = SettingsStore.shared.playbackEQBands
+        mpvController.applyPlaybackEQ(gains: bands)
+    }
+
+    @objc private func audioEQPresetChanged() {
+        guard let raw = audioSettings.eqPresetPopUp.selectedItem?.representedObject as? String,
+              let preset = PlaybackEQPreset(rawValue: raw) else { return }
+        SettingsStore.shared.playbackEQPreset = preset
+        if preset != .manual {
+            SettingsStore.shared.playbackEQBands = preset.bandGains
+            audioSettings.loadBandsFromStore()
+        }
+        applyPlaybackEQToActiveMpv()
+    }
+
+    @objc private func audioEQBandChanged() {
+        SettingsStore.shared.playbackEQPreset = .manual
+        if let item = audioSettings.eqPresetPopUp.itemArray.first(where: {
+            ($0.representedObject as? String) == PlaybackEQPreset.manual.rawValue
+        }) {
+            audioSettings.eqPresetPopUp.select(item)
+        }
+        SettingsStore.shared.playbackEQBands = audioSettings.bandsFromSliders()
+        applyPlaybackEQToActiveMpv()
     }
 
     private func makeSettingsSectionHeader(_ title: String) -> NSTextField {
@@ -2569,7 +3236,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         syncVideoSettingsControlsFromStore()
     }
 
-    private func applyWindowAspectFromSettings() {
+    func applyWindowAspectFromSettings() {
         let store = SettingsStore.shared
         let ratio: CGFloat?
         switch store.windowAspectPreset {
@@ -2588,7 +3255,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         delegate?.playerViewController(self, didRequestWindowAspectRatio: ratio)
     }
 
-    private func updateLockAspectControlAvailability() {
+    func updateLockAspectControlAvailability() {
         let isAuto = SettingsStore.shared.windowAspectPreset == .auto
         lockAspectCheckbox.isEnabled = isAuto
         lockAspectCheckbox.alphaValue = isAuto ? 1 : 0.5
@@ -2617,11 +3284,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return row
     }
 
-    private func applyVideoFitMode(_ mode: VideoFitMode) {
+    func applyVideoFitMode(_ mode: VideoFitMode) {
         playerSurfaceView.videoGravity = mode == .fill ? .resizeAspectFill : .resizeAspect
     }
 
     private func startPlaybackAtPreferredRate() {
+        if mpvBackendActive {
+            activeSession?.setRate(preferredPlaybackRate)
+            activeSession?.play()
+            return
+        }
         player.play()
         if preferredPlaybackRate != 1.0 {
             player.rate = preferredPlaybackRate
@@ -2686,12 +3358,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         applyPlaybackSpeed(PlaybackSpeedSteps.rates[index + 1])
     }
 
-    @objc private func playbackSourceChanged() {
+    @objc func playbackSourceChanged() {
         guard !suppressPlaybackSourceAction else { return }
         guard playbackSourcePopUp.isEnabled else { return }
         guard let source = playbackSourceURL ?? currentMediaURL else { return }
 
-        let resumeTime = player.currentTime()
+        let resumeTime: CMTime
+        if mpvBackendActive, let session = activeSession {
+            resumeTime = CMTime(seconds: session.currentTimeSec, preferredTimescale: 600)
+        } else {
+            resumeTime = player.currentTime()
+        }
         let wantsCompatibility = playbackSourcePopUp.indexOfSelectedItem == 1
 
         if wantsCompatibility {
@@ -2717,15 +3394,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         SettingsStore.shared.loopPlaybackEnabled = loopPlaybackCheckbox.state == .on
     }
 
-    private func showSettingsSheet() {
+    private func ensureSettingsTabRowsAboveContent() {
+        rightSettingsSheet.addSubview(videoSettingsTabsRow, positioned: .above, relativeTo: settingsContentContainer)
+        rightSettingsSheet.addSubview(imageSettingsTabsRow, positioned: .above, relativeTo: settingsContentContainer)
+    }
+
+    func showSettingsSheet() {
         guard activeMediaKind != .empty else { return }
         guard playbackLibraryOverlay == .closed else { return }
         guard rightSettingsSheet.isHidden else { return }
         rightSettingsSheet.isHidden = false
+        refreshImmersiveChromePinnedState()
+        ensureSettingsTabRowsAboveContent()
+        updateSettingsTabVisibility()
+        applySettingsTabButtonState()
         syncVideoSettingsControlsFromStore()
         updateVideoInfoLabels()
         applyWindowAspectFromSettings()
-        raisePlaybackChromeToFront()
+        raiseSettingsSheetAbovePlaybackChrome()
         installOutsideClickMonitor()
     }
 
@@ -2739,13 +3425,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return nil
     }
 
-    private func hideSettingsSheet() {
+    func hideSettingsSheet() {
         guard !rightSettingsSheet.isHidden else { return }
         rightSettingsSheet.isHidden = true
+        if usesImmersiveChrome {
+            scheduleImmersiveChromeHide()
+        }
+        raisePlaybackChromeToFront()
         removeOutsideClickMonitorIfNoSheetsVisible()
     }
 
-    private func showFullMediaLibrary() {
+    func showFullMediaLibrary() {
         installLibraryChromeIfNeeded()
         playbackLibraryOverlay = .closed
         librarySidebar.isHidden = false
@@ -2763,9 +3453,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         openButton.isHidden = true
         hintLabel.isHidden = true
         raisePlaybackChromeToFront()
+        relayoutLibraryChromeForTitleBar()
     }
 
-    private func showPlaybackLibrarySidebarOnly() {
+    func showPlaybackLibrarySidebarOnly() {
         guard activeMediaKind != .empty else {
             showFullMediaLibrary()
             return
@@ -2782,6 +3473,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageControlsContainer.isHidden = true
         installOutsideClickMonitor()
         raisePlaybackChromeToFront()
+        refreshImmersiveChromePinnedState()
     }
 
     private func expandPlaybackLibraryBrowse() {
@@ -2799,7 +3491,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         libraryBrowse.isHidden = true
     }
 
-    private func collapsePlaybackLibraryOverlay() {
+    func collapsePlaybackLibraryOverlay() {
         guard activeMediaKind != .empty else { return }
         playbackLibraryOverlay = .closed
         librarySidebar.isHidden = true
@@ -2808,9 +3500,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         restoreMainPlaybackSurface()
         removeOutsideClickMonitorIfNoSheetsVisible()
         raisePlaybackChromeToFront()
+        if usesImmersiveChrome {
+            scheduleImmersiveChromeHide()
+        } else {
+            refreshImmersiveChromePinnedState()
+        }
     }
 
-    private func hideMediaLibrary() {
+    func hideMediaLibrary() {
         if activeMediaKind == .empty { return }
         collapsePlaybackLibraryOverlay()
     }
@@ -2821,10 +3518,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             break
         case .video:
             playerSurfaceView.isHidden = false
-            controlsContainer.isHidden = false
+            applyPlaybackBarVisible(immersiveChromeVisible, animated: false)
         case .image:
             imageSurfaceView.isHidden = false
-            imageControlsContainer.isHidden = false
+            applyPlaybackBarVisible(immersiveChromeVisible, animated: false)
         }
     }
 
@@ -2839,6 +3536,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         playbackMiniPreview.isHidden = false
+    }
+
+    private func closePlaybackFromMiniPreview() {
+        playbackMiniPreview.isHidden = true
+        playbackMiniPreview.detachVideoPlayer()
+        showEmptySurface()
     }
 
     private func syncPlaybackLibraryBrowseExpansion() {
@@ -2874,6 +3577,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
+    private func isTransientMenuWindow(_ window: NSWindow?) -> Bool {
+        guard let window, window !== view.window else { return false }
+        if window.level == .popUpMenu { return true }
+        let name = String(describing: type(of: window))
+        return name.contains("Menu") || name.contains("Popup")
+    }
+
+    private func shouldKeepSettingsSheetOpen(for event: NSEvent) -> Bool {
+        let pointInView = view.convert(event.locationInWindow, from: nil)
+        if rightSettingsSheet.frame.contains(pointInView) { return true }
+        if settingsButton.frame.contains(pointInView) || imageSettingsButton.frame.contains(pointInView) {
+            return true
+        }
+        if isTransientMenuWindow(event.window) { return true }
+        return false
+    }
+
     private func installOutsideClickMonitor() {
         removeOutsideClickMonitor()
         outsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -2882,10 +3602,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             let pointInView = self.view.convert(event.locationInWindow, from: nil)
 
             if !self.rightSettingsSheet.isHidden {
-                if self.rightSettingsSheet.frame.contains(pointInView) {
-                    return event
-                }
-                if self.settingsButton.frame.contains(pointInView) || self.imageSettingsButton.frame.contains(pointInView) {
+                if self.shouldKeepSettingsSheetOpen(for: event) {
                     return event
                 }
                 self.hideSettingsSheet()
@@ -2921,14 +3638,247 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func handleMouseMoved(_ point: NSPoint) {
+        guard view.bounds.contains(point) else {
+            cancelEdgePanelHoverTimers()
+            handlePointerLeftContentView()
+            return
+        }
+        noteImmersiveChromePointerActivity()
+        guard !dragSessionActive else {
+            cancelEdgePanelHoverTimers()
+            return
+        }
+
         let hotZoneWidth: CGFloat = 42
         let isInLeftHotZone = point.x <= hotZoneWidth
         let isInRightHotZone = point.x >= (view.bounds.width - hotZoneWidth)
+
         if isInLeftHotZone, activeMediaKind != .empty, playbackLibraryOverlay == .closed {
-            showPlaybackLibrarySidebarOnly()
+            scheduleLeftEdgePanelOpen()
+        } else {
+            cancelLeftEdgePanelOpen()
         }
-        if activeMediaKind != .empty, isInRightHotZone, playbackLibraryOverlay == .closed {
-            showSettingsSheet()
+
+        if activeMediaKind != .empty, isInRightHotZone, playbackLibraryOverlay == .closed, rightSettingsSheet.isHidden {
+            scheduleRightEdgePanelOpen()
+        } else {
+            cancelRightEdgePanelOpen()
+        }
+    }
+
+    private func scheduleLeftEdgePanelOpen() {
+        guard pendingLeftEdgePanelOpen == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingLeftEdgePanelOpen = nil
+            guard self.activeMediaKind != .empty, self.playbackLibraryOverlay == .closed else { return }
+            self.showPlaybackLibrarySidebarOnly()
+        }
+        pendingLeftEdgePanelOpen = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.edgePanelOpenDelay, execute: work)
+    }
+
+    private func cancelLeftEdgePanelOpen() {
+        pendingLeftEdgePanelOpen?.cancel()
+        pendingLeftEdgePanelOpen = nil
+    }
+
+    private func scheduleRightEdgePanelOpen() {
+        guard pendingRightEdgePanelOpen == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRightEdgePanelOpen = nil
+            guard self.activeMediaKind != .empty,
+                  self.playbackLibraryOverlay == .closed,
+                  self.rightSettingsSheet.isHidden else { return }
+            self.showSettingsSheet()
+        }
+        pendingRightEdgePanelOpen = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.edgePanelOpenDelay, execute: work)
+    }
+
+    private func cancelRightEdgePanelOpen() {
+        pendingRightEdgePanelOpen?.cancel()
+        pendingRightEdgePanelOpen = nil
+    }
+
+    private func cancelEdgePanelHoverTimers() {
+        cancelLeftEdgePanelOpen()
+        cancelRightEdgePanelOpen()
+    }
+
+    private func handlePointerLeftContentView() {
+        cancelEdgePanelHoverTimers()
+        scheduleImmersiveChromeHide()
+        // Settings stays open for in-panel interaction; outside-click monitor dismisses it.
+        guard rightSettingsSheet.isHidden else { return }
+        hideSettingsSheet()
+    }
+
+    // MARK: - Immersive window chrome (auto-hide title bar + playback bar)
+
+    private var usesImmersiveChrome: Bool {
+        activeMediaKind == .video || activeMediaKind == .image
+    }
+
+    /// Library-only main view: title bar + traffic lights stay visible (no auto-hide).
+    private var titleBarChromeAlwaysVisible: Bool {
+        activeMediaKind == .empty
+    }
+
+    private var isTitleBarChromeShowing: Bool {
+        titleBarChromeAlwaysVisible || immersiveChromeVisible
+    }
+
+    private var immersiveChromePinnedVisible: Bool {
+        dragSessionActive
+            || playbackLibraryOverlay != .closed
+            || !rightSettingsSheet.isHidden
+            || queuePopover?.isShown == true
+    }
+
+    private func currentPlayingDisplayTitle() -> String? {
+        currentMediaURL?.deletingPathExtension().lastPathComponent
+    }
+
+    func playingTitleForWindow() -> String? {
+        currentPlayingDisplayTitle()
+    }
+
+    var usesImmersiveChromeForWindow: Bool {
+        usesImmersiveChrome
+    }
+
+    private func syncPlayingWindowTitle() {
+        delegate?.playerViewController(self, setImmersiveChromeVisible: isTitleBarChromeShowing, animated: false)
+    }
+
+    private func resetImmersiveChromeAfterMediaChange() {
+        immersiveChromeHideWorkItem?.cancel()
+        immersiveChromeHideWorkItem = nil
+        setImmersiveChromeVisible(false, animated: false)
+    }
+
+    private func noteImmersiveChromePointerActivity() {
+        guard usesImmersiveChrome else { return }
+        immersiveChromeHideWorkItem?.cancel()
+        immersiveChromeHideWorkItem = nil
+        setImmersiveChromeVisible(true, animated: true)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.immersiveChromeHideWorkItem = nil
+            guard !self.immersiveChromePinnedVisible else {
+                self.scheduleImmersiveChromeHide()
+                return
+            }
+            self.setImmersiveChromeVisible(false, animated: true)
+        }
+        immersiveChromeHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + ImmersiveWindowChrome.hideDelay, execute: work)
+    }
+
+    private func scheduleImmersiveChromeHide() {
+        guard usesImmersiveChrome, !immersiveChromePinnedVisible else { return }
+        immersiveChromeHideWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.setImmersiveChromeVisible(false, animated: true)
+        }
+        immersiveChromeHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func setImmersiveChromeVisible(_ visible: Bool, animated: Bool) {
+        let shouldShowTitleBar = titleBarChromeAlwaysVisible || visible || immersiveChromePinnedVisible
+        let shouldShowPlaybackBar = usesImmersiveChrome && (visible || immersiveChromePinnedVisible)
+        guard shouldShowTitleBar != isTitleBarChromeShowing else {
+            if shouldShowTitleBar {
+                delegate?.playerViewController(self, setImmersiveChromeVisible: true, animated: animated)
+                updateTitleBarChromeStrip(visible: true, animated: animated)
+                relayoutLibraryChromeForTitleBar()
+            }
+            if usesImmersiveChrome, shouldShowPlaybackBar != immersiveChromeVisible {
+                applyPlaybackBarVisible(shouldShowPlaybackBar, animated: animated)
+            }
+            return
+        }
+        immersiveChromeVisible = shouldShowPlaybackBar
+        if usesImmersiveChrome {
+            applyPlaybackBarVisible(shouldShowPlaybackBar, animated: animated)
+        }
+        delegate?.playerViewController(self, setImmersiveChromeVisible: shouldShowTitleBar, animated: animated)
+        updateTitleBarChromeStrip(visible: shouldShowTitleBar, animated: animated)
+        relayoutLibraryChromeForTitleBar()
+    }
+
+    private func updateTitleBarChromeLayout() {
+        titleBarChromeHeightConstraint?.constant = ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window)
+        if isTitleBarChromeShowing {
+            relayoutLibraryChromeForTitleBar()
+        }
+    }
+
+    private func updateTitleBarChromeStrip(visible: Bool, animated: Bool = false) {
+        guard playerInterfaceInstalled else { return }
+        updateTitleBarChromeLayout()
+        let apply = {
+            self.titleBarChromeStrip.alphaValue = visible ? 1 : 0
+            self.titleBarChromeStrip.isHidden = !visible
+            if visible {
+                self.raiseTitleBarChromeToFront()
+            }
+        }
+        guard animated else {
+            apply()
+            return
+        }
+        if visible {
+            titleBarChromeStrip.isHidden = false
+            raiseTitleBarChromeToFront()
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = ImmersiveWindowChrome.animationDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.titleBarChromeStrip.animator().alphaValue = visible ? 1 : 0
+        } completionHandler: {
+            if !visible {
+                self.titleBarChromeStrip.isHidden = true
+            }
+        }
+    }
+
+    private func relayoutLibraryChromeForTitleBar() {
+        guard libraryChromeInstalled else { return }
+        librarySidebar.syncTitleBarContentInset(chromeVisible: isTitleBarChromeShowing)
+        libraryBrowse.syncTitleBarContentInset(chromeVisible: isTitleBarChromeShowing)
+    }
+
+    private func applyPlaybackBarVisible(_ visible: Bool, animated: Bool = false) {
+        let bar = activeMediaKind == .image ? imageControlsContainer : controlsContainer
+        guard activeMediaKind == .video || activeMediaKind == .image else { return }
+        let apply = {
+            bar.alphaValue = visible ? 1 : 0
+            bar.isHidden = !visible
+        }
+        guard animated else {
+            apply()
+            return
+        }
+        if visible {
+            bar.isHidden = false
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = ImmersiveWindowChrome.animationDuration
+            bar.animator().alphaValue = visible ? 1 : 0
+        } completionHandler: {
+            if !visible {
+                bar.isHidden = true
+            }
+        }
+    }
+
+    private func refreshImmersiveChromePinnedState() {
+        if immersiveChromePinnedVisible {
+            setImmersiveChromeVisible(true, animated: true)
         }
     }
 
@@ -2938,25 +3888,33 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         playbackTopRowView.translatesAutoresizingMaskIntoConstraints = false
         playbackCenterClusterStack.translatesAutoresizingMaskIntoConstraints = false
-        volumeSlider.translatesAutoresizingMaskIntoConstraints = false
+        volumeCluster.translatesAutoresizingMaskIntoConstraints = false
 
         playbackTopRowView.addSubview(playbackCenterClusterStack)
-        playbackTopRowView.addSubview(volumeSlider)
+        playbackTopRowView.addSubview(volumeCluster)
+
+        playbackCenterToVolumeConstraint = playbackCenterClusterStack.trailingAnchor.constraint(
+            lessThanOrEqualTo: volumeCluster.leadingAnchor,
+            constant: -playbackControlClusterSpacing
+        )
+        playbackCenterToEdgeConstraint = playbackCenterClusterStack.trailingAnchor.constraint(
+            lessThanOrEqualTo: playbackTopRowView.trailingAnchor
+        )
 
         NSLayoutConstraint.activate([
             playbackTopRowView.heightAnchor.constraint(equalToConstant: 28),
 
-            volumeSlider.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
-            volumeSlider.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+            volumeCluster.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
+            volumeCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
             playbackCenterClusterStack.centerXAnchor.constraint(equalTo: playbackTopRowView.centerXAnchor),
             playbackCenterClusterStack.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
             playbackCenterClusterStack.leadingAnchor.constraint(greaterThanOrEqualTo: playbackTopRowView.leadingAnchor),
-            playbackCenterClusterStack.trailingAnchor.constraint(
-                lessThanOrEqualTo: volumeSlider.leadingAnchor,
-                constant: -playbackControlClusterSpacing
-            )
+            playbackCenterToVolumeConstraint!,
+            playbackCenterToEdgeConstraint!
         ])
+        playbackCenterToEdgeConstraint?.isActive = false
+        updatePlaybackVolumeChromeVisibility()
     }
 
     private func configureTransportSpeedClusterSpacer(_ spacer: NSView) {
@@ -3052,7 +4010,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func updatePlaybackBarWidth() {
         let width = MusicStylePlaybackBar.preferredBarWidth(forContentWidthPoints: view.bounds.width)
         playbackBarWidthConstraint?.constant = width
-        imageBarWidthConstraint?.constant = min(420, width)
+        imageBarWidthConstraint?.constant = width
     }
 
     private func applyResponsiveControlsLayout() {
@@ -3149,7 +4107,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         currentTimeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
         totalTimeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        volumeSliderWidthConstraint?.constant = volumeSliderWidth(for: tier)
+        updatePlaybackVolumeChromeVisibility()
         bottomControlsStack.widthAnchor.constraint(equalTo: controlsStack.widthAnchor).isActive = true
     }
 
@@ -3170,8 +4128,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updatePlayPauseButtonIcon() {
-        let symbol = player.rate > 0 ? "pause.fill" : "play.fill"
-        let label = player.rate > 0 ? "Pause" : "Play"
+        let playing = mpvBackendActive ? (activeSession?.isPlaying == true) : (player.rate > 0)
+        let symbol = playing ? "pause.fill" : "play.fill"
+        let label = playing ? "Pause" : "Play"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
             let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
             playPauseButton.image = image.withSymbolConfiguration(config)
@@ -3182,6 +4141,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateTimelineUI() {
         guard !isSeekingFromUI else { return }
+        if mpvBackendActive, let session = activeSession {
+            let durationSec = session.durationSec
+            let currentSec = session.currentTimeSec
+            if durationSec.isFinite, durationSec > 0 {
+                seekSlider.maxValue = durationSec
+                seekSlider.doubleValue = max(0, min(currentSec, durationSec))
+                currentTimeLabel.stringValue = formatTime(currentSec)
+                totalTimeLabel.stringValue = formatTime(durationSec)
+            }
+            return
+        }
         guard let currentItem = player.currentItem else { return }
         logBufferStateChanges(item: currentItem)
         let durationSec = CMTimeGetSeconds(currentItem.duration)
@@ -3248,9 +4218,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
     }
 
-    @objc private func togglePlayPause() {
+    @objc func togglePlayPause() {
         let start = CFAbsoluteTimeGetCurrent()
-        if player.rate > 0 {
+        if mpvBackendActive, let session = activeSession {
+            if session.isPlaying {
+                session.pause()
+            } else {
+                startPlaybackAtPreferredRate()
+            }
+        } else if player.rate > 0 {
             player.pause()
         } else {
             startPlaybackAtPreferredRate()
@@ -3270,11 +4246,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc private func volumeSliderChanged() {
+        guard audioOutputEnabled else { return }
         let start = CFAbsoluteTimeGetCurrent()
         desiredPlaybackVolume = Float(volumeSlider.doubleValue)
-        if !isMutedForSwitch {
-            player.volume = desiredPlaybackVolume
+        if desiredPlaybackVolume < 0.01 {
+            isUserVolumeMuted = true
+        } else {
+            isUserVolumeMuted = false
+            volumeLevelBeforeUserMute = desiredPlaybackVolume
         }
+        applyEffectivePlaybackVolume()
+        updateVolumeMuteButtonIcon()
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
         print(String(format: "[DEBUG-ui] volume=%.2fms", elapsedMs))
     }
@@ -3283,6 +4265,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func preparePlayerForVideoSwitch() {
         volumeRampToken += 1
         isMutedForSwitch = true
+        if mpvBackendActive {
+            activeSession?.pause()
+        }
         player.pause()
         player.isMuted = true
         print("[DEBUG-playback] paused Laugh for video switch (player muted, volume unchanged)")
@@ -3290,6 +4275,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     /// Stop Laugh audio/video output without `replaceCurrentItem(nil)` — that call can reset Core Audio for all apps.
     private func suspendPlayerOutputForStillOrEmpty() {
+        stopMpvBackend()
         volumeRampToken += 1
         isMutedForSwitch = true
         renderMonitor.reset()
@@ -3303,6 +4289,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func connectPlayerToVideoSurfaces() {
+        guard !mpvBackendActive else { return }
+        playerSurfaceView.setMpvEmbeddingActive(false)
         if !isMutedForSwitch {
             player.isMuted = false
         }
@@ -3319,24 +4307,33 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func restoreAudioAfterSwitchSmoothly() {
-        let target = max(0, min(1, desiredPlaybackVolume))
+        guard audioOutputEnabled else {
+            isMutedForSwitch = false
+            return
+        }
         isMutedForSwitch = false
-        player.isMuted = false
-        player.volume = target
-        print(String(format: "[DEBUG-playback] restored Laugh volume=%.2f", target))
+        applyEffectivePlaybackVolume()
+        updateVolumeMuteButtonIcon()
+        print(String(format: "[DEBUG-playback] restored Laugh volume=%.2f muted=%@", effectivePlaybackVolume(), isUserVolumeMuted.description))
     }
 
     /// Safety net after playback has actually started — never during an in-flight switch.
     private func ensureLaughVolumeIfPlaying() {
         guard activeMediaKind == .video else { return }
+        guard audioOutputEnabled else { return }
         guard !isMutedForSwitch else { return }
+        guard !isUserVolumeMuted, desiredPlaybackVolume > 0.01 else { return }
+        if mpvBackendActive {
+            guard mpvPlaybackStarted, activeSession?.isPlaying == true else { return }
+            guard effectivePlaybackVolume() > 0.01 else { return }
+            activeSession?.setVolume(effectivePlaybackVolume())
+            return
+        }
         guard lastPlaybackStartedItemID != nil else { return }
         guard player.rate > 0, player.currentItem != nil else { return }
-        guard desiredPlaybackVolume > 0.01 else { return }
         guard player.volume < 0.01 || player.isMuted else { return }
-        player.isMuted = false
-        player.volume = desiredPlaybackVolume
-        print(String(format: "[DEBUG-playback] volume safety restore=%.2f", desiredPlaybackVolume))
+        applyEffectivePlaybackVolume()
+        print(String(format: "[DEBUG-playback] volume safety restore=%.2f", effectivePlaybackVolume()))
     }
 
     @objc private func queuePreviousPressed() {
@@ -3382,27 +4379,534 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc private func videoSettingsTabPressed(_ sender: NSButton) {
-        selectedVideoSettingsTabIndex = max(0, min(sender.tag, 2))
+        let index = videoSettingsTabButtons.firstIndex(where: { $0 === sender }) ?? sender.tag
+        selectVideoSettingsTab(index: index)
+    }
+
+    func selectVideoSettingsTab(index: Int) {
+        guard activeMediaKind == .video else { return }
+        selectedVideoSettingsTabIndex = max(0, min(index, 2))
         applySettingsTabButtonState()
         updateSettingsTabVisibility()
+        if selectedVideoSettingsTabIndex == 1 {
+            updateAudioEQAvailability()
+            Task { await refreshAudioTrackPicker() }
+        }
     }
 
     @objc private func imageSettingsTabPressed(_ sender: NSButton) {
-        selectedImageSettingsTabIndex = max(0, min(sender.tag, 1))
+        let index = imageSettingsTabButtons.firstIndex(where: { $0 === sender }) ?? sender.tag
+        guard activeMediaKind == .image else { return }
+        selectedImageSettingsTabIndex = max(0, min(index, 1))
         applySettingsTabButtonState()
         updateSettingsTabVisibility()
     }
 
-    @objc private func imageZoomIn() {
+    @objc func imageZoomIn() {
         imageSurfaceView.setZoomScale(min(imageSurfaceView.zoomScale * 1.15, 8.0))
     }
 
-    @objc private func imageZoomOut() {
+    @objc func imageZoomOut() {
         imageSurfaceView.setZoomScale(max(imageSurfaceView.zoomScale / 1.15, 0.2))
     }
 
-    @objc private func imageFit() {
+    @objc func imageFit() {
         imageSurfaceView.resetZoom()
+    }
+}
+
+// MARK: - Shortcut command funnel
+
+extension PlayerViewController {
+    private static let standardSeekSeconds: Double = 10
+    private static let fineSeekSeconds: Double = 1
+    private static let volumeStep: Float = 0.05
+
+    func installVideoDoubleClickFullscreenMonitor() {
+        guard videoDoubleClickMonitor == nil else { return }
+        videoDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self else { return event }
+            guard event.clickCount == 2, self.activeMediaKind == .video else { return event }
+            guard self.shouldToggleFullscreenForVideoDoubleClick(at: event.locationInWindow) else { return event }
+            self.view.window?.toggleFullScreen(nil)
+            return event
+        }
+    }
+
+    private func shouldToggleFullscreenForVideoDoubleClick(at windowLocation: NSPoint) -> Bool {
+        guard !playerSurfaceView.isHidden else { return false }
+        let pointInSurface = playerSurfaceView.convert(windowLocation, from: nil)
+        guard playerSurfaceView.bounds.contains(pointInSurface) else { return false }
+        return !isPointOverVideoChrome(windowLocation)
+    }
+
+    private func isPointOverVideoChrome(_ windowLocation: NSPoint) -> Bool {
+        let chrome: [NSView] = [
+            controlsContainer,
+            rightSettingsSheet,
+            librarySidebar,
+            libraryBrowse,
+            compatibilityBanner,
+            queueDropZone,
+            openButton,
+            hintLabel,
+            playbackMiniPreview
+        ]
+        for view in chrome where !view.isHidden {
+            let local = view.convert(windowLocation, from: nil)
+            if view.bounds.contains(local) {
+                return true
+            }
+        }
+        return false
+    }
+
+    func installKeyboardShortcutMonitor() {
+        guard keyboardShortcutMonitor == nil else { return }
+        keyboardShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard self.view.window?.isKeyWindow == true else { return event }
+            if self.handleKeyboardEvent(event) {
+                return nil
+            }
+            return event
+        }
+    }
+
+    func commandToggleLibraryPanel() {
+        if activeMediaKind == .empty {
+            librarySidebar.reloadRoots()
+            libraryBrowse.reloadContent()
+            if playbackLibraryOverlay == .closed {
+                showFullMediaLibrary()
+            } else {
+                hideMediaLibrary()
+            }
+            return
+        }
+        if playbackLibraryOverlay != .closed {
+            collapsePlaybackLibraryOverlay()
+        } else {
+            showPlaybackLibrarySidebarOnly()
+        }
+    }
+
+    func commandToggleSettingsInspector() {
+        guard activeMediaKind != .empty, playbackLibraryOverlay == .closed else { return }
+        if rightSettingsSheet.isHidden {
+            showSettingsSheet()
+        } else {
+            hideSettingsSheet()
+        }
+    }
+
+    func commandSelectSettingsTab(_ index: Int) {
+        guard activeMediaKind == .video else { return }
+        if rightSettingsSheet.isHidden, playbackLibraryOverlay == .closed {
+            showSettingsSheet()
+        }
+        selectVideoSettingsTab(index: index)
+    }
+
+    func commandStopAndClose() {
+        guard activeMediaKind != .empty else { return }
+        showEmptySurface()
+    }
+
+    func commandHandleEscapeKey() {
+        guard activeMediaKind != .empty else { return }
+        switch activeMediaKind {
+        case .video:
+            if isVideoPlaying {
+                commandTogglePlayPause()
+            } else {
+                showEmptySurface()
+            }
+        case .image:
+            showEmptySurface()
+        case .empty:
+            break
+        }
+    }
+
+    func commandTogglePlayPause() {
+        guard activeMediaKind == .video else { return }
+        togglePlayPause()
+    }
+
+    func commandSeek(bySeconds seconds: Double) {
+        guard activeMediaKind == .video else { return }
+        let current: Double
+        if mpvBackendActive, let session = activeSession {
+            current = session.currentTimeSec
+        } else {
+            current = CMTimeGetSeconds(player.currentTime())
+        }
+        guard current.isFinite else { return }
+        let maxSec = max(seekSlider.maxValue, 0)
+        let targetSec = min(max(current + seconds, 0), maxSec > 0 ? maxSec : .greatestFiniteMagnitude)
+        performCooperativeSeek(to: CMTime(seconds: targetSec, preferredTimescale: 600))
+    }
+
+    func commandSeekToStart() {
+        guard activeMediaKind == .video else { return }
+        performCooperativeSeek(to: .zero)
+    }
+
+    func commandSeekToEnd() {
+        guard activeMediaKind == .video else { return }
+        let end = seekSlider.maxValue
+        guard end > 0 else { return }
+        performCooperativeSeek(to: CMTime(seconds: end, preferredTimescale: 600))
+    }
+
+    func commandAdjustVolume(by delta: Float) {
+        guard activeMediaKind == .video, audioOutputEnabled else { return }
+        isUserVolumeMuted = false
+        desiredPlaybackVolume = min(1, max(0, desiredPlaybackVolume + delta))
+        volumeSlider.doubleValue = Double(desiredPlaybackVolume)
+        applyEffectivePlaybackVolume()
+        updateVolumeMuteButtonIcon()
+    }
+
+    func commandToggleMute() {
+        guard activeMediaKind == .video else { return }
+        volumeMuteButtonPressed()
+    }
+
+    func commandPlaybackQueuePrevious() {
+        guard activeMediaKind == .video || activeMediaKind == .image else { return }
+        guard !playbackHistory.isEmpty else { return }
+        playPreviousInQueue()
+    }
+
+    func commandPlaybackQueueNext() {
+        guard activeMediaKind == .video || activeMediaKind == .image else { return }
+        playNextInQueue()
+    }
+
+    func commandStepPlaybackSpeed(by delta: Int) {
+        guard activeMediaKind == .video else { return }
+        stepPlaybackSpeed(by: delta)
+    }
+
+    func commandResetPlaybackSpeed() {
+        guard activeMediaKind == .video else { return }
+        applyPlaybackSpeed(1.0)
+    }
+
+    func commandToggleLoopPlayback() {
+        guard activeMediaKind == .video else { return }
+        let store = SettingsStore.shared
+        store.loopPlaybackEnabled.toggle()
+        loopPlaybackCheckbox.state = store.loopPlaybackEnabled ? .on : .off
+    }
+
+    func commandToggleVideoFitMode() {
+        guard activeMediaKind == .video else { return }
+        let store = SettingsStore.shared
+        let next: VideoFitMode = store.videoFitMode == .fill ? .fit : .fill
+        store.videoFitMode = next
+        videoFitModeControl.selectedSegment = next == .fill ? 1 : 0
+        applyVideoFitMode(next)
+    }
+
+    func commandCycleWindowAspectPreset() {
+        guard activeMediaKind == .video else { return }
+        let presets = WindowAspectPreset.selectablePresets
+        let current = SettingsStore.shared.windowAspectPreset
+        let nextIndex = (presets.firstIndex(of: current).map { $0 + 1 } ?? 0) % presets.count
+        SettingsStore.shared.windowAspectPreset = presets[nextIndex]
+        windowAspectControl.selectedSegment = nextIndex
+        updateLockAspectControlAvailability()
+        applyWindowAspectFromSettings()
+    }
+
+    func commandToggleLockAspect() {
+        guard activeMediaKind == .video else { return }
+        let store = SettingsStore.shared
+        store.lockAspectRatioEnabled.toggle()
+        lockAspectCheckbox.state = store.lockAspectRatioEnabled ? .on : .off
+        applyWindowAspectFromSettings()
+    }
+
+    func commandTogglePlaybackSource() {
+        guard activeMediaKind == .video else { return }
+        guard playbackSourcePopUp.isEnabled, playbackSourcePopUp.numberOfItems > 1 else { return }
+        let next = playbackSourcePopUp.indexOfSelectedItem == 0 ? 1 : 0
+        playbackSourcePopUp.selectItem(at: next)
+        playbackSourceChanged()
+    }
+
+    func commandStepAudioTrack(forward: Bool) {
+        guard activeMediaKind == .video else { return }
+        let count = audioSettings.trackPopUp.numberOfItems
+        guard count > 2 else { return }
+        var index = audioSettings.trackPopUp.indexOfSelectedItem
+        if index < 0 { index = 1 }
+        if forward {
+            index = min(index + 1, count - 1)
+        } else {
+            index = max(index - 1, 1)
+        }
+        audioSettings.trackPopUp.selectItem(at: index)
+        audioTrackPopUpChanged(audioSettings.trackPopUp)
+    }
+
+    func commandCycleEQPreset() {
+        guard activeMediaKind == .video, mpvBackendActive, mpvPlaybackStarted else { return }
+        let presets = PlaybackEQPreset.allCases
+        let current = SettingsStore.shared.playbackEQPreset
+        guard let idx = presets.firstIndex(of: current) else { return }
+        let next = presets[(idx + 1) % presets.count]
+        SettingsStore.shared.playbackEQPreset = next
+        if next != .manual {
+            SettingsStore.shared.playbackEQBands = next.bandGains
+            audioSettings.loadBandsFromStore()
+        }
+        if let item = audioSettings.eqPresetPopUp.itemArray.first(where: {
+            ($0.representedObject as? String) == next.rawValue
+        }) {
+            audioSettings.eqPresetPopUp.select(item)
+        }
+        applyPlaybackEQToActiveMpv()
+    }
+
+    func commandImageZoomIn() {
+        guard activeMediaKind == .image else { return }
+        imageZoomIn()
+    }
+
+    func commandImageZoomOut() {
+        guard activeMediaKind == .image else { return }
+        imageZoomOut()
+    }
+
+    func commandImageResetZoom() {
+        guard activeMediaKind == .image else { return }
+        imageFit()
+    }
+
+    func commandLibraryBrowseBack() {
+        guard playbackLibraryOverlay == .sidebarAndBrowse else { return }
+        mediaLibraryController.goBack()
+    }
+
+    func commandLibraryBrowseForward() {
+        guard playbackLibraryOverlay == .sidebarAndBrowse else { return }
+        mediaLibraryController.goForward()
+    }
+
+    func toggleQueuePopoverFromShortcut() {
+        guard activeMediaKind == .video || activeMediaKind == .image else { return }
+        toggleQueuePopover()
+    }
+
+    @discardableResult
+    func handleKeyboardEvent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if event.keyCode == 53 {
+            if keyboardFocusBlocksTransportShortcuts { return false }
+            commandHandleEscapeKey()
+            return activeMediaKind != .empty
+        }
+
+        if flags.contains(.command), event.charactersIgnoringModifiers == "." {
+            commandStopAndClose()
+            return true
+        }
+
+        if keyboardFocusBlocksTransportShortcuts, !flags.contains(.command) {
+            return false
+        }
+
+        if flags == .command, event.charactersIgnoringModifiers == "l" {
+            commandToggleLibraryPanel()
+            return true
+        }
+        if flags == .command, event.charactersIgnoringModifiers == "i" {
+            commandToggleSettingsInspector()
+            return true
+        }
+        if flags == .command, let ch = event.charactersIgnoringModifiers, ch.count == 1, let tab = Int(String(ch)), (1...3).contains(tab) {
+            commandSelectSettingsTab(tab - 1)
+            return true
+        }
+
+        if flags == [.command, .option] {
+            switch event.keyCode {
+            case 123:
+                if playbackLibraryOverlay == .sidebarAndBrowse {
+                    commandLibraryBrowseBack()
+                    return true
+                }
+                if activeMediaKind == .video {
+                    commandStepAudioTrack(forward: false)
+                    return true
+                }
+            case 124:
+                if playbackLibraryOverlay == .sidebarAndBrowse {
+                    commandLibraryBrowseForward()
+                    return true
+                }
+                if activeMediaKind == .video {
+                    commandStepAudioTrack(forward: true)
+                    return true
+                }
+            default:
+                break
+            }
+        }
+
+        if flags == [.command, .option], event.charactersIgnoringModifiers == "e" {
+            commandCycleEQPreset()
+            return true
+        }
+
+        if flags == [.command, .shift], event.charactersIgnoringModifiers == "l" {
+            commandToggleLoopPlayback()
+            return true
+        }
+        if flags == [.command, .shift], event.charactersIgnoringModifiers == "u" {
+            guard activeMediaKind == .video || activeMediaKind == .image else { return false }
+            toggleQueuePopover()
+            return true
+        }
+        if flags == [.command, .shift], event.charactersIgnoringModifiers == "k" {
+            commandToggleLockAspect()
+            return true
+        }
+        if flags == [.command, .shift], event.charactersIgnoringModifiers == "s" {
+            commandTogglePlaybackSource()
+            return true
+        }
+
+        if flags == [.control, .command], event.charactersIgnoringModifiers == "a" {
+            commandCycleWindowAspectPreset()
+            return true
+        }
+
+        if flags == .command {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+":
+                if activeMediaKind == .image {
+                    commandImageZoomIn()
+                    return true
+                }
+                if activeMediaKind == .video {
+                    commandStepPlaybackSpeed(by: 1)
+                    return true
+                }
+            case "-":
+                if activeMediaKind == .image {
+                    commandImageZoomOut()
+                    return true
+                }
+                if activeMediaKind == .video {
+                    commandStepPlaybackSpeed(by: -1)
+                    return true
+                }
+            case "0":
+                if activeMediaKind == .image {
+                    commandImageResetZoom()
+                    return true
+                }
+                if activeMediaKind == .video {
+                    commandResetPlaybackSpeed()
+                    return true
+                }
+            default:
+                break
+            }
+        }
+
+        if flags == .option, event.charactersIgnoringModifiers == "m" {
+            commandToggleMute()
+            return true
+        }
+
+        if flags.isEmpty {
+            switch event.keyCode {
+            case 49:
+                if activeMediaKind == .video {
+                    commandTogglePlayPause()
+                    return true
+                }
+            case 123:
+                if activeMediaKind == .video {
+                    commandSeek(bySeconds: -Self.standardSeekSeconds)
+                    return true
+                }
+            case 124:
+                if activeMediaKind == .video {
+                    commandSeek(bySeconds: Self.standardSeekSeconds)
+                    return true
+                }
+            case 126:
+                if activeMediaKind == .video {
+                    commandAdjustVolume(by: Self.volumeStep)
+                    return true
+                }
+            case 125:
+                if activeMediaKind == .video {
+                    commandAdjustVolume(by: -Self.volumeStep)
+                    return true
+                }
+            case 115:
+                if activeMediaKind == .video {
+                    commandSeekToStart()
+                    return true
+                }
+            case 119:
+                if activeMediaKind == .video {
+                    commandSeekToEnd()
+                    return true
+                }
+            case 3:
+                if activeMediaKind == .video {
+                    commandToggleVideoFitMode()
+                    return true
+                }
+            default:
+                break
+            }
+        }
+
+        if flags == .option {
+            switch event.keyCode {
+            case 123:
+                if activeMediaKind == .video {
+                    commandSeek(bySeconds: -Self.fineSeekSeconds)
+                    return true
+                }
+            case 124:
+                if activeMediaKind == .video {
+                    commandSeek(bySeconds: Self.fineSeekSeconds)
+                    return true
+                }
+            default:
+                break
+            }
+        }
+
+        return false
+    }
+
+    var keyboardFocusBlocksTransportShortcuts: Bool {
+        guard let responder = view.window?.firstResponder else { return false }
+        if responder is NSSlider || responder is NSTextField || responder is NSPopUpButton || responder is NSTextView {
+            return true
+        }
+        return false
+    }
+
+    var isVideoPlaying: Bool {
+        guard activeMediaKind == .video else { return false }
+        if mpvBackendActive {
+            return activeSession?.isPlaying == true
+        }
+        return player.rate > 0
     }
 }
 
@@ -3489,10 +4993,12 @@ final class ImageSurfaceView: NSView {
 
 final class PlaybackMiniPreviewView: NSView {
     var onExpand: (() -> Void)?
+    var onClose: (() -> Void)?
 
     private let videoSurface = MiniPlayerSurfaceView()
     private let imageSurface = NSImageView()
     private let expandBadge = NSImageView()
+    private let closeButton = NSButton()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -3515,9 +5021,29 @@ final class PlaybackMiniPreviewView: NSView {
             expandBadge.contentTintColor = .white
         }
 
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.bezelStyle = .accessoryBarAction
+        closeButton.isBordered = false
+        closeButton.toolTip = "Stop playback"
+        if let image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Stop playback") {
+            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+            closeButton.image = image.withSymbolConfiguration(config)
+            closeButton.contentTintColor = NSColor.white.withAlphaComponent(0.92)
+        }
+        closeButton.setButtonType(.momentaryPushIn)
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.wantsLayer = true
+        closeButton.layer?.zPosition = 10
+
         addSubview(videoSurface)
         addSubview(imageSurface)
         addSubview(expandBadge)
+        addSubview(closeButton)
+
+        let expandClick = NSClickGestureRecognizer(target: self, action: #selector(expandClicked))
+        videoSurface.addGestureRecognizer(expandClick)
+        imageSurface.addGestureRecognizer(expandClick)
 
         NSLayoutConstraint.activate([
             videoSurface.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -3533,12 +5059,24 @@ final class PlaybackMiniPreviewView: NSView {
             expandBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             expandBadge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             expandBadge.widthAnchor.constraint(equalToConstant: 18),
-            expandBadge.heightAnchor.constraint(equalToConstant: 18)
+            expandBadge.heightAnchor.constraint(equalToConstant: 18),
+
+            closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            closeButton.heightAnchor.constraint(equalToConstant: 22)
         ])
 
-        toolTip = "Click to return to full playback"
-        let click = NSClickGestureRecognizer(target: self, action: #selector(expandClicked))
-        addGestureRecognizer(click)
+        videoSurface.toolTip = "Click to return to full playback"
+        imageSurface.toolTip = "Click to return to full playback"
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if hit === closeButton || hit?.isDescendant(of: closeButton) == true {
+            return closeButton
+        }
+        return hit
     }
 
     required init?(coder: NSCoder) {
@@ -3565,21 +5103,26 @@ final class PlaybackMiniPreviewView: NSView {
     @objc private func expandClicked() {
         onExpand?()
     }
+
+    @objc private func closeClicked(_ sender: Any?) {
+        _ = sender
+        onClose?()
+    }
 }
 
 private final class HoverTextButton: NSButton {
     var onHoverChanged: ((Bool) -> Void)?
+    var tabLabel: String = "" {
+        didSet { updateTabAppearance() }
+    }
     var uiScale: CGFloat = 1 {
-        didSet { updateAttributedTitle() }
+        didSet { updateTabAppearance() }
     }
     var symbolName: String = "" {
-        didSet { updateAttributedTitle() }
+        didSet { updateTabAppearance() }
     }
     var textColor: NSColor = .secondaryLabelColor {
-        didSet { updateAttributedTitle() }
-    }
-    var fontWeight: NSFont.Weight = .medium {
-        didSet { updateAttributedTitle() }
+        didSet { updateTabAppearance() }
     }
     private(set) var isHovered = false {
         didSet { onHoverChanged?(isHovered) }
@@ -3592,13 +5135,13 @@ private final class HoverTextButton: NSButton {
         isBordered = false
         bezelStyle = .inline
         imagePosition = .imageLeading
+        imageHugsTitle = true
         alignment = .center
         setButtonType(.momentaryChange)
-        contentTintColor = .secondaryLabelColor
         font = .systemFont(ofSize: 12, weight: .medium)
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         setContentHuggingPriority(.defaultLow, for: .horizontal)
-        updateAttributedTitle()
+        updateTabAppearance()
     }
 
     required init?(coder: NSCoder) {
@@ -3624,26 +5167,37 @@ private final class HoverTextButton: NSButton {
         isHovered = false
     }
 
-    private func updateAttributedTitle() {
-        let baseFont = NSFont.systemFont(ofSize: 12 * uiScale, weight: fontWeight)
+    private func updateTabAppearance() {
+        let baseFont = NSFont.systemFont(ofSize: 12 * uiScale, weight: .medium)
+        // Thin space between SF Symbol and label when imageHugsTitle groups them.
+        let titleWithGap = "\u{2009}" + tabLabel
+        title = titleWithGap
         attributedTitle = NSAttributedString(
-            string: title,
+            string: titleWithGap,
             attributes: [
                 .foregroundColor: textColor,
                 .font: baseFont
             ]
         )
+        setAccessibilityLabel(tabLabel)
         contentTintColor = textColor
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+        imageHugsTitle = true
+        imagePosition = .imageLeading
+        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: tabLabel) {
             let config = NSImage.SymbolConfiguration(pointSize: 11 * uiScale, weight: .medium)
-            self.image = image.withSymbolConfiguration(config)
-            self.image?.isTemplate = true
+            image = symbol.withSymbolConfiguration(config)
+            image?.isTemplate = true
+        } else {
+            image = nil
         }
     }
 }
 
 private final class SettingsTabHeaderItemView: NSView {
+    private let tabButton: HoverTextButton
+
     init(button: HoverTextButton, showsSeparator: Bool) {
+        tabButton = button
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -3651,17 +5205,17 @@ private final class SettingsTabHeaderItemView: NSView {
         addSubview(button)
 
         NSLayoutConstraint.activate([
-            button.centerXAnchor.constraint(equalTo: centerXAnchor),
-            button.centerYAnchor.constraint(equalTo: centerYAnchor),
-            button.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 12),
-            button.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12)
+            button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            button.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
         ])
 
         if showsSeparator {
             let separator = NSBox()
             separator.boxType = .separator
             separator.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(separator)
+            addSubview(separator, positioned: .below, relativeTo: button)
             NSLayoutConstraint.activate([
                 separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
                 separator.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -3669,6 +5223,10 @@ private final class SettingsTabHeaderItemView: NSView {
                 separator.heightAnchor.constraint(equalToConstant: 14)
             ])
         }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        tabButton.performClick(nil)
     }
 
     required init?(coder: NSCoder) {
@@ -3711,6 +5269,8 @@ final class DragHostView: NSView {
     var onPerformDrop: (([URL], NSPoint) -> Bool)?
     var onDragSessionActive: ((Bool) -> Void)?
     var onMouseMoved: ((NSPoint) -> Void)?
+    var onMouseEnteredView: (() -> Void)?
+    var onMouseExitedView: (() -> Void)?
     private var trackingAreaRef: NSTrackingArea?
     private var activeDragSessions = 0
 
@@ -3766,15 +5326,23 @@ final class DragHostView: NSView {
         if let trackingAreaRef {
             removeTrackingArea(trackingAreaRef)
         }
-        let options: NSTrackingArea.Options = [.mouseMoved, .activeAlways, .inVisibleRect]
+        let options: NSTrackingArea.Options = [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect]
         let tracking = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
         addTrackingArea(tracking)
         trackingAreaRef = tracking
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        onMouseEnteredView?()
+    }
+
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         onMouseMoved?(point)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onMouseExitedView?()
     }
 
     override func viewDidMoveToWindow() {
@@ -3784,6 +5352,9 @@ final class DragHostView: NSView {
 }
 
 final class PlayerSurfaceView: NSView {
+    var onMpvLayoutChanged: (() -> Void)?
+    private var mpvEmbeddingActive = false
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -3797,9 +5368,37 @@ final class PlayerSurfaceView: NSView {
         AVPlayerLayer()
     }
 
+    override func layout() {
+        super.layout()
+        if mpvEmbeddingActive {
+            onMpvLayoutChanged?()
+        }
+    }
+
+    /// Cocoa `--wid` expects an `NSView` pointer encoded as intptr_t.
+    var mpvEmbeddingWindowID: Int {
+        guard mpvEmbeddingActive else { return 0 }
+        return Int(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    func setMpvEmbeddingActive(_ active: Bool) {
+        mpvEmbeddingActive = active
+        if active {
+            playerLayer.player = nil
+            layer?.opacity = 0.001
+            layer?.backgroundColor = NSColor.black.cgColor
+        } else {
+            layer?.opacity = 1
+            layer?.backgroundColor = nil
+        }
+    }
+
     var player: AVPlayer? {
-        get { playerLayer.player }
-        set { playerLayer.player = newValue }
+        get { mpvEmbeddingActive ? nil : playerLayer.player }
+        set {
+            guard !mpvEmbeddingActive else { return }
+            playerLayer.player = newValue
+        }
     }
 
     var videoGravity: AVLayerVideoGravity {

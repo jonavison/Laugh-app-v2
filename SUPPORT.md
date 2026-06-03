@@ -70,15 +70,15 @@ No bulk matrix updates—**IncrementalCodecRollout** only.
 
 #### Phase 2 rollout queue (verify each before the next)
 
-| Priority | PlaybackProfile (example) | Why |
-|----------|---------------------------|-----|
-| **1 (next)** | MKV + HEVC 10-bit (x265) | Common personal rips; native fails (e.g. Baraka-style) |
-| 2 | MP4 + `hev1` (black video) | Native partial; may need remux hint or alternate |
-| 3 | WebM + VP9 | Common web rips |
-| 4 | MKV/WebM + AV1 | Growing library share |
-| 5 | Legacy AVI / WMV subsets | Lower priority unless fixtures exist |
+| Priority | PlaybackProfile (example) | Target engine | Verification |
+|----------|---------------------------|---------------|----------------|
+| **1 (in progress)** | MKV + HEVC 10-bit (x265) | **DirectMpv** (bundled mpv); fallback **CompatibilityRemux** | [Checklist](docs/verification/0001-mkv-hevc-10bit.md) — **PlaybackVerificationRecord** pending |
+| 2 | MP4 + `hev1` (black video) | **DirectMpv** or **CompatibilityRemux** | After #1 passes |
+| 3 | WebM + VP9 | **DirectMpv**; fallback remux | After #2 |
+| 4 | MKV/WebM + AV1 | **DirectMpv**; fallback remux | After #3 |
+| 5 | Legacy AVI / WMV subsets | **CompatibilityRemux** | Lower priority |
 
-Native engine will not grow arbitrary codecs; gaps move to **AlternateDecoder** after verification.
+**SystemDecodeStack** (AVFoundation) remains primary; **VideoToolbox** is not a separate alternate for these profiles (see [ADR 0003](docs/adr/0003-system-decode-compatibility-remux-not-videotoolbox.md)). Gaps are closed via **AlternateDecoder** after **IncrementalCodecRollout** verification—not by expanding the native fourcc list.
 
 ## TODO (To Be Supported)
 

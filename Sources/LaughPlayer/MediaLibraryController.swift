@@ -233,6 +233,11 @@ final class MediaLibraryController {
         !showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty
     }
 
+    /// Sort control is shown only when the browse grid has folder contents to order.
+    var showsBrowseSortControl: Bool {
+        !showsBrowsePlaceholder && !displayedEntries.isEmpty
+    }
+
     var emptyGridMessage: String {
         switch sidebarMode {
         case .recentHeader:

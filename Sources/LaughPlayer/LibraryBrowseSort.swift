@@ -22,10 +22,21 @@ enum LibraryBrowseSortDirection: Equatable {
     case ascending
     case descending
 
-    var menuSuffix: String {
+    var menuTitle: String {
         switch self {
-        case .ascending: return "↑"
-        case .descending: return "↓"
+        case .ascending: return "Ascending"
+        case .descending: return "Descending"
+        }
+    }
+
+    static let ascendingMenuTag = 0
+    static let descendingMenuTag = 1
+
+    init?(menuTag: Int) {
+        switch menuTag {
+        case Self.ascendingMenuTag: self = .ascending
+        case Self.descendingMenuTag: self = .descending
+        default: return nil
         }
     }
 }
@@ -35,18 +46,16 @@ struct LibraryBrowseSort: Equatable {
     var direction: LibraryBrowseSortDirection
 
     static let `default` = LibraryBrowseSort(key: .name, direction: .ascending)
+}
 
-    var menuTitle: String {
-        "\(key.menuTitle) \(direction.menuSuffix)"
+extension LibraryBrowseSortKey {
+    var menuTag: Int {
+        Self.allCases.firstIndex(of: self) ?? 0
     }
 
-    static func allOptions() -> [LibraryBrowseSort] {
-        LibraryBrowseSortKey.allCases.flatMap { key in
-            [
-                LibraryBrowseSort(key: key, direction: .ascending),
-                LibraryBrowseSort(key: key, direction: .descending)
-            ]
-        }
+    init?(menuTag: Int) {
+        guard menuTag >= 0, menuTag < Self.allCases.count else { return nil }
+        self = Self.allCases[menuTag]
     }
 }
 

@@ -4,7 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-03
+
 ### Added
+- Immersive window chrome: frosted title bar matching the settings panel; auto-hides during video/image playback, pinned in library-only mode.
+- Hybrid keyboard shortcuts (menus + in-player key monitor) with Help reference (`⌘/`).
+- mpv extended playback path, audio track picker, EQ presets, and playback queue popover.
+- Library browse sort menu: field options with separator, then ascending/descending; hidden when the folder is empty.
+
+### Changed
+- Library content top inset tracks title-bar chrome visibility.
+- Mini preview close stops playback instead of expanding to full view.
+- `.gitignore` excludes local build artifacts, bundled codec binaries, and `.agents/` tooling.
+
+## [1.1.0]
+
+### Added
+- ADR `0003-system-decode-compatibility-remux-not-videotoolbox.md`: affirm **SystemDecodeStack** primary, **CompatibilityRemux** via FFmpeg on direct builds; reject VideoToolbox-only alternate; defer mpv as default alternate.
+- Verification checklist `docs/verification/0001-mkv-hevc-10bit.md` for Phase 2 queue priority 1 (MKV + HEVC 10-bit).
+- Glossary terms **SystemDecodeStack** and **CompatibilityRemux** in `CONTEXT.md`.
 - Playback runtime/distribution abstraction (`PlaybackRuntime`, `PlaybackEngine`, `PlaybackEngineFactory`) with backend metadata in debug info.
 - Bundled codec tool discovery (`BundledCodecTools`) and direct/app-store build scripts:
   - `scripts/build-direct.sh`
@@ -17,6 +35,7 @@ All notable changes to this project are documented in this file.
 - Library transport control toggles the panel; center content resizes when the panel is open. Settings stay on the right only.
 
 ### Changed
+- ADRs 0001–0002 and `SUPPORT.md` Phase 2 queue aligned with ADR 0003 engine terminology.
 - FFmpeg fallback now prefers bundled codec tools in direct builds before system PATH tools.
 - Compatibility failure messaging now distinguishes direct-build bundled-tools missing vs App Store native-only behavior.
 - Drag-and-drop onto the main play area dismisses the settings sheet only (library panel stays available).

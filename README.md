@@ -21,6 +21,12 @@ Build helpers:
 
 Note: codec bundling does not auto-install dependencies. Provide prebuilt binaries in `Sources/LaughPlayer/codec-tools/bin/`.
 
+## Codec strategy
+
+- **Primary:** AVFoundation (**SystemDecodeStack** — includes VideoToolbox when macOS accepts the file).
+- **Direct builds:** **CompatibilityRemux** via bundled FFmpeg on failure; see `docs/adr/0003-system-decode-compatibility-remux-not-videotoolbox.md`.
+- **Support matrix:** `SUPPORT.md`; Phase 2 verification checklists under `docs/verification/`.
+
 ## Documentation Rule
 
 This project follows a strict documentation rule:

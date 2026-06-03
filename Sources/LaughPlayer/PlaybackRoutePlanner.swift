@@ -1,9 +1,10 @@
 import AVFoundation
 import Foundation
 
-/// Chooses native AVFoundation vs bundled remux **before** attaching a player item.
+/// Chooses native AVFoundation, bundled mpv, or remux **before** attaching a player item.
 enum PlaybackRoute: Equatable {
     case nativeAVFoundation
+    case directMpv(reason: String)
     case compatibilityRemux(reason: String)
 }
 
@@ -28,13 +29,18 @@ enum PlaybackRoutePlanner {
             return .nativeAVFoundation
         }
 
-        guard PlaybackRuntime.canUseBundledCodecStack, FFmpegVideoFallback.isAvailable() else {
+        let ext = url.pathExtension.lowercased()
+        let mpvAvailable = PlaybackRuntime.canUseBundledCodecStack && MpvPlaybackController.isAvailable()
+        let remuxAvailable = PlaybackRuntime.canUseBundledCodecStack && FFmpegVideoFallback.isAvailable()
+
+        guard remuxAvailable || mpvAvailable else {
             return .nativeAVFoundation
         }
 
-        let ext = url.pathExtension.lowercased()
-
         if remuxContainerExtensions.contains(ext) {
+            if mpvAvailable {
+                return .directMpv(reason: "container.\(ext)")
+            }
             return .compatibilityRemux(reason: "container.\(ext)")
         }
 
@@ -45,6 +51,9 @@ enum PlaybackRoutePlanner {
         if let codecTag {
             let tag = normalizeFourCC(codecTag)
             if remuxVideoCodecTags.contains(tag) {
+                if mpvAvailable {
+                    return .directMpv(reason: "codec.\(tag)")
+                }
                 return .compatibilityRemux(reason: "codec.\(tag)")
             }
             if ["mp4", "m4v", "mov"].contains(ext), nativeMP4VideoCodecTags.contains(tag) {
@@ -57,6 +66,9 @@ enum PlaybackRoutePlanner {
         }
 
         if !ext.isEmpty {
+            if mpvAvailable {
+                return .directMpv(reason: "container.\(ext)")
+            }
             return .compatibilityRemux(reason: "container.\(ext)")
         }
 

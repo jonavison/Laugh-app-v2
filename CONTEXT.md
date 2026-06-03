@@ -45,7 +45,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## QueueDropZone
 
-`QueueDropZone` is the bottom-right drop target used to enqueue videos only. Photos are opened via the main play area, not via queue enqueue.
+`QueueDropZone` is the bottom-right drop target used to enqueue videos only. It appears during drag only when something is already playing or in the queue (`currentMediaURL` or a non-empty **Up Next** list). Photos are opened via the main play area, not via queue enqueue.
 
 ## MediaLibrary
 
@@ -91,13 +91,21 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 `UserLibraryFolder` is a `LibraryRoot` the user added with “Add folder…” and persisted via a security-scoped bookmark. User roots can be removed; built-in roots (Movies, Videos) cannot.
 
+## SystemDecodeStack
+
+`SystemDecodeStack` is macOS-provided demux and decode exposed through AVFoundation (including VideoToolbox hardware decode when the OS accepts the file). In conversation, “native” means this stack—not a separate VideoToolbox-only engine.
+
 ## NativePlaybackEngine
 
-`NativePlaybackEngine` is playback through macOS AVFoundation using the system’s built-in decoders and renderers.
+`NativePlaybackEngine` is playback through the **SystemDecodeStack** (AVPlayer / AVFoundation).
+
+## CompatibilityRemux
+
+`CompatibilityRemux` is an **AlternateDecoder** step that produces a temporary MP4 the **SystemDecodeStack** can open, preferring stream copy without re-encoding video.
 
 ## AlternateDecoder
 
-`AlternateDecoder` is an optional secondary decode path (planned: FFmpeg) used only when native playback fails or cannot render video.
+`AlternateDecoder` is a secondary path for profiles **SystemDecodeStack** cannot open directly. On direct builds the default is **DirectMpv** (bundled subprocess mpv) for non-native containers and codecs when mpv is runnable; **CompatibilityRemux** via bundled FFmpeg remains the fallback when mpv is missing or fails.
 
 ## TryThenFailPolicy
 
@@ -122,3 +130,91 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 ## PlaybackVerificationRecord
 
 `PlaybackVerificationRecord` is evidence that a path was test-driven: a short fixture clip, a successful play session, and a Cmd+Shift+D debug snapshot attached to the change (commit or PR notes).
+
+## AudioSettings (planned)
+
+`AudioSettings` is the right-settings **Audio** tab: per-file audio controls while `VideoMedia` is active. Planned slices (in order): **AudioTrackPicker**, then **PlaybackEQ** (10-band with presets; Manual preset is default). **OutputSource** and **AudioDelay** are deferred unless a concrete need appears.
+
+## AudioTrackPicker
+
+`AudioTrackPicker` is the control that chooses which embedded audio stream plays in the current file. It is always shown in **AudioSettings** while a video is open: the current stream is selected; if the file has no audio, the control shows **None**. Each entry is labeled with stream details (for example index, language, channel count, codec/bitrate when known). It is not queue order, not subtitle tracks, and not system output device—that is **OutputSource**.
+
+## AudioTrackSwitch
+
+`AudioTrackSwitch` is changing the active stream via **AudioTrackPicker**. The user’s playhead time and play/pause state must be preserved, including when the new stream uses a different audio codec than the previous one. Prefer in-place switch on the active engine (**NativePlaybackEngine** or **DirectMpv**); if that fails, reload the same source from the prior time and restore play state (TryThenFailPolicy for track change, not for whole-file open).
+
+## OutputSource
+
+`OutputSource` is the user’s choice of macOS audio output device (speakers, headphones, interface) for LaughPlayer. Distinct from in-app **PlaybackVolume** on the transport bar. Not in the current **AudioSettings** slice—macOS system settings are sufficient unless a future need appears.
+
+## PlaybackEQ
+
+`PlaybackEQ` is in-app tone shaping (10 bands + named presets). **Manual** is the default preset (flat / user-adjusted bands). EQ state is **global** (persisted app preference, like playback speed)—not per file. v1 applies on **DirectMpv** only; **NativePlaybackEngine** gains EQ in a later slice. The Audio tab shows EQ controls when the active session can apply them, otherwise a short unavailable note. Distinct from codec, container, and **CompatibilityRemux**.
+
+## AudioDelay
+
+`AudioDelay` is a user-controlled lip-sync offset between audio and video. Not in the current **AudioSettings** slice—engines are expected to keep A/V sync; add only if real-world files prove otherwise.
+
+## HybridKeyboardShortcuts
+
+`HybridKeyboardShortcuts` means discoverable commands appear in the menu bar with displayed key equivalents, while core **TransportKeyboardCommand**s also work when the main playback window is key without visiting a menu or a visible control. **TransportKeyboardCommand**s remain available across **ControlDensityTier** levels, including **Compact** when bar controls are hidden.
+
+## TransportKeyboardCommand
+
+`TransportKeyboardCommand` is a keyboard-invoked user action for playback transport: play/pause, seek, **PlaybackVolume**, mute, queue previous/next, and playback speed steps. Distinct from app chrome shortcuts (Preferences, Quit) and from **ContextualSettingsTabs** adjustments unless explicitly mapped. Not the same as choosing a decode engine—that is **PlaybackProfile** routing, not transport.
+
+## GlobalChromeShortcut
+
+`GlobalChromeShortcut` is a keyboard command that works whenever the main playback window is key and **KeyboardFocusGuard** allows it—across **EmptySurface**, **VideoMedia**, and **ImageMedia**. Examples: open file, toggle **MediaLibraryPanel**, toggle the right settings sheet, fullscreen, Preferences, Quit. Does not include **TransportKeyboardCommand**s.
+
+## KeyboardFocusGuard
+
+`KeyboardFocusGuard` means **TransportKeyboardCommand**s and other global shortcuts yield when keyboard focus is in an editable or draggable settings control (slider, text field, pop-up). The control receives the key (for example Space does not toggle play/pause while adjusting **PlaybackEQ**).
+
+## VideoMediaShortcutScope
+
+`VideoMediaShortcutScope` is when **VideoMedia** is active: all **TransportKeyboardCommand**s are enabled. **GlobalChromeShortcut**s remain enabled.
+
+## ImageMediaShortcutScope
+
+`ImageMediaShortcutScope` is when **ImageMedia** is active: **TransportKeyboardCommand**s that imply motion (play/pause, seek, speed) are disabled. Image display commands (zoom, fit) and queue step commands apply when the queue or playback history has items—images may appear in the queue alongside videos. **GlobalChromeShortcut**s remain enabled.
+
+## EmptySurfaceShortcutScope
+
+`EmptySurfaceShortcutScope` is when no media is loaded: only **GlobalChromeShortcut**s are active. **TransportKeyboardCommand**s are disabled with no alert or error sound.
+
+## StandardSeekStep
+
+`StandardSeekStep` is the default **SeekKeyboardCommand** distance on **←** / **→**: ten seconds backward or forward while **VideoMedia** is active.
+
+## FineSeekStep
+
+`FineSeekStep` is the **SeekKeyboardCommand** distance with the Option modifier (**⌥←** / **⌥→**): one second backward or forward.
+
+## RepeatSeekWhileHeld
+
+`RepeatSeekWhileHeld` means holding **←** or **→** repeats **SeekKeyboardCommand** at a capped rate (about five steps per second) instead of a single step per keypress.
+
+## SeekKeyboardCommand
+
+`SeekKeyboardCommand` is a **TransportKeyboardCommand** that moves the playhead by **StandardSeekStep** or **FineSeekStep**. Distinct from queue previous/next and from scrubbing via the seek slider.
+
+## ReservedSubtitleShortcuts
+
+`ReservedSubtitleShortcuts` are keyboard bindings for subtitle track and style controls not assigned until the **Subtitles** tab ships real **SubtitleTrackPicker** (and related) UI—avoid binding **V** / **G** / **S** globally in v1 if they would conflict with later subtitle behavior.
+
+## GlobalVideoSettingsShortcut
+
+`GlobalVideoSettingsShortcut` is a keyboard command for Video-tab settings (Fit/Fill toggle, window aspect cycle, loop, play-source switch) that works during **VideoMedia** even when the right settings sheet is closed. **⌘1** / **⌘2** / **⌘3** open the sheet if needed, then select the tab. **KeyboardFocusGuard** still applies when a settings control has focus.
+
+## StopKeyboardCommand
+
+`StopKeyboardCommand` is how the user ends the current item. **Esc** while **VideoMedia** is playing pauses only; **Esc** while paused or on **ImageMedia** returns to **EmptySurface** without clearing the playback queue. **⌘.** (Stop and Close) always returns to **EmptySurface** from **VideoMedia** or **ImageMedia**, including while playing. **EmptySurface** ignores stop keys. Queue and playback history stay intact when returning to **EmptySurface** via stop—the **Up Next** list is not wiped.
+
+## ReservedFrameStepShortcuts
+
+`ReservedFrameStepShortcuts` are one-frame back/forward bindings (for example comma and period) intentionally omitted from shortcuts v1 until **ActivePlaybackSession** supports frame-step on both **NativePlaybackEngine** and **DirectMpv**. Listed as “coming soon” in the keyboard shortcuts reference—not bound globally in v1.
+
+## ShortcutCommandFunnel
+
+`ShortcutCommandFunnel` means menu bar items and **HybridKeyboardShortcuts** invoke the same controller methods—scope checks (**VideoMediaShortcutScope**, **KeyboardFocusGuard**) and behavior live in one place, not duplicated across `NSMenuItem` actions and key handling.

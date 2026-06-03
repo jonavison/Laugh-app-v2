@@ -44,6 +44,8 @@ final class SettingsStore {
         static let windowAspectPreset = "WindowAspectPreset"
         static let playbackSpeed = "PlaybackSpeed"
         static let loopPlaybackEnabled = "LoopPlaybackEnabled"
+        static let playbackEQPreset = "PlaybackEQPreset"
+        static let playbackEQBands = "PlaybackEQBands"
     }
 
     var lockAspectRatioEnabled: Bool {
@@ -97,6 +99,33 @@ final class SettingsStore {
     var loopPlaybackEnabled: Bool {
         get { defaults.bool(forKey: Keys.loopPlaybackEnabled) }
         set { defaults.set(newValue, forKey: Keys.loopPlaybackEnabled) }
+    }
+
+    var playbackEQPreset: PlaybackEQPreset {
+        get {
+            guard let raw = defaults.string(forKey: Keys.playbackEQPreset),
+                  let preset = PlaybackEQPreset(rawValue: raw) else {
+                return .manual
+            }
+            return preset
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.playbackEQPreset)
+        }
+    }
+
+    var playbackEQBands: [Float] {
+        get {
+            guard let stored = defaults.array(forKey: Keys.playbackEQBands) as? [Double],
+                  stored.count == PlaybackEQ.bandCount else {
+                return PlaybackEQPreset.manual.bandGains
+            }
+            return stored.map { Float($0) }
+        }
+        set {
+            let values = newValue.prefix(PlaybackEQ.bandCount).map { Double($0) }
+            defaults.set(Array(values), forKey: Keys.playbackEQBands)
+        }
     }
 
     private let defaults = UserDefaults.standard

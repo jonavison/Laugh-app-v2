@@ -43,4 +43,15 @@ enum MediaKindDetector {
     static func filterVideos(_ urls: [URL]) -> [URL] {
         urls.filter { kind(for: $0) == .video }
     }
+
+    static func openPanelImageContentTypes() -> [UTType] {
+        var types: [UTType] = [.image, .jpeg, .png, .gif, .heic, .tiff, .webP]
+        for ext in imageExtensions {
+            if let type = UTType(filenameExtension: ext),
+               !types.contains(where: { $0.identifier == type.identifier }) {
+                types.append(type)
+            }
+        }
+        return types
+    }
 }
