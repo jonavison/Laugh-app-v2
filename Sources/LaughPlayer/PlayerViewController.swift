@@ -47,7 +47,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let bottomLeftControlsStack = NSStackView()
     private let bottomRightControlsStack = NSStackView()
     private var playbackBarWidthConstraint: NSLayoutConstraint?
+    private var playbackBarBottomConstraint: NSLayoutConstraint?
     private var imageBarWidthConstraint: NSLayoutConstraint?
+    private var imageBarBottomConstraint: NSLayoutConstraint?
+    private var miniPreviewWidthConstraint: NSLayoutConstraint?
+    private var miniPreviewHeightConstraint: NSLayoutConstraint?
     private let transportSpeedLeftCluster = NSStackView()
     private let transportSpeedLeftSpacer = NSView()
     private let playbackSpeedSlowLabel = NSTextField(labelWithString: "")
@@ -140,10 +144,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var seekGeneration = 0
     private var currentControlTier: ControlDensityTier = .regular
     private var outsideClickMonitor: Any?
+    private var immersivePointerMonitor: Any?
     private var keyboardShortcutMonitor: Any?
     private var videoDoubleClickMonitor: Any?
     private var immersiveChromeHideWorkItem: DispatchWorkItem?
     private var immersiveChromeVisible = false
+    private var immersiveCursorHiddenUntilMove = false
+    private var immersiveCursorWindowObservers: [NSObjectProtocol] = []
     private var dragSessionActive = false
     /// Brief pause before edge-hover opens a side panel (avoids accidental opens).
     private static let edgePanelOpenDelay: TimeInterval = 0.4
@@ -195,8 +202,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private var playbackLibraryOverlay: PlaybackLibraryOverlay = .closed
     private let settingsPanelInnerInset: CGFloat = 12
-    private let settingsTabsTopInset: CGFloat = 24
+    private let settingsTabsTopInset: CGFloat = 40
     private let settingsContentBottomClearance: CGFloat = 108
+    private let settingsStackSpacing: CGFloat = 10
+    private let settingsSectionExtraGap: CGFloat = 14
 
     private enum ControlDensityTier {
         case compact
@@ -210,12 +219,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        installImmersiveCursorWindowObserversIfNeeded()
         prepareInterfaceForDisplay()
     }
 
     /// Ensures the library empty state is laid out once the window has a real size.
     func prepareInterfaceForDisplay() {
         guard view.window != nil else { return }
+        installImmersiveCursorWindowObserversIfNeeded()
         installPlayerInterfaceIfNeeded()
         installLibraryChromeIfNeeded()
         if activeMediaKind == .empty {
@@ -395,9 +406,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         configureControls()
         LaunchLog.emit("installPlayerInterfaceIfNeeded: controls")
 
-        let initialBarWidth = MusicStylePlaybackBar.preferredBarWidth(forContentWidthPoints: 960)
+        let initialLayoutWidth: CGFloat = 960
+        let initialBarWidth = MusicStylePlaybackBar.preferredBarWidth(forContentWidthPoints: initialLayoutWidth)
+        let initialBarBottomInset = MusicStylePlaybackBar.preferredBarBottomInset(forContentWidthPoints: initialLayoutWidth)
         playbackBarWidthConstraint = controlsContainer.widthAnchor.constraint(equalToConstant: initialBarWidth)
+        playbackBarBottomConstraint = controlsContainer.bottomAnchor.constraint(
+            equalTo: view.bottomAnchor,
+            constant: -initialBarBottomInset
+        )
         imageBarWidthConstraint = imageControlsContainer.widthAnchor.constraint(equalToConstant: min(420, initialBarWidth))
+        imageBarBottomConstraint = imageControlsContainer.bottomAnchor.constraint(
+            equalTo: view.bottomAnchor,
+            constant: -initialBarBottomInset
+        )
         settingsPanelWidthConstraint = rightSettingsSheet.widthAnchor.constraint(equalToConstant: baseSettingsPanelWidth)
 
         NSLayoutConstraint.activate([
@@ -428,12 +449,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             compatibilityBanner.widthAnchor.constraint(lessThanOrEqualToConstant: 520),
 
             controlsContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            controlsContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -MusicStylePlaybackBar.barBottomInset),
+            playbackBarBottomConstraint!,
             controlsContainer.heightAnchor.constraint(equalToConstant: 76),
             playbackBarWidthConstraint!,
 
             imageControlsContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            imageControlsContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -MusicStylePlaybackBar.barBottomInset),
+            imageBarBottomConstraint!,
             imageControlsContainer.heightAnchor.constraint(equalToConstant: 52),
             imageBarWidthConstraint!,
 
@@ -625,11 +646,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             libraryBrowse.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             libraryBrowse.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            playbackMiniPreview.widthAnchor.constraint(equalToConstant: 264),
-            playbackMiniPreview.heightAnchor.constraint(equalToConstant: 148),
             playbackMiniPreview.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             playbackMiniPreview.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16)
         ])
+        let previewSize = PlaybackMiniPreviewMetrics.preferredSize(forContentWidth: max(view.bounds.width, 1))
+        miniPreviewWidthConstraint = playbackMiniPreview.widthAnchor.constraint(equalToConstant: previewSize.width)
+        miniPreviewHeightConstraint = playbackMiniPreview.heightAnchor.constraint(equalToConstant: previewSize.height)
+        miniPreviewWidthConstraint?.isActive = true
+        miniPreviewHeightConstraint?.isActive = true
+        playbackMiniPreview.applyLayoutScale(forWidth: previewSize.width)
 
         raisePlaybackChromeToFront()
     }
@@ -1369,8 +1394,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
+        removeImmersivePointerMonitor()
         renderMonitor.reset()
         endSecurityScopedAccess()
+        removeImmersiveCursorWindowObservers()
+        restoreImmersivePlaybackCursor()
     }
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
@@ -1760,7 +1788,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         queuePopover?.close()
         queuePopover = nil
         if usesImmersiveChrome {
-            scheduleImmersiveChromeHide()
+            noteImmersiveChromePointerActivity()
         }
         queueListViewController = nil
     }
@@ -1831,6 +1859,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateSettingsContentBottomInset()
         raisePlaybackChromeToFront()
         syncPlayingWindowTitle()
+        removeImmersivePointerMonitor()
         setImmersiveChromeVisible(true, animated: false)
     }
 
@@ -1949,18 +1978,30 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func applySettingsTabButtonState() {
-        let baseColor = NSColor.secondaryLabelColor
-        let hoverColor = NSColor.labelColor.withAlphaComponent(0.78)
-        let activeColor = NSColor.labelColor
-
         for (index, button) in videoSettingsTabButtons.enumerated() {
-            let color = index == selectedVideoSettingsTabIndex ? activeColor : (button.isHovered ? hoverColor : baseColor)
+            let color: NSColor
+            if index == selectedVideoSettingsTabIndex {
+                color = LaughTheme.settingsTabActive
+            } else if button.isHovered {
+                color = LaughTheme.settingsTabHover
+            } else {
+                color = LaughTheme.settingsTabIdle
+            }
             button.textColor = color
+            button.needsDisplay = true
         }
 
         for (index, button) in imageSettingsTabButtons.enumerated() {
-            let color = index == selectedImageSettingsTabIndex ? activeColor : (button.isHovered ? hoverColor : baseColor)
+            let color: NSColor
+            if index == selectedImageSettingsTabIndex {
+                color = LaughTheme.settingsTabActive
+            } else if button.isHovered {
+                color = LaughTheme.settingsTabHover
+            } else {
+                color = LaughTheme.settingsTabIdle
+            }
             button.textColor = color
+            button.needsDisplay = true
         }
     }
 
@@ -2097,6 +2138,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateTitleBarChromeLayout()
         applyUIScaleIfNeeded()
         updatePlaybackBarWidth()
+        updateMiniPreviewLayout()
         applyResponsiveControlsLayout()
     }
 
@@ -2536,21 +2578,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.distribution = .fill
-            stack.spacing = 10
+            stack.spacing = settingsStackSpacing
             stack.translatesAutoresizingMaskIntoConstraints = false
         }
 
-        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Decode"))
+        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Decode", isFirst: true))
         videoTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Path", control: playbackSourcePopUp))
 
         videoTabView.addArrangedSubview(makeSettingsSectionHeader("Playback"))
         videoTabView.addArrangedSubview(makePlaybackSpeedRow())
-        videoTabView.addArrangedSubview(loopPlaybackCheckbox)
+        videoTabView.addArrangedSubview(makeSettingsCheckboxRow(title: "Loop playback", checkbox: loopPlaybackCheckbox))
 
         videoTabView.addArrangedSubview(makeSettingsSectionHeader("Display"))
         videoTabView.addArrangedSubview(makeSettingsSegmentedRow(title: "Scale", control: videoFitModeControl))
         videoTabView.addArrangedSubview(makeSettingsSegmentedRow(title: "Aspect", control: windowAspectControl))
-        videoTabView.addArrangedSubview(lockAspectCheckbox)
+        videoTabView.addArrangedSubview(
+            makeSettingsCheckboxRow(title: "Lock window to video aspect", checkbox: lockAspectCheckbox)
+        )
 
         configureAudioSettingsTab()
 
@@ -2581,7 +2625,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         [imageTabView, imageFitTabView].forEach { stack in
             stack.orientation = .vertical
             stack.alignment = .leading
-            stack.spacing = 10
+            stack.spacing = settingsStackSpacing
             stack.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -2600,7 +2644,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ])
         }
 
+        applySettingsPanelAccentChrome()
         updateSettingsTabVisibility()
+    }
+
+    private func applySettingsPanelAccentChrome() {
+        LaughTheme.applySettingsAccentChrome(in: settingsContentContainer)
+        applySettingsTabButtonState()
     }
 
     private func updateSettingsTabVisibility() {
@@ -2670,6 +2720,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lockAspectCheckbox.action = #selector(lockAspectChanged)
         loopPlaybackCheckbox.target = self
         loopPlaybackCheckbox.action = #selector(loopPlaybackChanged)
+        LaughTheme.applySettingsNeutralChrome(to: lockAspectCheckbox)
+        LaughTheme.applySettingsNeutralChrome(to: loopPlaybackCheckbox)
+        LaughTheme.applySettingsNeutralChrome(to: playbackSourcePopUp)
 
         syncVideoSettingsControlsFromStore()
     }
@@ -2863,7 +2916,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func configureAudioSettingsTab() {
-        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Track"))
+        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Track", isFirst: true))
         audioSettings.trackPopUp.target = self
         audioSettings.trackPopUp.action = #selector(audioTrackPopUpChanged)
         audioTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Audio", control: audioSettings.trackPopUp))
@@ -3185,11 +3238,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         applyPlaybackEQToActiveMpv()
     }
 
-    private func makeSettingsSectionHeader(_ title: String) -> NSTextField {
+    private func makeSettingsSectionHeader(_ title: String, isFirst: Bool = false) -> NSView {
         let field = NSTextField(labelWithString: title.uppercased())
         field.font = .systemFont(ofSize: 11, weight: .semibold)
         field.textColor = .tertiaryLabelColor
-        return field
+
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 0
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        if !isFirst {
+            let gap = NSView()
+            gap.translatesAutoresizingMaskIntoConstraints = false
+            gap.heightAnchor.constraint(equalToConstant: settingsSectionExtraGap).isActive = true
+            container.addArrangedSubview(gap)
+        }
+        container.addArrangedSubview(field)
+        return container
     }
 
     private func configureSettingsSegmentedControl(_ control: NSSegmentedControl, action: Selector) {
@@ -3198,6 +3265,27 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         control.target = self
         control.action = action
         control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        LaughTheme.installTealSegmentedCell(on: control)
+    }
+
+    private func makeSettingsCheckboxRow(title: String, checkbox: NSButton) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+
+        checkbox.title = ""
+        checkbox.attributedTitle = NSAttributedString(string: "")
+        checkbox.setAccessibilityLabel(title)
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        label.textColor = .labelColor
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        row.addArrangedSubview(checkbox)
+        row.addArrangedSubview(label)
+        return row
     }
 
     private func makeSettingsSegmentedRow(title: String, control: NSSegmentedControl) -> NSView {
@@ -3330,6 +3418,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let mode: VideoFitMode = videoFitModeControl.selectedSegment == 1 ? .fill : .fit
         SettingsStore.shared.videoFitMode = mode
         applyVideoFitMode(mode)
+        videoFitModeControl.needsDisplay = true
     }
 
     @objc private func windowAspectChanged() {
@@ -3339,6 +3428,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         SettingsStore.shared.windowAspectPreset = presets[index]
         updateLockAspectControlAvailability()
         applyWindowAspectFromSettings()
+        windowAspectControl.needsDisplay = true
     }
 
     @objc private func playbackSpeedChanged() {
@@ -3407,7 +3497,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         refreshImmersiveChromePinnedState()
         ensureSettingsTabRowsAboveContent()
         updateSettingsTabVisibility()
-        applySettingsTabButtonState()
+        applySettingsPanelAccentChrome()
         syncVideoSettingsControlsFromStore()
         updateVideoInfoLabels()
         applyWindowAspectFromSettings()
@@ -3429,7 +3519,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard !rightSettingsSheet.isHidden else { return }
         rightSettingsSheet.isHidden = true
         if usesImmersiveChrome {
-            scheduleImmersiveChromeHide()
+            noteImmersiveChromePointerActivity()
         }
         raisePlaybackChromeToFront()
         removeOutsideClickMonitorIfNoSheetsVisible()
@@ -3443,10 +3533,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackMiniPreview.isHidden = true
         librarySidebar.reloadRoots()
         // Grid scan can be slow for large folders — keep UI responsive at launch.
-        if case .root = mediaLibraryController.sidebarMode,
-           mediaLibraryController.currentDirectoryURL != nil {
+        switch mediaLibraryController.sidebarMode {
+        case .root where mediaLibraryController.currentDirectoryURL != nil,
+             .recentHeader:
             libraryBrowse.reloadContent()
-        } else {
+        case .none, .root:
             libraryBrowse.refresh()
         }
         playerSurfaceView.isHidden = true
@@ -3501,7 +3592,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         removeOutsideClickMonitorIfNoSheetsVisible()
         raisePlaybackChromeToFront()
         if usesImmersiveChrome {
-            scheduleImmersiveChromeHide()
+            noteImmersiveChromePointerActivity()
         } else {
             refreshImmersiveChromePinnedState()
         }
@@ -3526,6 +3617,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func showPlaybackMiniPreview() {
+        updateMiniPreviewLayout()
         switch activeMediaKind {
         case .video:
             playbackMiniPreview.showVideo(player: player)
@@ -3538,6 +3630,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackMiniPreview.isHidden = false
     }
 
+    private func updateMiniPreviewLayout() {
+        guard libraryChromeInstalled else { return }
+        let size = PlaybackMiniPreviewMetrics.preferredSize(forContentWidth: max(view.bounds.width, 1))
+        miniPreviewWidthConstraint?.constant = size.width
+        miniPreviewHeightConstraint?.constant = size.height
+        playbackMiniPreview.applyLayoutScale(forWidth: size.width)
+    }
+
     private func closePlaybackFromMiniPreview() {
         playbackMiniPreview.isHidden = true
         playbackMiniPreview.detachVideoPlayer()
@@ -3548,11 +3648,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard activeMediaKind != .empty else { return }
 
         switch mediaLibraryController.sidebarMode {
-        case .root:
+        case .root, .recentHeader:
             if playbackLibraryOverlay == .sidebarOnly {
                 expandPlaybackLibraryBrowse()
             }
-        case .recentHeader:
+        case .none:
             if playbackLibraryOverlay == .sidebarAndBrowse {
                 collapsePlaybackLibraryBrowseOnly()
             }
@@ -3710,6 +3810,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func handlePointerLeftContentView() {
         cancelEdgePanelHoverTimers()
         scheduleImmersiveChromeHide()
+        restoreImmersivePlaybackCursor()
         // Settings stays open for in-panel interaction; outside-click monitor dismisses it.
         guard rightSettingsSheet.isHidden else { return }
         hideSettingsSheet()
@@ -3727,7 +3828,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private var isTitleBarChromeShowing: Bool {
-        titleBarChromeAlwaysVisible || immersiveChromeVisible
+        titleBarChromeAlwaysVisible || immersiveChromeVisible || immersiveChromePinnedVisible
     }
 
     private var immersiveChromePinnedVisible: Bool {
@@ -3756,11 +3857,37 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func resetImmersiveChromeAfterMediaChange() {
         immersiveChromeHideWorkItem?.cancel()
         immersiveChromeHideWorkItem = nil
+        installImmersivePointerMonitorIfNeeded()
         setImmersiveChromeVisible(false, animated: false)
+    }
+
+    private func installImmersivePointerMonitorIfNeeded() {
+        removeImmersivePointerMonitor()
+        guard usesImmersiveChrome else { return }
+        immersivePointerMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            guard let self, let window = self.view.window, event.window === window else { return event }
+            let point = self.view.convert(event.locationInWindow, from: nil)
+            self.restoreImmersivePlaybackCursor()
+            if self.view.bounds.contains(point) {
+                self.noteImmersiveChromePointerActivity()
+                self.handleMouseMoved(point)
+            } else {
+                self.handlePointerLeftContentView()
+            }
+            return event
+        }
+    }
+
+    private func removeImmersivePointerMonitor() {
+        if let immersivePointerMonitor {
+            NSEvent.removeMonitor(immersivePointerMonitor)
+            self.immersivePointerMonitor = nil
+        }
     }
 
     private func noteImmersiveChromePointerActivity() {
         guard usesImmersiveChrome else { return }
+        restoreImmersivePlaybackCursor()
         immersiveChromeHideWorkItem?.cancel()
         immersiveChromeHideWorkItem = nil
         setImmersiveChromeVisible(true, animated: true)
@@ -3797,8 +3924,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 relayoutLibraryChromeForTitleBar()
             }
             if usesImmersiveChrome, shouldShowPlaybackBar != immersiveChromeVisible {
+                immersiveChromeVisible = shouldShowPlaybackBar
                 applyPlaybackBarVisible(shouldShowPlaybackBar, animated: animated)
             }
+            syncImmersivePlaybackCursor()
             return
         }
         immersiveChromeVisible = shouldShowPlaybackBar
@@ -3808,6 +3937,78 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         delegate?.playerViewController(self, setImmersiveChromeVisible: shouldShowTitleBar, animated: animated)
         updateTitleBarChromeStrip(visible: shouldShowTitleBar, animated: animated)
         relayoutLibraryChromeForTitleBar()
+        syncImmersivePlaybackCursor()
+    }
+
+    /// Hides the pointer when playback chrome auto-hides; restores on movement (same idle timing as bars).
+    private func syncImmersivePlaybackCursor() {
+        guard usesImmersiveChrome else {
+            restoreImmersivePlaybackCursor()
+            return
+        }
+        let chromeVisible = isTitleBarChromeShowing || immersiveChromeVisible
+        if chromeVisible || immersiveChromePinnedVisible {
+            restoreImmersivePlaybackCursor()
+        } else {
+            hideImmersivePlaybackCursorUntilMouseMoves()
+        }
+    }
+
+    private func hideImmersivePlaybackCursorUntilMouseMoves() {
+        guard !immersiveCursorHiddenUntilMove else { return }
+        immersiveCursorHiddenUntilMove = true
+        NSCursor.setHiddenUntilMouseMoves(true)
+    }
+
+    private func restoreImmersivePlaybackCursor() {
+        guard immersiveCursorHiddenUntilMove else { return }
+        immersiveCursorHiddenUntilMove = false
+        NSCursor.setHiddenUntilMouseMoves(false)
+    }
+
+    private func installImmersiveCursorWindowObserversIfNeeded() {
+        guard immersiveCursorWindowObservers.isEmpty, let window = view.window else { return }
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+            NSWindow.willExitFullScreenNotification,
+            NSWindow.didResignKeyNotification
+        ]
+        immersiveCursorWindowObservers = names.map { name in
+            center.addObserver(forName: name, object: window, queue: .main) { [weak self] notification in
+                guard let self else { return }
+                self.restoreImmersivePlaybackCursor()
+                switch notification.name {
+                case NSWindow.didEnterFullScreenNotification,
+                     NSWindow.didExitFullScreenNotification,
+                     NSWindow.willExitFullScreenNotification:
+                    self.revealImmersiveChromeAfterDisplayChange()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// Show title/playback chrome after fullscreen or layout jumps (pointer may not move).
+    func prepareImmersiveChromeForFullscreenToggle() {
+        revealImmersiveChromeAfterDisplayChange()
+    }
+
+    private func revealImmersiveChromeAfterDisplayChange() {
+        guard usesImmersiveChrome else { return }
+        updatePlaybackBarWidth()
+        updateMiniPreviewLayout()
+        noteImmersiveChromePointerActivity()
+    }
+
+    private func removeImmersiveCursorWindowObservers() {
+        let center = NotificationCenter.default
+        for token in immersiveCursorWindowObservers {
+            center.removeObserver(token)
+        }
+        immersiveCursorWindowObservers.removeAll()
     }
 
     private func updateTitleBarChromeLayout() {
@@ -4008,9 +4209,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updatePlaybackBarWidth() {
-        let width = MusicStylePlaybackBar.preferredBarWidth(forContentWidthPoints: view.bounds.width)
-        playbackBarWidthConstraint?.constant = width
-        imageBarWidthConstraint?.constant = width
+        let contentWidth = view.bounds.width
+        playbackBarWidthConstraint?.constant = MusicStylePlaybackBar.preferredBarWidth(
+            forContentWidthPoints: contentWidth
+        )
+        imageBarWidthConstraint?.constant = MusicStylePlaybackBar.preferredBarWidth(
+            forContentWidthPoints: contentWidth
+        )
+        let bottomInset = MusicStylePlaybackBar.preferredBarBottomInset(forContentWidthPoints: contentWidth)
+        playbackBarBottomConstraint?.constant = -bottomInset
+        imageBarBottomConstraint?.constant = -bottomInset
     }
 
     private func applyResponsiveControlsLayout() {
@@ -4428,6 +4636,7 @@ extension PlayerViewController {
             guard let self else { return event }
             guard event.clickCount == 2, self.activeMediaKind == .video else { return event }
             guard self.shouldToggleFullscreenForVideoDoubleClick(at: event.locationInWindow) else { return event }
+            self.revealImmersiveChromeAfterDisplayChange()
             self.view.window?.toggleFullScreen(nil)
             return event
         }
@@ -4991,13 +5200,37 @@ final class ImageSurfaceView: NSView {
     }
 }
 
+private enum PlaybackMiniPreviewMetrics {
+    static let aspectRatio: CGFloat = 16 / 9
+    static let compactWidth: CGFloat = 264
+    static let mediumWidth: CGFloat = 336
+    static let largeWidth: CGFloat = 432
+    static let mediumBreakpoint: CGFloat = 1200
+    static let largeBreakpoint: CGFloat = 1440
+
+    static func preferredSize(forContentWidth width: CGFloat) -> NSSize {
+        let previewWidth: CGFloat
+        if width < mediumBreakpoint {
+            previewWidth = compactWidth
+        } else if width < largeBreakpoint {
+            let progress = (width - mediumBreakpoint) / (largeBreakpoint - mediumBreakpoint)
+            previewWidth = compactWidth + (mediumWidth - compactWidth) * progress
+        } else {
+            previewWidth = largeWidth
+        }
+        return NSSize(width: previewWidth, height: round(previewWidth / aspectRatio))
+    }
+}
+
 final class PlaybackMiniPreviewView: NSView {
     var onExpand: (() -> Void)?
     var onClose: (() -> Void)?
 
     private let videoSurface = MiniPlayerSurfaceView()
     private let imageSurface = NSImageView()
-    private let expandBadge = NSImageView()
+    private let expandBackdrop = NSView()
+    private let expandButton = NSButton()
+    private let closeBackdrop = NSView()
     private let closeButton = NSButton()
 
     override init(frame frameRect: NSRect) {
@@ -5014,36 +5247,48 @@ final class PlaybackMiniPreviewView: NSView {
         imageSurface.imageScaling = .scaleProportionallyUpOrDown
         imageSurface.isHidden = true
 
-        expandBadge.translatesAutoresizingMaskIntoConstraints = false
+        styleChromeBackdrop(expandBackdrop)
+        styleChromeBackdrop(closeBackdrop)
+
+        expandButton.translatesAutoresizingMaskIntoConstraints = false
+        expandButton.bezelStyle = .accessoryBarAction
+        expandButton.isBordered = false
+        expandButton.toolTip = "Return to full playback"
+        expandButton.setButtonType(.momentaryPushIn)
+        expandButton.target = self
+        expandButton.action = #selector(expandClicked)
         if let image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Return to full playback") {
             let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-            expandBadge.image = image.withSymbolConfiguration(config)
-            expandBadge.contentTintColor = .white
+            expandButton.image = image.withSymbolConfiguration(config)
+            expandButton.contentTintColor = .white
         }
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.bezelStyle = .accessoryBarAction
         closeButton.isBordered = false
         closeButton.toolTip = "Stop playback"
-        if let image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Stop playback") {
-            let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            closeButton.image = image.withSymbolConfiguration(config)
-            closeButton.contentTintColor = NSColor.white.withAlphaComponent(0.92)
-        }
         closeButton.setButtonType(.momentaryPushIn)
         closeButton.target = self
         closeButton.action = #selector(closeClicked)
-        closeButton.wantsLayer = true
-        closeButton.layer?.zPosition = 10
+        if let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Stop playback") {
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            closeButton.image = image.withSymbolConfiguration(config)
+            closeButton.contentTintColor = NSColor.white.withAlphaComponent(0.92)
+        }
 
         addSubview(videoSurface)
         addSubview(imageSurface)
-        addSubview(expandBadge)
+        addSubview(expandBackdrop)
+        addSubview(expandButton)
+        addSubview(closeBackdrop)
         addSubview(closeButton)
 
-        let expandClick = NSClickGestureRecognizer(target: self, action: #selector(expandClicked))
-        videoSurface.addGestureRecognizer(expandClick)
-        imageSurface.addGestureRecognizer(expandClick)
+        videoSurface.onDoubleClick = { [weak self] in
+            self?.expandClicked()
+        }
+        let imageDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(expandClicked))
+        imageDoubleClick.numberOfClicksRequired = 2
+        imageSurface.addGestureRecognizer(imageDoubleClick)
 
         NSLayoutConstraint.activate([
             videoSurface.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -5056,25 +5301,47 @@ final class PlaybackMiniPreviewView: NSView {
             imageSurface.topAnchor.constraint(equalTo: topAnchor),
             imageSurface.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            expandBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            expandBadge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            expandBadge.widthAnchor.constraint(equalToConstant: 18),
-            expandBadge.heightAnchor.constraint(equalToConstant: 18),
+            expandBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            expandBackdrop.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            expandBackdrop.widthAnchor.constraint(equalToConstant: 26),
+            expandBackdrop.heightAnchor.constraint(equalToConstant: 26),
 
-            closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            closeButton.widthAnchor.constraint(equalToConstant: 22),
-            closeButton.heightAnchor.constraint(equalToConstant: 22)
+            expandButton.centerXAnchor.constraint(equalTo: expandBackdrop.centerXAnchor),
+            expandButton.centerYAnchor.constraint(equalTo: expandBackdrop.centerYAnchor),
+            expandButton.widthAnchor.constraint(equalToConstant: 26),
+            expandButton.heightAnchor.constraint(equalToConstant: 26),
+
+            closeBackdrop.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            closeBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            closeBackdrop.widthAnchor.constraint(equalToConstant: 26),
+            closeBackdrop.heightAnchor.constraint(equalToConstant: 26),
+
+            closeButton.centerXAnchor.constraint(equalTo: closeBackdrop.centerXAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: closeBackdrop.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 26),
+            closeButton.heightAnchor.constraint(equalToConstant: 26)
         ])
 
-        videoSurface.toolTip = "Click to return to full playback"
-        imageSurface.toolTip = "Click to return to full playback"
+        videoSurface.toolTip = "Double-click to return to full playback"
+        imageSurface.toolTip = "Double-click to return to full playback"
+    }
+
+    private func styleChromeBackdrop(_ backdrop: NSView) {
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = 13
+        backdrop.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.32).cgColor
+        backdrop.layer?.borderWidth = 0.5
+        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
-        if hit === closeButton || hit?.isDescendant(of: closeButton) == true {
+        if hit === closeButton || hit === closeBackdrop {
             return closeButton
+        }
+        if hit === expandButton || hit === expandBackdrop {
+            return expandButton
         }
         return hit
     }
@@ -5098,6 +5365,11 @@ final class PlaybackMiniPreviewView: NSView {
         videoSurface.player = nil
         imageSurface.isHidden = false
         imageSurface.image = image
+    }
+
+    func applyLayoutScale(forWidth width: CGFloat) {
+        let scale = max(1, width / PlaybackMiniPreviewMetrics.compactWidth)
+        layer?.cornerRadius = min(14, 10 * scale)
     }
 
     @objc private func expandClicked() {
@@ -5235,6 +5507,8 @@ private final class SettingsTabHeaderItemView: NSView {
 }
 
 private final class MiniPlayerSurfaceView: NSView {
+    var onDoubleClick: (() -> Void)?
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -5242,6 +5516,13 @@ private final class MiniPlayerSurfaceView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+        }
+        super.mouseDown(with: event)
     }
 
     override func makeBackingLayer() -> CALayer {

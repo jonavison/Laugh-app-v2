@@ -44,6 +44,10 @@ if [[ -d "${SPM_BUNDLE}" ]]; then
   cp -R "${SPM_BUNDLE}" "${RESOURCES}/LaughPlayer_LaughPlayer.bundle"
 fi
 
+if [[ -d "Sources/LaughPlayer/Resources/AccentColor.colorset" ]]; then
+  cp -R "Sources/LaughPlayer/Resources/AccentColor.colorset" "${RESOURCES}/AccentColor.colorset"
+fi
+
 cat > "${CONTENTS}/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -77,6 +81,8 @@ cat > "${CONTENTS}/Info.plist" <<'EOF'
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSAccentColorName</key>
+  <string>AccentColor</string>
 </dict>
 </plist>
 EOF

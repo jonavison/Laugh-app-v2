@@ -1,6 +1,6 @@
 import AppKit
 
-/// Frosted playback bar with rounded corners (clips vibrancy correctly on layout).
+/// Frosted playback bar with rounded corners; vibrancy blurs video beneath the bar.
 final class RoundedPlaybackBarView: NSVisualEffectView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -28,15 +28,32 @@ enum MusicStylePlaybackBar {
     static let minBarWidthCompact: CGFloat = 280
     /// Medium corner radius for the floating playback bar.
     static let barCornerRadius: CGFloat = 12
-    static let barBottomInset: CGFloat = 24
+    static let barBottomInsetLow: CGFloat = 24
+    static let barBottomInsetHigh: CGFloat = 120
+    static let barBottomInsetRampStart: CGFloat = 1200
+    static let barBottomInsetRampEnd: CGFloat = 1440
+
+    static func preferredBarBottomInset(forContentWidthPoints width: CGFloat) -> CGFloat {
+        if width < barBottomInsetRampStart {
+            return barBottomInsetLow
+        }
+        if width >= barBottomInsetRampEnd {
+            return barBottomInsetHigh
+        }
+        let progress = (width - barBottomInsetRampStart) / (barBottomInsetRampEnd - barBottomInsetRampStart)
+        return barBottomInsetLow + (barBottomInsetHigh - barBottomInsetLow) * progress
+    }
 
     static func applyChrome(to bar: NSVisualEffectView) {
-        bar.material = .underWindowBackground
-        bar.blendingMode = .behindWindow
+        bar.material = .hudWindow
+        bar.blendingMode = .withinWindow
         bar.state = .active
+        bar.isEmphasized = false
         bar.wantsLayer = true
         bar.layer?.cornerRadius = barCornerRadius
         bar.layer?.masksToBounds = true
+        bar.layer?.backgroundColor = nil
+        bar.layer?.borderWidth = 0
         bar.layer?.shadowColor = NSColor.black.cgColor
         bar.layer?.shadowOpacity = 0.22
         bar.layer?.shadowRadius = 14
@@ -47,12 +64,14 @@ enum MusicStylePlaybackBar {
         guard let layer = bar.layer else { return }
         let radius = barCornerRadius
         layer.cornerRadius = radius
-        layer.shadowPath = CGPath(
+        layer.masksToBounds = true
+        let rounded = CGPath(
             roundedRect: bar.bounds,
             cornerWidth: radius,
             cornerHeight: radius,
             transform: nil
         )
+        layer.shadowPath = rounded
     }
 
     static func iconButton(symbolName: String, accessibilityLabel: String, pointSize: CGFloat = 16) -> NSButton {

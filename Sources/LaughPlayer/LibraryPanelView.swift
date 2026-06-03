@@ -4,8 +4,6 @@ import AVFoundation
 private enum SidebarMetrics {
     static let edgeInset: CGFloat = 16
     static let rowTextInset: CGFloat = 10
-    static let selectionInset: CGFloat = 6
-    static let selectionCornerRadius: CGFloat = 6
 }
 
 // MARK: - Sidebar (LibraryRoot list)
@@ -16,23 +14,22 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     private enum Metrics {
         static let topInset: CGFloat = 18
         static let bottomInset: CGFloat = 12
-        static let titleToListSpacing: CGFloat = 10
         static let listToToolbarSpacing: CGFloat = 10
-        static let rowSpacing: CGFloat = 1
-        static let rowHeight: CGFloat = 32
-        static let sectionHeaderRowHeight: CGFloat = 28
-        static let recentFileRowHeight: CGFloat = 22
+        static let rowSpacing: CGFloat = LaughTheme.Sidebar.menuItemGap
+        static let rowHeight: CGFloat = LaughTheme.Sidebar.MenuButton.rowHeight
+        static let sectionHeaderRowHeight: CGFloat = LaughTheme.Sidebar.GroupLabel.rowHeight
+        static let recentFileRowHeight: CGFloat = LaughTheme.Sidebar.MenuSubButton.rowHeight
+        static let librarySeparatorRowHeight: CGFloat = 10
     }
 
     private let controller: MediaLibraryController
-    private let titleLabel = NSTextField(labelWithString: "Library")
     private let scroll = NSScrollView()
     private let table = NSTableView()
     private let toolbar = NSStackView()
     private let trailingDivider = NSBox()
     private let addFolderButton = NSButton(title: "", target: nil, action: nil)
     private let removeFolderButton = NSButton(title: "", target: nil, action: nil)
-    private var titleTopConstraint: NSLayoutConstraint?
+    private var scrollTopConstraint: NSLayoutConstraint?
     private var titleBarChromeVisible = false
     private var suppressSelectionAction = false
     private var isUpdatingScrollerLayout = false
@@ -75,10 +72,6 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         toolbar.addArrangedSubview(addFolderButton)
         toolbar.addArrangedSubview(removeFolderButton)
 
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("sidebar"))
         column.minWidth = 120
         column.maxWidth = 10_000
@@ -107,7 +100,6 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         trailingDivider.boxType = .separator
         trailingDivider.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(titleLabel)
         addSubview(scroll)
         addSubview(toolbar)
         addSubview(trailingDivider)
@@ -137,20 +129,16 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     }
 
     private func applyTitleBarContentInset() {
-        titleTopConstraint?.constant = ImmersiveWindowChrome.libraryContentTopInset(
+        scrollTopConstraint?.constant = ImmersiveWindowChrome.libraryContentTopInset(
             for: window,
             chromeVisible: titleBarChromeVisible
         )
     }
 
     private func activateLayout() {
-        titleTopConstraint = titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Metrics.topInset)
+        scrollTopConstraint = scroll.topAnchor.constraint(equalTo: topAnchor, constant: Metrics.topInset)
         NSLayoutConstraint.activate([
-            titleTopConstraint!,
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.edgeInset + SidebarMetrics.rowTextInset),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarMetrics.edgeInset),
-
-            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: Metrics.titleToListSpacing),
+            scrollTopConstraint!,
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.edgeInset),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarMetrics.edgeInset),
             scroll.bottomAnchor.constraint(equalTo: toolbar.topAnchor, constant: -Metrics.listToToolbarSpacing),
@@ -213,12 +201,14 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     private func rowHeight(for row: Int) -> CGFloat {
         guard let sidebarRow = controller.sidebarRow(at: row) else { return Metrics.rowHeight }
         switch sidebarRow {
-        case .recentHeader:
+        case .recentHeader, .root:
+            return Metrics.rowHeight
+        case .librarySectionHeader:
             return Metrics.sectionHeaderRowHeight
+        case .librarySeparator:
+            return Metrics.librarySeparatorRowHeight
         case .recentItem:
             return Metrics.recentFileRowHeight
-        case .root:
-            return Metrics.rowHeight
         }
     }
 
@@ -242,7 +232,11 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         suppressSelectionAction = true
         defer { suppressSelectionAction = false }
         table.reloadData()
-        table.selectRowIndexes(IndexSet(integer: controller.selectedSidebarRow), byExtendingSelection: false)
+        if controller.selectedSidebarRow < 0 {
+            table.deselectAll(nil)
+        } else {
+            table.selectRowIndexes(IndexSet(integer: controller.selectedSidebarRow), byExtendingSelection: false)
+        }
         removeFolderButton.isEnabled = controller.canRemoveSelectedRoot
         needsLayout = true
         updateScrollerVisibility()
@@ -251,8 +245,15 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     @objc private func selectionChanged() {
         guard !suppressSelectionAction else { return }
         let row = table.selectedRow
-        guard row >= 0 else { return }
+        guard row >= 0 else {
+            controller.clearSidebarSelection()
+            return
+        }
         controller.selectSidebarRow(row)
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        controller.isSidebarRowSelectable(row)
     }
 
     @objc private func addFolderPressed() {
@@ -290,19 +291,88 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         guard let sidebarRow = controller.sidebarRow(at: row) else { return nil }
 
         switch sidebarRow {
-        case .recentHeader:
-            let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
-            cell.configure(title: "Recents", style: .sectionHeader, toolTip: "Recently opened files")
-            return cell
         case .recentItem(let file):
             let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
-            cell.configure(title: file.url.lastPathComponent, style: .recentFile, toolTip: file.url.path)
+            cell.configure(title: file.url.lastPathComponent, style: .menuSubButton, toolTip: file.url.path)
+            return cell
+        case .recentHeader:
+            let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
+            cell.configure(
+                title: "Recents",
+                style: .menuButton,
+                toolTip: "Show all recently opened files",
+                symbol: "clock.fill"
+            )
+            return cell
+        case .librarySeparator:
+            let cell = tableView.makeView(
+                withIdentifier: SidebarGradientSeparatorView.reuseID,
+                owner: self
+            ) as? SidebarGradientSeparatorView ?? SidebarGradientSeparatorView()
+            return cell
+        case .librarySectionHeader:
+            let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
+            cell.configure(
+                title: "Library",
+                style: .groupLabel,
+                toolTip: "Library folders",
+                symbol: "folder.fill"
+            )
             return cell
         case .root(let root):
             let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
-            cell.configure(title: root.displayName, style: .folder, toolTip: root.directoryURL.path)
+            cell.configure(title: root.displayName, style: .menuButton, toolTip: root.directoryURL.path)
             return cell
         }
+    }
+}
+
+private final class SidebarGradientSeparatorView: NSView {
+    static let reuseID = NSUserInterfaceItemIdentifier("SidebarGradientSeparatorView")
+
+    private let gradientLayer = CAGradientLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = Self.reuseID
+        wantsLayer = true
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 0.5)
+        layer?.addSublayer(gradientLayer)
+        updateGradientColors()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let lineHeight: CGFloat = 1 / scale
+        let horizontalInset = SidebarMetrics.rowTextInset
+        gradientLayer.frame = CGRect(
+            x: horizontalInset,
+            y: (bounds.height - lineHeight) / 2,
+            width: max(0, bounds.width - horizontalInset * 2),
+            height: lineHeight
+        )
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateGradientColors()
+    }
+
+    private func updateGradientColors() {
+        let gray = LaughTheme.sidebarSeparatorGradientEnd
+        gradientLayer.colors = [
+            LaughTheme.sidebarSeparatorGradientStart.cgColor,
+            gray.cgColor,
+            gray.cgColor
+        ]
+        // Brief teal at the leading edge, then gray for the rest of the line.
+        gradientLayer.locations = [0, 0.12, 1.0]
     }
 }
 
@@ -310,28 +380,62 @@ private final class SidebarListCell: NSTableCellView {
     static let reuseID = NSUserInterfaceItemIdentifier("SidebarListCell")
 
     enum Style {
-        case sectionHeader
-        case recentFile
-        case folder
+        /// shadcn `SidebarMenuButton` — Recents, library folders
+        case menuButton
+        /// shadcn `SidebarGroupLabel` — Library section title
+        case groupLabel
+        /// shadcn `SidebarMenuSubButton` — recent file shortcuts
+        case menuSubButton
     }
 
+    private let contentRow = NSStackView()
+    private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private var style: Style = .folder
+    private var style: Style = .menuButton
+    private var contentLeadingConstraint: NSLayoutConstraint!
+    private var contentTrailingConstraint: NSLayoutConstraint!
+    private var iconWidthConstraint: NSLayoutConstraint!
+    private var iconHeightConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         identifier = Self.reuseID
 
-        nameLabel.lineBreakMode = .byTruncatingMiddle
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        iconView.isHidden = true
 
-        addSubview(nameLabel)
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .centerY
+        contentRow.spacing = LaughTheme.InlineButton.iconTextGap
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+        contentRow.addArrangedSubview(iconView)
+        contentRow.addArrangedSubview(nameLabel)
+
+        addSubview(contentRow)
         textField = nameLabel
 
+        iconWidthConstraint = iconView.widthAnchor.constraint(equalToConstant: LaughTheme.Sidebar.MenuButton.iconSize)
+        iconHeightConstraint = iconView.heightAnchor.constraint(equalToConstant: LaughTheme.Sidebar.MenuButton.iconSize)
+        contentLeadingConstraint = contentRow.leadingAnchor.constraint(
+            equalTo: leadingAnchor,
+            constant: LaughTheme.Sidebar.MenuButton.padding
+        )
+        contentTrailingConstraint = contentRow.trailingAnchor.constraint(
+            lessThanOrEqualTo: trailingAnchor,
+            constant: -LaughTheme.Sidebar.MenuButton.padding
+        )
+
         NSLayoutConstraint.activate([
-            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.rowTextInset),
-            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarMetrics.rowTextInset),
-            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+            iconWidthConstraint,
+            iconHeightConstraint,
+            contentRow.centerYAnchor.constraint(equalTo: centerYAnchor),
+            contentLeadingConstraint,
+            contentTrailingConstraint
         ])
     }
 
@@ -345,26 +449,86 @@ private final class SidebarListCell: NSTableCellView {
         }
     }
 
-    func configure(title: String, style: Style, toolTip: String) {
+    func configure(title: String, style: Style, toolTip: String, symbol: String? = nil) {
         nameLabel.stringValue = title
         self.style = style
         self.toolTip = toolTip
+        applySectionIcon(symbol: symbol)
+        applyRowMetrics()
         applyTextAppearance()
     }
 
-    private func applyTextAppearance() {
-        let emphasized = backgroundStyle == .emphasized
-
+    private func applyRowMetrics() {
         switch style {
-        case .sectionHeader:
-            nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-            nameLabel.textColor = emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
-        case .recentFile:
-            nameLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            nameLabel.textColor = emphasized ? .alternateSelectedControlTextColor : .tertiaryLabelColor
-        case .folder:
-            nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
-            nameLabel.textColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        case .menuButton:
+            iconWidthConstraint.constant = LaughTheme.Sidebar.MenuButton.iconSize
+            iconHeightConstraint.constant = LaughTheme.Sidebar.MenuButton.iconSize
+            contentRow.spacing = LaughTheme.Sidebar.MenuButton.gap
+            applyContentInsets(
+                leading: LaughTheme.Sidebar.MenuButton.padding,
+                trailing: LaughTheme.Sidebar.MenuButton.padding
+            )
+        case .groupLabel:
+            iconWidthConstraint.constant = LaughTheme.Sidebar.GroupLabel.iconSize
+            iconHeightConstraint.constant = LaughTheme.Sidebar.GroupLabel.iconSize
+            contentRow.spacing = LaughTheme.Sidebar.GroupLabel.gap
+            applyContentInsets(
+                leading: LaughTheme.Sidebar.GroupLabel.paddingX,
+                trailing: LaughTheme.Sidebar.GroupLabel.paddingX
+            )
+        case .menuSubButton:
+            iconView.isHidden = true
+            iconView.image = nil
+            contentRow.spacing = LaughTheme.Sidebar.MenuSubButton.gap
+            applyContentInsets(
+                leading: LaughTheme.Sidebar.MenuSubButton.contentLeadingInset,
+                trailing: LaughTheme.Sidebar.MenuSubButton.paddingX
+            )
+        }
+    }
+
+    private func applyContentInsets(leading: CGFloat, trailing: CGFloat) {
+        contentLeadingConstraint.constant = leading
+        contentTrailingConstraint.constant = -trailing
+    }
+
+    private func applySectionIcon(symbol: String?) {
+        guard style == .menuButton || style == .groupLabel,
+              let symbol,
+              let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        else {
+            if style != .groupLabel {
+                iconView.isHidden = true
+                iconView.image = nil
+            }
+            return
+        }
+        let config = style == .groupLabel
+            ? LaughTheme.Sidebar.GroupLabel.symbolConfiguration()
+            : LaughTheme.Sidebar.MenuButton.symbolConfiguration()
+        iconView.image = image.withSymbolConfiguration(config)
+        iconView.image?.isTemplate = true
+        iconView.isHidden = false
+    }
+
+    private func applyTextAppearance() {
+        let selected = backgroundStyle == .emphasized
+        switch style {
+        case .menuButton:
+            nameLabel.font = LaughTheme.Sidebar.MenuButton.labelFont
+            LaughTheme.applySidebarSelectionLabelStyle(to: nameLabel, selected: selected, idleColor: .labelColor)
+            if !iconView.isHidden {
+                iconView.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+            }
+        case .groupLabel:
+            nameLabel.font = LaughTheme.Sidebar.GroupLabel.labelFont
+            nameLabel.textColor = .secondaryLabelColor
+            if !iconView.isHidden {
+                iconView.contentTintColor = .secondaryLabelColor
+            }
+        case .menuSubButton:
+            nameLabel.font = LaughTheme.Sidebar.MenuSubButton.labelFont
+            LaughTheme.applySidebarSelectionLabelStyle(to: nameLabel, selected: selected, idleColor: .secondaryLabelColor)
         }
     }
 }
@@ -383,17 +547,16 @@ private final class SidebarTableRowView: NSTableRowView {
 
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        let rect = bounds.insetBy(
-            dx: SidebarMetrics.selectionInset,
-            dy: 2
-        )
-        let path = NSBezierPath(
-            roundedRect: rect,
-            xRadius: SidebarMetrics.selectionCornerRadius,
-            yRadius: SidebarMetrics.selectionCornerRadius
-        )
-        NSColor.selectedContentBackgroundColor.setFill()
-        path.fill()
+        let rect: NSRect
+        let radius: CGFloat
+        if bounds.height <= LaughTheme.Sidebar.MenuSubButton.rowHeight + 1 {
+            rect = LaughTheme.Sidebar.MenuSubButton.selectionRect(in: bounds)
+            radius = LaughTheme.Sidebar.MenuSubButton.cornerRadius
+        } else {
+            rect = LaughTheme.Sidebar.MenuButton.selectionRect(in: bounds)
+            radius = LaughTheme.Sidebar.MenuButton.cornerRadius
+        }
+        LaughTheme.fillSidebarSelection(in: rect, cornerRadius: radius)
     }
 }
 
@@ -401,7 +564,7 @@ private final class SidebarTableRowView: NSTableRowView {
 
 private final class LibraryBrowsePlaceholderView: NSView {
     private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "Select a folder to browse")
+    private let titleLabel = NSTextField(labelWithString: "Select Recents or a folder")
     private let hintLabel = NSTextField(labelWithString: "Drop videos or images")
     private let borderLayer = CAShapeLayer()
 
@@ -484,7 +647,7 @@ enum LibraryBrowseContextAction {
     case remove
 }
 
-final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
+final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let controller: MediaLibraryController
     private let backButton = NSButton(title: "", target: nil, action: nil)
     private let forwardButton = NSButton(title: "", target: nil, action: nil)
@@ -493,10 +656,14 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let sortPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let gridScroll = NSScrollView()
     private let collectionView = LibraryGridCollectionView()
+    private let recentListScroll = NSScrollView()
+    private let recentListTable = NSTableView()
     private let breadcrumbStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "Empty folder")
     private let browsePlaceholder = LibraryBrowsePlaceholderView()
     private var toolbarTopConstraint: NSLayoutConstraint?
+    private var contentTopBelowToolbarConstraint: NSLayoutConstraint?
+    private var contentTopBelowViewConstraint: NSLayoutConstraint?
     private var titleBarChromeVisible = false
     private var thumbnailTasks: [IndexPath: URL] = [:]
     var onOpenMediaPanel: (() -> Void)?
@@ -520,16 +687,35 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         backButton.isEnabled = controller.canGoBack
         forwardButton.isEnabled = controller.canGoForward
         collectionView.reloadData()
+        recentListTable.reloadData()
+
         let showPlaceholder = controller.showsBrowsePlaceholder
+        let showRecentList = controller.showsRecentList
         browsePlaceholder.isHidden = !showPlaceholder
+        recentListScroll.isHidden = !showRecentList
+        gridScroll.isHidden = showPlaceholder || showRecentList
         emptyLabel.isHidden = showPlaceholder || !controller.displayedEntries.isEmpty
         if !showPlaceholder {
             emptyLabel.stringValue = controller.emptyGridMessage
         }
+
+        let hideBrowseToolbar = showRecentList
+        backButton.isHidden = hideBrowseToolbar
+        forwardButton.isHidden = hideBrowseToolbar
+        openButton.isHidden = hideBrowseToolbar
+        playAllButton.isHidden = hideBrowseToolbar || showPlaceholder
+        sortPopUp.isHidden = hideBrowseToolbar || !controller.showsBrowseSortControl
+
+        contentTopBelowToolbarConstraint?.isActive = !hideBrowseToolbar
+        contentTopBelowViewConstraint?.isActive = hideBrowseToolbar
+        if hideBrowseToolbar {
+            updateContentTopInsetForRecents()
+        }
+
         updateBreadcrumb()
         updateSortControl()
         playAllButton.isEnabled = controller.canPlayAllInBrowse
-        playAllButton.isHidden = controller.showsBrowsePlaceholder
+        playAllButton.isHidden = showPlaceholder
     }
 
     func reloadContent() {
@@ -596,6 +782,33 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         gridScroll.borderType = .noBorder
         gridScroll.translatesAutoresizingMaskIntoConstraints = false
 
+        let recentColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("recentList"))
+        recentColumn.minWidth = 120
+        recentListTable.addTableColumn(recentColumn)
+        recentListTable.headerView = nil
+        recentListTable.rowHeight = LaughTheme.Sidebar.MenuButton.rowHeight
+        recentListTable.intercellSpacing = NSSize(width: 0, height: LaughTheme.Sidebar.menuItemGap)
+        recentListTable.backgroundColor = .clear
+        recentListTable.style = .plain
+        recentListTable.selectionHighlightStyle = .regular
+        recentListTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        recentListTable.delegate = self
+        recentListTable.dataSource = self
+        recentListTable.target = self
+        recentListTable.doubleAction = #selector(recentListDoubleClicked)
+        recentListTable.translatesAutoresizingMaskIntoConstraints = false
+
+        recentListScroll.documentView = recentListTable
+        recentListScroll.hasVerticalScroller = true
+        recentListScroll.autohidesScrollers = true
+        recentListScroll.scrollerStyle = .overlay
+        recentListScroll.drawsBackground = false
+        recentListScroll.borderType = .noBorder
+        recentListScroll.automaticallyAdjustsContentInsets = false
+        recentListScroll.contentInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
+        recentListScroll.translatesAutoresizingMaskIntoConstraints = false
+        recentListScroll.isHidden = true
+
         breadcrumbStack.orientation = .horizontal
         breadcrumbStack.alignment = .centerY
         breadcrumbStack.spacing = 2
@@ -616,6 +829,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         addSubview(playAllButton)
         addSubview(sortPopUp)
         addSubview(gridScroll)
+        addSubview(recentListScroll)
         addSubview(breadcrumbStack)
         addSubview(emptyLabel)
         addSubview(browsePlaceholder)
@@ -637,14 +851,33 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     private func applyTitleBarContentInset() {
-        toolbarTopConstraint?.constant = ImmersiveWindowChrome.libraryContentTopInset(
+        let inset = ImmersiveWindowChrome.libraryContentTopInset(
             for: window,
             chromeVisible: titleBarChromeVisible
         )
+        toolbarTopConstraint?.constant = inset
+        if contentTopBelowViewConstraint?.isActive == true {
+            updateContentTopInsetForRecents()
+        }
+    }
+
+    private func updateContentTopInsetForRecents() {
+        let inset = ImmersiveWindowChrome.libraryContentTopInset(
+            for: window,
+            chromeVisible: titleBarChromeVisible
+        )
+        contentTopBelowViewConstraint?.constant = inset + 14
     }
 
     private func activateLayout() {
         toolbarTopConstraint = backButton.topAnchor.constraint(equalTo: topAnchor, constant: 18)
+        contentTopBelowToolbarConstraint = gridScroll.topAnchor.constraint(
+            equalTo: backButton.bottomAnchor,
+            constant: 12
+        )
+        contentTopBelowViewConstraint = gridScroll.topAnchor.constraint(equalTo: topAnchor, constant: 24)
+        contentTopBelowViewConstraint?.isActive = false
+
         NSLayoutConstraint.activate([
             toolbarTopConstraint!,
             backButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -662,10 +895,15 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             sortPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             sortPopUp.leadingAnchor.constraint(greaterThanOrEqualTo: playAllButton.trailingAnchor, constant: 12),
 
-            gridScroll.topAnchor.constraint(equalTo: backButton.bottomAnchor, constant: 12),
+            contentTopBelowToolbarConstraint!,
             gridScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             gridScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             gridScroll.bottomAnchor.constraint(equalTo: breadcrumbStack.topAnchor, constant: -6),
+
+            recentListScroll.topAnchor.constraint(equalTo: gridScroll.topAnchor),
+            recentListScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            recentListScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            recentListScroll.bottomAnchor.constraint(equalTo: breadcrumbStack.topAnchor, constant: -6),
 
             emptyLabel.centerXAnchor.constraint(equalTo: gridScroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: gridScroll.centerYAnchor),
@@ -782,6 +1020,39 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     @objc private func openPressed() { onOpenMediaPanel?() }
 
     @objc private func playAllPressed() { onPlayAll?() }
+
+    @objc private func recentListDoubleClicked() {
+        openRecentListSelection()
+    }
+
+    private func openRecentListSelection() {
+        let row = recentListTable.selectedRow
+        guard row >= 0, let entry = controller.entry(at: IndexPath(item: row, section: 0)),
+              case .media(let file) = entry.kind else { return }
+        controller.openMedia(file)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        guard controller.showsRecentList else { return 0 }
+        return controller.displayedEntries.count
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        guard tableView === recentListTable else { return nil }
+        return tableView.makeView(withIdentifier: LibraryRecentListRowView.reuseID, owner: self) as? LibraryRecentListRowView
+            ?? LibraryRecentListRowView()
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let entry = controller.entry(at: IndexPath(item: row, section: 0)),
+              case .media(let file) = entry.kind else { return nil }
+        let cell = tableView.makeView(
+            withIdentifier: LibraryRecentListCell.reuseID,
+            owner: self
+        ) as? LibraryRecentListCell ?? LibraryRecentListCell()
+        cell.configure(file: file)
+        return cell
+    }
 
     @objc private func breadcrumbPressed(_ sender: NSButton) {
         guard let path = sender.identifier?.rawValue else { return }
@@ -1107,5 +1378,94 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
         image.draw(in: NSRect(origin: .zero, size: target), from: .zero, operation: .copy, fraction: 1)
         output.unlockFocus()
         return output
+    }
+}
+
+// MARK: - Recents list (main content)
+
+private final class LibraryRecentListRowView: NSTableRowView {
+    static let reuseID = NSUserInterfaceItemIdentifier("LibraryRecentListRowView")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = Self.reuseID
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let rect = LaughTheme.Sidebar.MenuButton.ContentList.selectionRect(in: bounds)
+        LaughTheme.fillSidebarSelection(in: rect, cornerRadius: LaughTheme.Sidebar.MenuButton.cornerRadius)
+    }
+}
+
+private final class LibraryRecentListCell: NSTableCellView {
+    static let reuseID = NSUserInterfaceItemIdentifier("LibraryRecentListCell")
+
+    private let contentRow = NSStackView()
+    private let iconView = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = Self.reuseID
+
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        nameLabel.font = LaughTheme.Sidebar.MenuButton.labelFont
+        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .centerY
+        contentRow.spacing = LaughTheme.Sidebar.MenuButton.gap
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
+        contentRow.addArrangedSubview(iconView)
+        contentRow.addArrangedSubview(nameLabel)
+
+        addSubview(contentRow)
+        textField = nameLabel
+
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: LaughTheme.Sidebar.MenuButton.iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: LaughTheme.Sidebar.MenuButton.iconSize),
+
+            contentRow.centerYAnchor.constraint(equalTo: centerYAnchor),
+            contentRow.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: LaughTheme.Sidebar.MenuButton.ContentList.contentLeadingInset
+            ),
+            contentRow.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor,
+                constant: -LaughTheme.Sidebar.MenuButton.ContentList.contentTrailingInset
+            )
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            let selected = backgroundStyle == .emphasized
+            LaughTheme.applySidebarSelectionLabelStyle(to: nameLabel, selected: selected, idleColor: .labelColor)
+            iconView.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        }
+    }
+
+    func configure(file: LibraryMediaFile) {
+        nameLabel.stringValue = file.url.lastPathComponent
+        toolTip = file.url.path
+        let symbol = file.kind == .video ? "film" : "photo"
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            iconView.image = image.withSymbolConfiguration(LaughTheme.Sidebar.MenuButton.symbolConfiguration())
+            iconView.image?.isTemplate = true
+        }
     }
 }

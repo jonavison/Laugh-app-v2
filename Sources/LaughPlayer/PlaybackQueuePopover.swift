@@ -25,7 +25,7 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.style = .plain
-        tableView.rowHeight = 36
+        tableView.rowHeight = LaughTheme.InlineButton.rowHeight
         tableView.dataSource = self
         tableView.delegate = self
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -54,7 +54,7 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
         self.rows = rows
         tableView.reloadData()
 
-        let rowHeight: CGFloat = 36
+        let rowHeight: CGFloat = LaughTheme.InlineButton.rowHeight
         let chrome: CGFloat = 24
         let maxHeight: CGFloat = 320
         let contentHeight = CGFloat(max(rows.count, 1)) * rowHeight + chrome
@@ -64,6 +64,11 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         rows.count
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        tableView.makeView(withIdentifier: QueueTableRowView.reuseID, owner: self) as? QueueTableRowView
+            ?? QueueTableRowView()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -125,8 +130,38 @@ private final class QueueListCellView: NSTableCellView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { applySelectionColors() }
+    }
+
     func configure(sectionTitle: String, fileName: String) {
         sectionLabel.stringValue = sectionTitle
         fileLabel.stringValue = fileName
+        applySelectionColors()
+    }
+
+    private func applySelectionColors() {
+        let selected = backgroundStyle == .emphasized
+        LaughTheme.applySelectionLabelStyle(to: sectionLabel, selected: selected, idleColor: .secondaryLabelColor)
+        LaughTheme.applySelectionLabelStyle(to: fileLabel, selected: selected, idleColor: .labelColor)
+    }
+}
+
+private final class QueueTableRowView: NSTableRowView {
+    static let reuseID = NSUserInterfaceItemIdentifier("QueueTableRowView")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = Self.reuseID
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let rect = LaughTheme.InlineButton.selectionRect(in: bounds)
+        LaughTheme.fillSelection(in: rect)
     }
 }

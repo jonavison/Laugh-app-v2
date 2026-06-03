@@ -31,6 +31,7 @@ final class PreferencesWindowController: NSWindowController {
         ])
 
         lockAspectCheckbox.state = SettingsStore.shared.lockAspectRatioEnabled ? .on : .off
+        LaughTheme.applySettingsNeutralChrome(to: lockAspectCheckbox)
         lockAspectCheckbox.target = self
         lockAspectCheckbox.action = #selector(toggleAspectLock)
     }

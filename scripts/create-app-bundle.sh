@@ -27,6 +27,15 @@ if [[ -d "Sources/LaughPlayer/codec-tools" ]]; then
   cp -R "Sources/LaughPlayer/codec-tools" "${RESOURCES_DIR}/codec-tools"
 fi
 
+SPM_BUNDLE=".build/release/LaughPlayer_LaughPlayer.bundle"
+if [[ -d "${SPM_BUNDLE}" ]]; then
+  cp -R "${SPM_BUNDLE}" "${RESOURCES_DIR}/LaughPlayer_LaughPlayer.bundle"
+fi
+
+if [[ -d "Sources/LaughPlayer/Resources/AccentColor.colorset" ]]; then
+  cp -R "Sources/LaughPlayer/Resources/AccentColor.colorset" "${RESOURCES_DIR}/AccentColor.colorset"
+fi
+
 cat > "${CONTENTS_DIR}/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,6 +61,8 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'EOF'
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAccentColorName</key>
+  <string>AccentColor</string>
 </dict>
 </plist>
 EOF

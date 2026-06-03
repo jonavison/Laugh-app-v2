@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindowController: PreferencesWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        LaughTheme.activate()
         LaunchLog.emit("applicationWillFinishLaunching")
     }
 

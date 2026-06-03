@@ -82,6 +82,7 @@ final class MainWindowController: NSWindowController {
     }
 
     func toggleFullScreen() {
+        playerViewController.prepareImmersiveChromeForFullscreenToggle()
         window?.toggleFullScreen(nil)
     }
 

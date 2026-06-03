@@ -8,22 +8,26 @@ final class MediaLibraryController {
     weak var delegate: MediaLibraryDelegate?
 
     enum SidebarRow: Equatable {
-        case recentHeader
         case recentItem(LibraryMediaFile)
+        case recentHeader
+        case librarySeparator
+        case librarySectionHeader
         case root(MediaLibraryRoot)
     }
 
     enum SidebarMode: Equatable {
+        case none
         case recentHeader
         case root(MediaLibraryRoot)
     }
 
     static let recentPreviewLimit = 5
+    static let noSelectionRow = -1
 
     private(set) var roots: [MediaLibraryRoot] = []
     private(set) var recentPreviewItems: [LibraryMediaFile] = []
-    private(set) var selectedSidebarRow = 0
-    private(set) var sidebarMode: SidebarMode = .recentHeader
+    private(set) var selectedSidebarRow = noSelectionRow
+    private(set) var sidebarMode: SidebarMode = .none
     private(set) var currentDirectoryURL: URL?
     private(set) var backStack: [URL] = []
     private(set) var forwardStack: [URL] = []
@@ -34,32 +38,65 @@ final class MediaLibraryController {
 
     init() {
         reloadRoots()
-        // Start on Recents — do not scan Movies/Videos on the main thread at launch.
-        selectSidebarRow(0)
+        clearSidebarSelection()
     }
 
     func reloadRoots() {
         roots = MediaLibraryRoots.allRoots()
         recentPreviewItems = RecentlyViewedStore.shared.sidebarPreview()
-        reloadGrid()
+        if !isSidebarRowSelectable(selectedSidebarRow) {
+            clearSidebarSelection()
+        } else {
+            reloadGrid()
+        }
         onChange?()
     }
 
+    private let recentsHeaderRowIndex = 0
+
+    private var librarySeparatorRowIndex: Int { 1 + recentPreviewItems.count }
+
+    private var librarySectionRowIndex: Int { librarySeparatorRowIndex + 1 }
+
     func sidebarRowCount() -> Int {
-        1 + recentPreviewItems.count + roots.count
+        1 + recentPreviewItems.count + 1 + 1 + roots.count
     }
 
     func sidebarRow(at index: Int) -> SidebarRow? {
         guard index >= 0, index < sidebarRowCount() else { return nil }
-        if index == 0 { return .recentHeader }
-        if index <= recentPreviewItems.count {
+        if index == recentsHeaderRowIndex { return .recentHeader }
+        if index < librarySeparatorRowIndex {
             return .recentItem(recentPreviewItems[index - 1])
         }
-        return .root(roots[index - 1 - recentPreviewItems.count])
+        if index == librarySeparatorRowIndex { return .librarySeparator }
+        if index == librarySectionRowIndex { return .librarySectionHeader }
+        let rootIndex = index - librarySectionRowIndex - 1
+        guard rootIndex < roots.count else { return nil }
+        return .root(roots[rootIndex])
     }
 
     func firstRootRowIndex() -> Int {
-        1 + recentPreviewItems.count
+        librarySectionRowIndex + 1
+    }
+
+    func isSidebarRowSelectable(_ row: Int) -> Bool {
+        guard let sidebarRow = sidebarRow(at: row) else { return false }
+        switch sidebarRow {
+        case .librarySectionHeader, .librarySeparator:
+            return false
+        case .recentItem, .recentHeader, .root:
+            return true
+        }
+    }
+
+    func clearSidebarSelection() {
+        selectedSidebarRow = Self.noSelectionRow
+        sidebarMode = .none
+        currentDirectoryURL = nil
+        backStack = []
+        forwardStack = []
+        reloadGrid()
+        onChange?()
     }
 
     func selectSidebarRow(_ row: Int) {
@@ -67,9 +104,10 @@ final class MediaLibraryController {
 
         switch sidebarRow {
         case .recentItem(let file):
-            selectedSidebarRow = row
             openMedia(file)
-            onChange?()
+            clearSidebarSelection()
+            return
+        case .librarySectionHeader, .librarySeparator:
             return
         case .recentHeader:
             selectedSidebarRow = row
@@ -91,8 +129,10 @@ final class MediaLibraryController {
 
     func reloadGrid() {
         switch sidebarMode {
-        case .recentHeader:
+        case .none:
             displayedEntries = []
+        case .recentHeader:
+            displayedEntries = recentBrowseEntries()
         case .root:
             guard let directory = currentDirectoryURL else {
                 displayedEntries = []
@@ -101,7 +141,22 @@ final class MediaLibraryController {
             displayedEntries = MediaLibraryScanner.browseEntries(in: directory)
         }
 
-        displayedEntries = LibraryBrowseItemSorter.sorted(displayedEntries, by: browseSort)
+        if case .root = sidebarMode {
+            displayedEntries = LibraryBrowseItemSorter.sorted(displayedEntries, by: browseSort)
+        }
+    }
+
+    /// Recents content list: store order is most recently played first (no browse sort).
+    private func recentBrowseEntries() -> [LibraryBrowseEntry] {
+        RecentlyViewedStore.shared.mediaFiles().map { file in
+            LibraryBrowseEntry(
+                kind: .media(file),
+                name: file.url.lastPathComponent,
+                dateModified: nil,
+                dateAdded: nil,
+                size: nil
+            )
+        }
     }
 
     func setSort(_ sort: LibraryBrowseSort) {
@@ -173,15 +228,15 @@ final class MediaLibraryController {
         guard case .root(let root) = sidebarRow(at: selectedSidebarRow), root.isUserAdded else { return }
         LibraryRootsStore.shared.removeRoot(id: root.id)
         reloadRoots()
-        selectSidebarRow(0)
+        clearSidebarSelection()
     }
 
     var canGoBack: Bool {
-        sidebarMode != .recentHeader && !backStack.isEmpty
+        sidebarMode != .recentHeader && sidebarMode != .none && !backStack.isEmpty
     }
 
     var canGoForward: Bool {
-        sidebarMode != .recentHeader && !forwardStack.isEmpty
+        sidebarMode != .recentHeader && sidebarMode != .none && !forwardStack.isEmpty
     }
 
     var canRemoveSelectedRoot: Bool {
@@ -189,10 +244,13 @@ final class MediaLibraryController {
         return root.isUserAdded
     }
 
-    /// True when the browse grid has no folder context (Recents header selected).
+    var showsRecentList: Bool {
+        sidebarMode == .recentHeader
+    }
+
+    /// True when nothing is selected in the sidebar (browse shows the drop hint).
     var showsBrowsePlaceholder: Bool {
-        if case .recentHeader = sidebarMode { return true }
-        return false
+        sidebarMode == .none
     }
 
     /// Media files in the current browse folder, in the same order as the grid (respects sort).
@@ -202,19 +260,18 @@ final class MediaLibraryController {
 
     /// Media in a folder (or the current browse folder when `directory` is nil), using the active sort.
     func mediaFiles(in directory: URL?) -> [LibraryMediaFile] {
-        let targetDirectory: URL?
         switch sidebarMode {
-        case .recentHeader:
+        case .none:
             return []
+        case .recentHeader:
+            return RecentlyViewedStore.shared.mediaFiles()
         case .root:
-            targetDirectory = directory ?? currentDirectoryURL
-        }
-        guard let targetDirectory else { return [] }
-
-        let entries = MediaLibraryScanner.browseEntries(in: targetDirectory)
-        return LibraryBrowseItemSorter.sorted(entries, by: browseSort).compactMap { entry in
-            guard case .media(let file) = entry.kind else { return nil }
-            return file
+            guard let targetDirectory = directory ?? currentDirectoryURL else { return [] }
+            let entries = MediaLibraryScanner.browseEntries(in: targetDirectory)
+            return LibraryBrowseItemSorter.sorted(entries, by: browseSort).compactMap { entry in
+                guard case .media(let file) = entry.kind else { return nil }
+                return file
+            }
         }
     }
 
@@ -230,18 +287,21 @@ final class MediaLibraryController {
     }
 
     var canPlayAllInBrowse: Bool {
-        !showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty
+        showsRecentList || (!showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty)
     }
 
-    /// Sort control is shown only when the browse grid has folder contents to order.
+    /// Sort control for folder browse only (recents stay in recently-played order).
     var showsBrowseSortControl: Bool {
-        !showsBrowsePlaceholder && !displayedEntries.isEmpty
+        if case .root = sidebarMode { return !displayedEntries.isEmpty }
+        return false
     }
 
     var emptyGridMessage: String {
         switch sidebarMode {
+        case .none:
+            return ""
         case .recentHeader:
-            return "Select a folder to browse"
+            return "No recent files"
         case .root:
             return "Empty folder"
         }
@@ -249,8 +309,10 @@ final class MediaLibraryController {
 
     func breadcrumbComponents() -> [(title: String, url: URL?)] {
         switch sidebarMode {
+        case .none:
+            return []
         case .recentHeader:
-            return [(title: "Recent", url: nil)]
+            return [(title: "Recents", url: nil)]
         case .root(let root):
             guard let current = currentDirectoryURL else { return [(title: root.displayName, url: root.directoryURL)] }
             return breadcrumbPathComponents(root: root, current: current).map { (title: $0.title, url: $0.url) }

@@ -50,7 +50,6 @@ final class AudioSettingsControls {
             slider.tag = index
             slider.translatesAutoresizingMaskIntoConstraints = false
             slider.heightAnchor.constraint(equalToConstant: 88).isActive = true
-
             let label = NSTextField(labelWithString: bandLabel)
             label.font = .systemFont(ofSize: 9)
             label.textColor = .tertiaryLabelColor
@@ -63,6 +62,9 @@ final class AudioSettingsControls {
         }
         eqBandSliders = sliders
         eqBandLabels = labels
+        LaughTheme.applySettingsAccentChrome(to: trackPopUp)
+        LaughTheme.applySettingsAccentChrome(to: eqPresetPopUp)
+        eqBandSliders.forEach { LaughTheme.applySettingsAccentChrome(to: $0) }
     }
 
     func setEQControlsEnabled(_ enabled: Bool) {

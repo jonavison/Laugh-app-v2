@@ -3,7 +3,7 @@ import AppKit
 /// Horizontal slider that draws a flat filled bar without the default round knob.
 final class FlatBarSliderCell: NSSliderCell {
     var trackHeight: CGFloat = 3
-    var filledColor: NSColor = .controlAccentColor
+    var filledColor: NSColor = LaughTheme.playbackAccent
     var unfilledColor: NSColor = .separatorColor.withAlphaComponent(0.55)
 
     override func barRect(flipped: Bool) -> NSRect {
@@ -66,7 +66,7 @@ final class FlatBarSliderCell: NSSliderCell {
 
 extension NSSlider {
     /// Replaces the cell with a flat bar style (no round white knob).
-    func useFlatBarAppearance(trackHeight: CGFloat = 3) {
+    func useFlatBarAppearance(trackHeight: CGFloat = 3, filledColor: NSColor = LaughTheme.playbackAccent) {
         let flat = FlatBarSliderCell()
         flat.minValue = minValue
         flat.maxValue = maxValue
@@ -74,6 +74,7 @@ extension NSSlider {
         flat.isContinuous = isContinuous
         flat.controlSize = controlSize
         flat.trackHeight = trackHeight
+        flat.filledColor = filledColor
         flat.target = target
         flat.action = action
         flat.isBordered = false
