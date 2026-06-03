@@ -14,7 +14,7 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     static let width: CGFloat = 220
 
     private enum Metrics {
-        static let topInset: CGFloat = 14
+        static let topInset: CGFloat = 18
         static let bottomInset: CGFloat = 12
         static let titleToListSpacing: CGFloat = 10
         static let listToToolbarSpacing: CGFloat = 10
@@ -32,6 +32,8 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
     private let trailingDivider = NSBox()
     private let addFolderButton = NSButton(title: "", target: nil, action: nil)
     private let removeFolderButton = NSButton(title: "", target: nil, action: nil)
+    private var titleTopConstraint: NSLayoutConstraint?
+    private var titleBarChromeVisible = false
     private var suppressSelectionAction = false
     private var isUpdatingScrollerLayout = false
 
@@ -119,9 +121,32 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         updateScrollerVisibility()
     }
 
+    func syncTitleBarContentInset(chromeVisible: Bool) {
+        titleBarChromeVisible = chromeVisible
+        applyTitleBarContentInset()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyTitleBarContentInset()
+    }
+
+    override func layout() {
+        super.layout()
+        applyTitleBarContentInset()
+    }
+
+    private func applyTitleBarContentInset() {
+        titleTopConstraint?.constant = ImmersiveWindowChrome.libraryContentTopInset(
+            for: window,
+            chromeVisible: titleBarChromeVisible
+        )
+    }
+
     private func activateLayout() {
+        titleTopConstraint = titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Metrics.topInset)
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: Metrics.topInset),
+            titleTopConstraint!,
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.edgeInset + SidebarMetrics.rowTextInset),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarMetrics.edgeInset),
 
@@ -471,6 +496,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let breadcrumbStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "Empty folder")
     private let browsePlaceholder = LibraryBrowsePlaceholderView()
+    private var toolbarTopConstraint: NSLayoutConstraint?
+    private var titleBarChromeVisible = false
     private var thumbnailTasks: [IndexPath: URL] = [:]
     var onOpenMediaPanel: (() -> Void)?
     var onPlayAll: (() -> Void)?
@@ -500,7 +527,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             emptyLabel.stringValue = controller.emptyGridMessage
         }
         updateBreadcrumb()
-        selectSortInMenu(controller.browseSort)
+        updateSortControl()
         playAllButton.isEnabled = controller.canPlayAllInBrowse
         playAllButton.isHidden = controller.showsBrowsePlaceholder
     }
@@ -534,17 +561,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         playAllButton.action = #selector(playAllPressed)
         playAllButton.translatesAutoresizingMaskIntoConstraints = false
 
-        for option in LibraryBrowseSort.allOptions() {
-            sortPopUp.addItem(withTitle: option.menuTitle)
-        }
-        sortPopUp.target = self
-        sortPopUp.action = #selector(sortChanged)
         sortPopUp.font = .systemFont(ofSize: 11)
         sortPopUp.controlSize = .small
         sortPopUp.translatesAutoresizingMaskIntoConstraints = false
         sortPopUp.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         sortPopUp.cell?.lineBreakMode = .byTruncatingTail
-        selectSortInMenu(controller.browseSort)
+        updateSortControl()
 
         let layout = NSCollectionViewGridLayout()
         layout.minimumItemSize = NSSize(width: 120, height: 124)
@@ -599,9 +621,32 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         addSubview(browsePlaceholder)
     }
 
+    func syncTitleBarContentInset(chromeVisible: Bool) {
+        titleBarChromeVisible = chromeVisible
+        applyTitleBarContentInset()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyTitleBarContentInset()
+    }
+
+    override func layout() {
+        super.layout()
+        applyTitleBarContentInset()
+    }
+
+    private func applyTitleBarContentInset() {
+        toolbarTopConstraint?.constant = ImmersiveWindowChrome.libraryContentTopInset(
+            for: window,
+            chromeVisible: titleBarChromeVisible
+        )
+    }
+
     private func activateLayout() {
+        toolbarTopConstraint = backButton.topAnchor.constraint(equalTo: topAnchor, constant: 18)
         NSLayoutConstraint.activate([
-            backButton.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            toolbarTopConstraint!,
             backButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             forwardButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
@@ -676,11 +721,60 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         breadcrumbStack.addArrangedSubview(button)
     }
 
-    private func selectSortInMenu(_ sort: LibraryBrowseSort) {
-        let options = LibraryBrowseSort.allOptions()
-        if let index = options.firstIndex(of: sort) {
-            sortPopUp.selectItem(at: index)
+    private func updateSortControl() {
+        let sort = controller.browseSort
+        let showSort = controller.showsBrowseSortControl
+        sortPopUp.isHidden = !showSort
+        guard showSort else { return }
+
+        let menu = NSMenu()
+        for key in LibraryBrowseSortKey.allCases {
+            let item = NSMenuItem(
+                title: key.menuTitle,
+                action: #selector(sortKeyChosen(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = key.menuTag
+            item.state = sort.key == key ? .on : .off
+            menu.addItem(item)
         }
+        menu.addItem(.separator())
+        for direction in [LibraryBrowseSortDirection.ascending, .descending] {
+            let item = NSMenuItem(
+                title: direction.menuTitle,
+                action: #selector(sortDirectionChosen(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = direction == .ascending
+                ? LibraryBrowseSortDirection.ascendingMenuTag
+                : LibraryBrowseSortDirection.descendingMenuTag
+            item.state = sort.direction == direction ? .on : .off
+            menu.addItem(item)
+        }
+
+        sortPopUp.menu = menu
+        sortPopUp.select(nil)
+        sortPopUp.title = sort.key.menuTitle
+    }
+
+    @objc private func sortKeyChosen(_ sender: NSMenuItem) {
+        guard let key = LibraryBrowseSortKey(menuTag: sender.tag) else { return }
+        var sort = controller.browseSort
+        guard sort.key != key else { return }
+        sort.key = key
+        controller.setSort(sort)
+        updateSortControl()
+    }
+
+    @objc private func sortDirectionChosen(_ sender: NSMenuItem) {
+        guard let direction = LibraryBrowseSortDirection(menuTag: sender.tag) else { return }
+        var sort = controller.browseSort
+        guard sort.direction != direction else { return }
+        sort.direction = direction
+        controller.setSort(sort)
+        updateSortControl()
     }
 
     @objc private func backPressed() { controller.goBack() }
@@ -688,13 +782,6 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     @objc private func openPressed() { onOpenMediaPanel?() }
 
     @objc private func playAllPressed() { onPlayAll?() }
-
-    @objc private func sortChanged() {
-        let options = LibraryBrowseSort.allOptions()
-        let index = sortPopUp.indexOfSelectedItem
-        guard index >= 0, index < options.count else { return }
-        controller.setSort(options[index])
-    }
 
     @objc private func breadcrumbPressed(_ sender: NSButton) {
         guard let path = sender.identifier?.rawValue else { return }

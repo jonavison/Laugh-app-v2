@@ -20,6 +20,12 @@ final class RoundedPlaybackBarView: NSVisualEffectView {
 enum MusicStylePlaybackBar {
     static let maxBarWidth: CGFloat = 560
     static let minBarWidth: CGFloat = 360
+    static let compactLayoutBreakpoint: CGFloat = 700
+    /// Horizontal inset from window edges on narrow layouts (12pt each side).
+    static let horizontalPaddingCompact: CGFloat = 12
+    /// Horizontal inset from window edges on regular/wide layouts (24pt each side).
+    static let horizontalPaddingRegular: CGFloat = 24
+    static let minBarWidthCompact: CGFloat = 280
     /// Medium corner radius for the floating playback bar.
     static let barCornerRadius: CGFloat = 12
     static let barBottomInset: CGFloat = 24
@@ -71,9 +77,11 @@ enum MusicStylePlaybackBar {
     }
 
     static func preferredBarWidth(forContentWidthPoints width: CGFloat) -> CGFloat {
-        let margin: CGFloat = 48
-        let available = max(minBarWidth, width - margin)
-        if width < 700 { return min(400, available) }
+        if width < compactLayoutBreakpoint {
+            let available = width - (horizontalPaddingCompact * 2)
+            return max(minBarWidthCompact, available)
+        }
+        let available = max(minBarWidth, width - (horizontalPaddingRegular * 2))
         if width <= 1200 { return min(480, available) }
         return min(maxBarWidth, available)
     }

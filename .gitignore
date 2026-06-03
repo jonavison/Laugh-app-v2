@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Swift / SPM
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Node (package.json scripts only)
+node_modules/
+
+# Local agent / IDE tooling (not part of the app)
+.agents/
+.cursor/
+
+# Build outputs
+dist/
+*.pkg
+
+# Bundled codec binaries (see scripts/bundle-codec-tools.sh)
+Sources/LaughPlayer/codec-tools/bin/
+
+# Logs and temp
+*.log
+*.tmp
+*.swp
+*~

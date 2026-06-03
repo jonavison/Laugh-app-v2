@@ -35,7 +35,20 @@ enum FFmpegVideoFallback {
         isHeavyTranscodeEnabled
     }
 
-    private static let processQueue = DispatchQueue(label: "ffmpeg-fallback-processes")
+    private static let processQueueKey = DispatchSpecificKey<Void>()
+    private static let processQueue: DispatchQueue = {
+        let queue = DispatchQueue(label: "ffmpeg-fallback-processes")
+        queue.setSpecific(key: processQueueKey, value: ())
+        return queue
+    }()
+
+    /// Runs `work` on `processQueue`, inlining when already on that queue (avoids dispatch_sync deadlock).
+    private static func onProcessQueue<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: processQueueKey) != nil {
+            return work()
+        }
+        return processQueue.sync(execute: work)
+    }
     private static var activeProcesses: [Process] = []
     private static var activeRemux: ActiveRemux?
     private static var remuxCache: [String: CacheEntry] = [:]
@@ -55,7 +68,7 @@ enum FFmpegVideoFallback {
     }
 
     static func terminateRunningProcesses() {
-        processQueue.sync {
+        onProcessQueue {
             for process in activeProcesses where process.isRunning {
                 process.terminate()
             }
@@ -66,12 +79,12 @@ enum FFmpegVideoFallback {
 
     static func cachedPlayableURL(for inputURL: URL) -> URL? {
         guard let identity = sourceIdentity(for: inputURL) else { return nil }
-        let entry: CacheEntry? = processQueue.sync {
+        let entry: CacheEntry? = onProcessQueue {
             remuxCache[identity]
         }
         guard let entry, entry.sourceIdentity == identity else { return nil }
         guard FileManager.default.fileExists(atPath: entry.outputURL.path) else {
-            _ = processQueue.sync { remuxCache.removeValue(forKey: identity) }
+            _ = onProcessQueue { remuxCache.removeValue(forKey: identity) }
             return nil
         }
         return entry.outputURL
@@ -90,7 +103,7 @@ enum FFmpegVideoFallback {
     }
 
     static func isRemuxing(outputURL: URL) -> Bool {
-        processQueue.sync {
+        onProcessQueue {
             activeRemux?.outputURL == outputURL && activeRemux?.process.isRunning == true
         }
     }
@@ -164,7 +177,7 @@ enum FFmpegVideoFallback {
 
         do {
             try process.run()
-            processQueue.sync {
+            onProcessQueue {
                 activeProcesses.append(process)
                 activeRemux = ActiveRemux(process: process, inputURL: inputURL, outputURL: outputURL)
             }
@@ -217,7 +230,7 @@ enum FFmpegVideoFallback {
 
     private static func storeCache(inputURL: URL, outputURL: URL) {
         guard let identity = sourceIdentity(for: inputURL) else { return }
-        processQueue.sync {
+        onProcessQueue {
             remuxCache[identity] = CacheEntry(outputURL: outputURL, sourceIdentity: identity)
         }
     }
@@ -269,14 +282,14 @@ enum FFmpegVideoFallback {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe
         do {
-            processQueue.sync { activeProcesses.append(process) }
+            onProcessQueue { activeProcesses.append(process) }
             try process.run()
             process.waitUntilExit()
-            processQueue.sync { activeProcesses.removeAll { $0 === process } }
+            onProcessQueue { activeProcesses.removeAll { $0 === process } }
             let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
-            processQueue.sync { activeProcesses.removeAll { $0 === process } }
+            onProcessQueue { activeProcesses.removeAll { $0 === process } }
             return ""
         }
     }
@@ -292,17 +305,17 @@ enum FFmpegVideoFallback {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
-            processQueue.sync {
+            onProcessQueue {
                 activeProcesses.append(process)
             }
             try process.run()
             process.waitUntilExit()
-            processQueue.sync {
+            onProcessQueue {
                 activeProcesses.removeAll { $0 === process }
             }
             return process.terminationStatus
         } catch {
-            processQueue.sync {
+            onProcessQueue {
                 activeProcesses.removeAll { $0 === process }
             }
             return -1
