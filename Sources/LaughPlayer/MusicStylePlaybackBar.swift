@@ -1,9 +1,27 @@
 import AppKit
 
+/// Frosted playback bar with rounded corners (clips vibrancy correctly on layout).
+final class RoundedPlaybackBarView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        MusicStylePlaybackBar.applyChrome(to: self)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        MusicStylePlaybackBar.syncRoundedShape(for: self)
+    }
+}
+
 enum MusicStylePlaybackBar {
     static let maxBarWidth: CGFloat = 560
     static let minBarWidth: CGFloat = 360
-    static let barCornerRadius: CGFloat = 16
+    /// Medium corner radius for the floating playback bar.
+    static let barCornerRadius: CGFloat = 12
     static let barBottomInset: CGFloat = 24
 
     static func applyChrome(to bar: NSVisualEffectView) {
@@ -12,11 +30,23 @@ enum MusicStylePlaybackBar {
         bar.state = .active
         bar.wantsLayer = true
         bar.layer?.cornerRadius = barCornerRadius
-        bar.layer?.masksToBounds = false
+        bar.layer?.masksToBounds = true
         bar.layer?.shadowColor = NSColor.black.cgColor
         bar.layer?.shadowOpacity = 0.22
         bar.layer?.shadowRadius = 14
         bar.layer?.shadowOffset = CGSize(width: 0, height: -3)
+    }
+
+    static func syncRoundedShape(for bar: NSVisualEffectView) {
+        guard let layer = bar.layer else { return }
+        let radius = barCornerRadius
+        layer.cornerRadius = radius
+        layer.shadowPath = CGPath(
+            roundedRect: bar.bounds,
+            cornerWidth: radius,
+            cornerHeight: radius,
+            transform: nil
+        )
     }
 
     static func iconButton(symbolName: String, accessibilityLabel: String, pointSize: CGFloat = 16) -> NSButton {

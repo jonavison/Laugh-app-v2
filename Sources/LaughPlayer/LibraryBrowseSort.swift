@@ -67,7 +67,7 @@ enum LibraryBrowseItemSorter {
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         case .name:
             if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            return lhs.name.compare(rhs.name, options: [.numeric, .caseInsensitive]) == .orderedAscending
         case .dateModified:
             if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
             return (lhs.dateModified ?? .distantPast) < (rhs.dateModified ?? .distantPast)

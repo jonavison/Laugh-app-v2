@@ -23,13 +23,35 @@ enum PlaybackErrorFormatter {
 
         if ext == "mkv" {
             message += "\n\nMKV files often use codecs macOS cannot open natively (for example HEVC 10-bit in Matroska)."
-            message += "\n\nTry remuxing without re-encoding:\nffmpeg -i \"\(url.lastPathComponent)\" -c copy -tag:v hvc1 output.mp4"
         }
 
-        message += "\n\nAlternate decoder support is planned for a future update."
+        if PlaybackRuntime.canUseBundledCodecStack {
+            if FFmpegVideoFallback.isAvailable() {
+                message += "\n\nLaughPlayer can remux this file with the bundled compatibility decoder (stream copy to MP4)."
+            } else {
+                message += "\n\nBundled ffmpeg was not found in this build. Run ./scripts/bundle-codec-tools.sh and rebuild."
+            }
+        }
+
+        message += Self.manualRemuxHint(for: url)
 
         var debug = probeDetails ?? ""
         if debug.isEmpty { debug = reason }
         return PlaybackOpenFailure(userMessage: message, debugDetails: debug)
+    }
+
+    static func remuxFailedMessage(for url: URL) -> String {
+        var message = "Native playback failed and the bundled remux could not prepare this file for AVFoundation."
+        message += Self.manualRemuxHint(for: url)
+        if PlaybackRuntime.canUseBundledCodecStack, !FFmpegVideoFallback.isHeavyTranscodeEnabled {
+            message += "\n\nOptional: set LAUGH_ENABLE_HEAVY_TRANSCODE=1 to allow a slower full transcode fallback."
+        }
+        return message
+    }
+
+    private static func manualRemuxHint(for url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        guard ext == "mkv" || ext == "webm" else { return "" }
+        return "\n\nYou can also remux manually without re-encoding:\nffmpeg -i \"\(url.lastPathComponent)\" -c copy -tag:v hvc1 output.mp4"
     }
 }
