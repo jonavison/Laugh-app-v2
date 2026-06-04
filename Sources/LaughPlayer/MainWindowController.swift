@@ -2,25 +2,33 @@ import AppKit
 import UniformTypeIdentifiers
 
 final class MainWindowController: NSWindowController {
+    private static let defaultWindowMinSize = NSSize(width: 640, height: 400)
+    private static let windowFrameAutosaveName = "LaughPlayerMainWindow"
+
     private let playerViewController = PlayerViewController()
+    private var shouldCenterOnNextPlacement = false
+    private var didRestoreWindowFrame = false
+
+    private var playbackWindow: PlaybackWindow? {
+        window as? PlaybackWindow
+    }
 
     init() {
         LaunchLog.emit("MainWindowController.init: begin")
         let initialContentSize = NSSize(width: 960, height: 600)
-        let window = NSWindow(
+        let window = PlaybackWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "LaughPlayer"
-        window.minSize = NSSize(width: 640, height: 400)
+        window.minSize = Self.defaultWindowMinSize
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.managed, .participatesInCycle]
         super.init(window: window)
 
         window.delegate = self
-        ensureWindowIsOnScreen()
         LaunchLog.emit("MainWindowController.init: end")
     }
 
@@ -37,31 +45,44 @@ final class MainWindowController: NSWindowController {
             window.contentViewController = playerViewController
         }
 
-        ensureWindowIsOnScreen()
+        restoreOrPrepareWindowFrame()
         ImmersiveWindowChrome.configure(window: window)
         showWindow(nil)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
 
-        // Build the heavy UI after the window exists (viewDidLoad must stay minimal).
         playerViewController.installPlayerInterfaceIfNeeded()
         playerViewController.prepareInterfaceForDisplay()
         applyAspectPreference()
+        centerWindowIfNeeded()
         logWindowState("show")
     }
 
-    private func ensureWindowIsOnScreen() {
+    private func restoreOrPrepareWindowFrame() {
         guard let window else { return }
 
         if window.frame.width < 64 || window.frame.height < 64 {
             window.setContentSize(NSSize(width: 960, height: 600))
         }
 
+        guard !didRestoreWindowFrame else { return }
+        didRestoreWindowFrame = true
+
+        window.setFrameAutosaveName(Self.windowFrameAutosaveName)
+        let restored = window.setFrameUsingName(Self.windowFrameAutosaveName)
+        shouldCenterOnNextPlacement = !restored || !isWindowFrameOnScreen(window)
+    }
+
+    private func centerWindowIfNeeded() {
+        guard shouldCenterOnNextPlacement, let window else { return }
+        window.center()
+        shouldCenterOnNextPlacement = false
+    }
+
+    private func isWindowFrameOnScreen(_ window: NSWindow) -> Bool {
         let frame = window.frame
-        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
-        if !onScreen {
-            window.center()
-        }
+        guard frame.width > 64, frame.height > 64 else { return false }
+        return NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
     }
 
     private func logWindowState(_ context: String) {
@@ -155,20 +176,47 @@ extension MainWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         NSApplication.shared.terminate(nil)
     }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        reassertWindowAspectConstraintsFromSettings()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        reassertWindowAspectConstraintsFromSettings()
+    }
 }
 
 extension MainWindowController: PlayerViewControllerDelegate {
     func playerViewController(_ controller: PlayerViewController, didRequestWindowAspectRatio ratio: CGFloat?) {
+        applyWindowAspectRatioConstraints(ratio)
+        guard let ratio, ratio > 0, let window, !window.styleMask.contains(.fullScreen) else { return }
+        resizeWindowContent(toAspectRatio: ratio)
+    }
+
+    private func applyWindowAspectRatioConstraints(_ ratio: CGFloat?) {
         guard let window else { return }
+
+        playbackWindow?.aspectLockRatio = ratio
 
         guard let ratio, ratio > 0 else {
             window.contentAspectRatio = .zero
+            window.contentMinSize = .zero
+            window.minSize = Self.defaultWindowMinSize
             return
         }
 
         window.contentAspectRatio = NSSize(width: ratio * 1000, height: 1000)
-        guard !window.styleMask.contains(.fullScreen) else { return }
-        resizeWindowContent(toAspectRatio: ratio)
+        let contentMin = PlaybackWindow.minimumContentSize(forAspectRatio: ratio)
+        window.contentMinSize = contentMin
+        window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: contentMin)).size
+    }
+
+    private func reassertWindowAspectConstraintsFromSettings() {
+        applyWindowAspectRatioConstraints(activeLockedAspectRatio())
+    }
+
+    private func activeLockedAspectRatio() -> CGFloat? {
+        playerViewController.resolvedWindowAspectRatio()
     }
 
     private func resizeWindowContent(toAspectRatio ratio: CGFloat) {
@@ -181,11 +229,11 @@ extension MainWindowController: PlayerViewControllerDelegate {
         var width = current.width
         var height = width / ratio
 
-        if height < minSize.height {
+        if minSize.height > 0, height < minSize.height {
             height = minSize.height
             width = height * ratio
         }
-        if width < minSize.width {
+        if minSize.width > 0, width < minSize.width {
             width = minSize.width
             height = width / ratio
         }

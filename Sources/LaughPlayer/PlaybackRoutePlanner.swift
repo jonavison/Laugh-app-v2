@@ -38,10 +38,12 @@ enum PlaybackRoutePlanner {
         }
 
         if remuxContainerExtensions.contains(ext) {
+            if remuxAvailable {
+                return .compatibilityRemux(reason: "container.\(ext)")
+            }
             if mpvAvailable {
                 return .directMpv(reason: "container.\(ext)")
             }
-            return .compatibilityRemux(reason: "container.\(ext)")
         }
 
         var codecTag = FFmpegVideoFallback.probePrimaryVideoCodecTag(for: url)

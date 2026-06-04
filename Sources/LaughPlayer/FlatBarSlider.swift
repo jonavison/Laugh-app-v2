@@ -1,10 +1,15 @@
 import AppKit
+import QuartzCore
 
 /// Horizontal slider that draws a flat filled bar without the default round knob.
 final class FlatBarSliderCell: NSSliderCell {
     var trackHeight: CGFloat = 3
     var filledColor: NSColor = LaughTheme.playbackAccent
     var unfilledColor: NSColor = .separatorColor.withAlphaComponent(0.55)
+    /// When true, draws a segment sliding left/right instead of playback progress.
+    var isPreparing = false
+    /// 0…1 — position of the preparing segment along the track.
+    var preparingPhase: CGFloat = 0
 
     override func barRect(flipped: Bool) -> NSRect {
         let rect = super.barRect(flipped: flipped)
@@ -23,6 +28,23 @@ final class FlatBarSliderCell: NSSliderCell {
         let track = trackPath(for: bar)
         unfilledColor.setFill()
         track.fill()
+
+        if isPreparing {
+            let segmentFraction: CGFloat = 0.22
+            let travel = max(0, 1 - segmentFraction)
+            let start = preparingPhase * travel
+            let segmentWidth = max(trackHeight * 2, bar.width * segmentFraction)
+            let segment = NSRect(
+                x: bar.minX + bar.width * start,
+                y: bar.minY,
+                width: segmentWidth,
+                height: bar.height
+            )
+            let pulse = trackPath(for: segment)
+            filledColor.withAlphaComponent(0.9).setFill()
+            pulse.fill()
+            return
+        }
 
         let progress = normalizedProgress
         guard progress > 0 else { return }
@@ -80,5 +102,9 @@ extension NSSlider {
         flat.isBordered = false
         cell = flat
         sliderType = .linear
+    }
+
+    var flatBarCell: FlatBarSliderCell? {
+        cell as? FlatBarSliderCell
     }
 }

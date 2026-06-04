@@ -101,7 +101,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## CompatibilityRemux
 
-`CompatibilityRemux` is an **AlternateDecoder** step that produces a temporary MP4 the **SystemDecodeStack** can open, preferring stream copy without re-encoding video.
+`CompatibilityRemux` is an **AlternateDecoder** step that produces a temporary MP4 the **SystemDecodeStack** can open, preferring stream copy without re-encoding video. Embedded **text** subtitles (for example SRT in MKV) are muxed as `mov_text` so **NativePlaybackEngine** can expose them via `.legible`; bitmap/image subs and sidecar-only files still require **DirectMpv** or **ExtendedPlaybackForSubtitles**.
 
 ## AlternateDecoder
 
@@ -199,9 +199,49 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 `SeekKeyboardCommand` is a **TransportKeyboardCommand** that moves the playhead by **StandardSeekStep** or **FineSeekStep**. Distinct from queue previous/next and from scrubbing via the seek slider.
 
+## EmbeddedSubtitleTrack
+
+`EmbeddedSubtitleTrack` is a subtitle stream muxed inside the **VideoMedia** container (for example MKV text/ASS tracks, or legible tracks in some MP4/MOV). Exposed via **SubtitleTrackPicker** on **DirectMpv** (all common embed types) or **NativePlaybackEngine** (only when **SystemDecodeStack** exposes `.legible` options).
+
+## CompanionSubtitleFile
+
+`CompanionSubtitleFile` is a sidecar subtitle file on disk associated with the current **VideoMedia** by **CompanionSubtitleDiscovery** rules—not chosen through the load dialog. On **DirectMpv**, every discovered file is auto-attached and appears in **SubtitleTrackPicker** (language inferred from filename when present); **PrimarySubtitleTrack** stays off until the user enables it. On **NativePlaybackEngine**, companions are listed but not playable until the user chooses **ExtendedPlaybackForSubtitles**. Distinct from **EmbeddedSubtitleTrack** and from user-picked **ExternalSubtitleFile**.
+
+## CompanionSubtitleDiscovery
+
+`CompanionSubtitleDiscovery` is how LaughPlayer finds **CompanionSubtitleFile**s for the open **VideoMedia**: case-insensitive basename match; extensions `.srt`, `.vtt`, `.ass`, `.ssa`; optional language tag (two–three letters or common names such as English) and optional `forced` before the extension. Search locations are the media folder, a sibling flat `Subs/` or `subtitles/` folder, and `Subs/<basename>/` or `subtitles/<basename>/` (Plex-style per-title folder)—not a recursive library-wide scan. All matches are attached; the user chooses among them in **SubtitleTrackPicker**.
+
+## ExtendedPlaybackForSubtitles
+
+`ExtendedPlaybackForSubtitles` is reloading the current **VideoMedia** on **DirectMpv** at the same playhead so **CompanionSubtitleFile**s or full **SubtitlesSettings** can apply, without changing the user’s default **PlaybackRoute** for files that play natively. Offered from **SubtitlesSettings** when sidecars exist but the active session is **NativePlaybackEngine**, or when the user wants to retry **DirectMpv** after **CompatibilityRemux** fallback. Play/pause state and playhead time are preserved.
+
+## SubtitlesSettings
+
+`SubtitlesSettings` is the right-settings **Subtitles** tab: track pickers with on/off toggles, **CompanionSubtitleFile** discovery, **ExtendedPlaybackForSubtitles**, manual **ExternalSubtitleFile** load, delay (−5s to +5s), vertical position, scale, and **SubtitleAppearance** (font size/color, border width/color, background on/off + color). **PrimarySubtitleTrack** and **SecondarySubtitleTrack** default off until the user enables them. Full subtitle controls apply on **DirectMpv**; **NativePlaybackEngine** supports embedded **SubtitleTrackPicker** only—companions and extended controls show an unavailable note or **ExtendedPlaybackForSubtitles** when sidecars exist.
+
+## SubtitleTrackPicker
+
+`SubtitleTrackPicker` is the pop-up that chooses which embedded, companion, or loaded subtitle stream is primary or secondary. Distinct from **AudioTrackPicker**, **CompanionSubtitleFile** (auto-discovered), and **ExternalSubtitleFile** (user-picked). Track labels include index, language, and title when known.
+
+## SubtitleTrackSwitch
+
+`SubtitleTrackSwitch` is enabling or changing primary/secondary subtitle streams via the on/off toggles and pickers. Playhead and play/pause state must be preserved. On **DirectMpv**, uses `sid` / `secondary-sid`; on **NativePlaybackEngine**, primary uses `AVMediaSelection` for legible tracks.
+
+## SecondarySubtitleTrack
+
+`SecondarySubtitleTrack` is a second simultaneous subtitle stream (mpv `secondary-sid`). Requires **DirectMpv** and a file or external load that exposes multiple subtitle tracks.
+
+## ExternalSubtitleFile
+
+`ExternalSubtitleFile` is a subtitle file the user explicitly chose via the load dialog (any path), added to the current **DirectMpv** session. Distinct from **CompanionSubtitleFile**, which is found automatically beside the media. After load, the track appears in **SubtitleTrackPicker**.
+
+## SubtitleAppearance
+
+`SubtitleAppearance` is global persisted styling (font size, primary/outline/background colors, border width, background on/off) applied through mpv ASS force-style. Not per-file. Distinct from **PlaybackEQ** and from in-player **SubtitleTrackSwitch**.
+
 ## ReservedSubtitleShortcuts
 
-`ReservedSubtitleShortcuts` are keyboard bindings for subtitle track and style controls not assigned until the **Subtitles** tab ships real **SubtitleTrackPicker** (and related) UI—avoid binding **V** / **G** / **S** globally in v1 if they would conflict with later subtitle behavior.
+`ReservedSubtitleShortcuts` are keyboard bindings for subtitle track and style controls (**V** / **G** / **S**) not wired in v1—the **Subtitles** tab is the source of truth until shortcuts are implemented without conflicting with other commands.
 
 ## GlobalVideoSettingsShortcut
 

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum VideoFitMode: String {
@@ -46,6 +47,15 @@ final class SettingsStore {
         static let loopPlaybackEnabled = "LoopPlaybackEnabled"
         static let playbackEQPreset = "PlaybackEQPreset"
         static let playbackEQBands = "PlaybackEQBands"
+        static let subtitleDelaySec = "SubtitleDelaySec"
+        static let subtitlePosition = "SubtitlePosition"
+        static let subtitleScale = "SubtitleScale"
+        static let subtitleFontSize = "SubtitleFontSize"
+        static let subtitleFontColor = "SubtitleFontColor"
+        static let subtitleBorderWidth = "SubtitleBorderWidth"
+        static let subtitleBorderColor = "SubtitleBorderColor"
+        static let subtitleBackgroundEnabled = "SubtitleBackgroundEnabled"
+        static let subtitleBackgroundColor = "SubtitleBackgroundColor"
     }
 
     var lockAspectRatioEnabled: Bool {
@@ -125,6 +135,105 @@ final class SettingsStore {
         set {
             let values = newValue.prefix(PlaybackEQ.bandCount).map { Double($0) }
             defaults.set(Array(values), forKey: Keys.playbackEQBands)
+        }
+    }
+
+    var subtitleDelaySec: Double {
+        get {
+            if defaults.object(forKey: Keys.subtitleDelaySec) == nil { return 0 }
+            return defaults.double(forKey: Keys.subtitleDelaySec)
+        }
+        set {
+            defaults.set(
+                max(SubtitleAppearanceStyle.delayMin, min(SubtitleAppearanceStyle.delayMax, newValue)),
+                forKey: Keys.subtitleDelaySec
+            )
+        }
+    }
+
+    var subtitlePosition: Double {
+        get {
+            if defaults.object(forKey: Keys.subtitlePosition) == nil { return 100 }
+            return defaults.double(forKey: Keys.subtitlePosition)
+        }
+        set {
+            defaults.set(
+                max(SubtitleAppearanceStyle.positionMin, min(SubtitleAppearanceStyle.positionMax, newValue)),
+                forKey: Keys.subtitlePosition
+            )
+        }
+    }
+
+    var subtitleScale: Double {
+        get {
+            let stored = defaults.double(forKey: Keys.subtitleScale)
+            return stored > 0 ? stored : 1.0
+        }
+        set {
+            defaults.set(
+                max(SubtitleAppearanceStyle.scaleMin, min(SubtitleAppearanceStyle.scaleMax, newValue)),
+                forKey: Keys.subtitleScale
+            )
+        }
+    }
+
+    var subtitleFontSize: Double {
+        get {
+            let stored = defaults.double(forKey: Keys.subtitleFontSize)
+            return stored > 0 ? stored : 36
+        }
+        set {
+            defaults.set(
+                max(SubtitleAppearanceStyle.fontSizeMin, min(SubtitleAppearanceStyle.fontSizeMax, newValue)),
+                forKey: Keys.subtitleFontSize
+            )
+        }
+    }
+
+    var subtitleFontColor: NSColor {
+        get { color(forKey: Keys.subtitleFontColor) ?? .white }
+        set { saveColor(newValue, forKey: Keys.subtitleFontColor) }
+    }
+
+    var subtitleBorderWidth: Double {
+        get { defaults.double(forKey: Keys.subtitleBorderWidth) }
+        set {
+            defaults.set(
+                max(SubtitleAppearanceStyle.borderWidthMin, min(SubtitleAppearanceStyle.borderWidthMax, newValue)),
+                forKey: Keys.subtitleBorderWidth
+            )
+        }
+    }
+
+    var subtitleBorderColor: NSColor {
+        get { color(forKey: Keys.subtitleBorderColor) ?? .black }
+        set { saveColor(newValue, forKey: Keys.subtitleBorderColor) }
+    }
+
+    var subtitleBackgroundEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.subtitleBackgroundEnabled) == nil { return true }
+            return defaults.bool(forKey: Keys.subtitleBackgroundEnabled)
+        }
+        set { defaults.set(newValue, forKey: Keys.subtitleBackgroundEnabled) }
+    }
+
+    var subtitleBackgroundColor: NSColor {
+        get { color(forKey: Keys.subtitleBackgroundColor) ?? NSColor.black.withAlphaComponent(0.65) }
+        set { saveColor(newValue, forKey: Keys.subtitleBackgroundColor) }
+    }
+
+    private func color(forKey key: String) -> NSColor? {
+        guard let data = defaults.data(forKey: key),
+              let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) else {
+            return nil
+        }
+        return color
+    }
+
+    private func saveColor(_ color: NSColor, forKey key: String) {
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: true) {
+            defaults.set(data, forKey: key)
         }
     }
 

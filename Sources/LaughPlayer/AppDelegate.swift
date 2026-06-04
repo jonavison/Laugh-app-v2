@@ -44,8 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func bringMainWindowToFront() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        windowController?.show()
-        guard let window = windowController?.window else { return }
+        guard let window = windowController?.window else {
+            windowController?.show()
+            return
+        }
+        if window.contentViewController == nil {
+            windowController?.show()
+        }
         if window.isMiniaturized {
             window.deminiaturize(nil)
         }

@@ -52,6 +52,7 @@ enum PlaybackErrorFormatter {
     private static func manualRemuxHint(for url: URL) -> String {
         let ext = url.pathExtension.lowercased()
         guard ext == "mkv" || ext == "webm" else { return "" }
-        return "\n\nYou can also remux manually without re-encoding:\nffmpeg -i \"\(url.lastPathComponent)\" -c copy -tag:v hvc1 output.mp4"
+        let tagFlag = FFmpegVideoFallback.suggestedVideoTag(for: url).map { " -tag:v \($0)" } ?? ""
+        return "\n\nYou can also remux manually without re-encoding video or audio:\nffmpeg -strict unofficial -i \"\(url.lastPathComponent)\" -map 0:v:0 -map 0:a:0? -map 0:s:0? -map_chapters -1 -c copy\(tagFlag) -c:s mov_text output.mp4"
     }
 }

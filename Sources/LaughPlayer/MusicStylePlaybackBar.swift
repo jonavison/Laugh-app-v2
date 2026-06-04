@@ -29,8 +29,8 @@ enum MusicStylePlaybackBar {
     /// Medium corner radius for the floating playback bar.
     static let barCornerRadius: CGFloat = 12
     static let barBottomInsetLow: CGFloat = 24
-    static let barBottomInsetHigh: CGFloat = 120
-    static let barBottomInsetRampStart: CGFloat = 1200
+    static let barBottomInsetHigh: CGFloat = 100
+    static let barBottomInsetRampStart: CGFloat = 720
     static let barBottomInsetRampEnd: CGFloat = 1440
 
     static func preferredBarBottomInset(forContentWidthPoints width: CGFloat) -> CGFloat {

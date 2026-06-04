@@ -94,6 +94,7 @@ final class MpvPlaybackController: @unchecked Sendable {
                 "--hwdec=auto",
                 "--vo=gpu",
                 "--pause",
+                "--sub-auto=no",
                 "--input-ipc-server=\(socket)",
                 "--wid=\(wid)",
                 url.path
@@ -239,6 +240,97 @@ final class MpvPlaybackController: @unchecked Sendable {
             guard writeFD >= 0 else { return }
             sendCommandUnlocked(["af", "remove", "@*"], reply: false)
         }
+    }
+
+    func subtitleTracks() -> [SubtitleTrackInfo] {
+        SubtitleTrackCatalog.tracks(fromMpvTrackList: getPropertyValue("track-list"))
+    }
+
+    func selectedSubtitleTrackID(secondary: Bool = false) -> Int? {
+        if secondary {
+            if let sid = getPropertyDouble("secondary-sid"), sid >= 0 { return Int(sid) }
+            return SubtitleTrackCatalog.selectedMpvTrackID(fromMpvTrackList: getPropertyValue("track-list"), secondary: true)
+        }
+        if let sid = getPropertyDouble("sid"), sid >= 0 { return Int(sid) }
+        return SubtitleTrackCatalog.selectedMpvTrackID(fromMpvTrackList: getPropertyValue("track-list"), secondary: false)
+    }
+
+    func setSubtitleTrackID(_ trackID: Int, secondary: Bool = false) -> Bool {
+        let property = secondary ? "secondary-sid" : "sid"
+        return setNumericProperty(property, value: Double(trackID))
+    }
+
+    func disableSubtitleTrack(secondary: Bool = false) -> Bool {
+        let property = secondary ? "secondary-sid" : "sid"
+        return setStringProperty(property, value: "no")
+    }
+
+    func isSubtitleTrackDisabled(secondary: Bool = false) -> Bool {
+        let property = secondary ? "secondary-sid" : "sid"
+        if let sid = getPropertyString(property), sid == "no" { return true }
+        if let sid = getPropertyDouble(property), sid < 0 { return true }
+        return false
+    }
+
+    func addExternalSubtitle(url: URL, select: Bool = true) -> Bool {
+        ipcQueue.sync {
+            guard writeFD >= 0 else { return false }
+            let command: [Any] = select
+                ? ["sub-add", url.path, "select"]
+                : ["sub-add", url.path]
+            sendCommandUnlocked(command, reply: false)
+            return true
+        }
+    }
+
+    /// Disables both subtitle streams and attaches sidecar files without selecting them.
+    func prepareSubtitleTracks(companionURLs: [URL]) {
+        ipcQueue.sync {
+            guard writeFD >= 0 else { return }
+            setStringPropertyOnQueue("sid", value: "no")
+            setStringPropertyOnQueue("secondary-sid", value: "no")
+            for url in companionURLs {
+                sendCommandUnlocked(["sub-add", url.path], reply: false)
+            }
+        }
+    }
+
+    func applySubtitleAppearance(from store: SettingsStore) {
+        let style = SubtitleAppearanceStyle.assForceStyle(from: store)
+        _ = setStringProperty("sub-ass-force-style", value: style)
+        _ = setNumericProperty("sub-delay", value: store.subtitleDelaySec)
+        _ = setNumericProperty("sub-pos", value: store.subtitlePosition)
+        _ = setNumericProperty("sub-scale", value: store.subtitleScale)
+        _ = setNumericProperty("secondary-sub-delay", value: store.subtitleDelaySec)
+        _ = setNumericProperty("secondary-sub-pos", value: store.subtitlePosition)
+        _ = setNumericProperty("secondary-sub-scale", value: store.subtitleScale)
+    }
+
+    @discardableResult
+    private func setNumericProperty(_ name: String, value: Double) -> Bool {
+        ipcQueue.sync {
+            guard writeFD >= 0 else { return false }
+            let id = nextRequestIDUnlocked()
+            pendingReplies.removeValue(forKey: id)
+            sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
+            return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+        }
+    }
+
+    @discardableResult
+    private func setStringProperty(_ name: String, value: String) -> Bool {
+        ipcQueue.sync {
+            setStringPropertyOnQueue(name, value: value)
+        }
+    }
+
+    @discardableResult
+    private func setStringPropertyOnQueue(_ name: String, value: String) -> Bool {
+        guard writeFD >= 0 else { return false }
+        let id = nextRequestIDUnlocked()
+        pendingReplies.removeValue(forKey: id)
+        sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
+        return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
     }
 
     func setEmbeddingWindowID(_ wid: Int) {
@@ -394,7 +486,7 @@ final class MpvPlaybackController: @unchecked Sendable {
             return
         }
 
-        if let requestID = json["request_id"] as? Int {
+        if let requestID = MpvJSONValue.int(from: json["request_id"]) {
             pendingReplies[requestID] = json
         }
 

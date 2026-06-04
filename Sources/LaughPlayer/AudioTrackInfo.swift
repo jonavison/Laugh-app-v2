@@ -136,7 +136,7 @@ enum AudioTrackCatalog {
         var audioIndex = 0
         for entry in list {
             guard (entry["type"] as? String) == "audio" else { continue }
-            guard let id = entry["id"] as? Int else { continue }
+            guard let id = MpvJSONValue.int(from: entry["id"]) else { continue }
             audioIndex += 1
             let lang = (entry["lang"] as? String) ?? (entry["language"] as? String)
             let channels = entry["demux-channel-count"] as? Int
@@ -165,7 +165,7 @@ enum AudioTrackCatalog {
             guard (entry["type"] as? String) == "audio" else { continue }
             let selected = (entry["selected"] as? Bool) == true
                 || (entry["selected"] as? NSNumber)?.boolValue == true
-            if selected, let id = entry["id"] as? Int { return id }
+            if selected, let id = MpvJSONValue.int(from: entry["id"]) { return id }
         }
         return nil
     }
