@@ -41,7 +41,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let imageSettingsButton = NSButton(title: "Settings", target: nil, action: nil)
     private let controlsStack = NSStackView()
     private let transportClusterStack = NSStackView()
-    private let playbackCenterClusterStack = NSStackView()
+    private let playbackLeadingAccessoryCluster = NSStackView()
     private let playbackTopRowView = NSView()
     private let topControlsStack = NSStackView()
     private let bottomControlsStack = NSStackView()
@@ -215,8 +215,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var librarySidebarWidthConstraint: NSLayoutConstraint?
     private var settingsPanelWidthConstraint: NSLayoutConstraint?
     private var volumeSliderWidthConstraint: NSLayoutConstraint?
-    private var playbackCenterToVolumeConstraint: NSLayoutConstraint?
-    private var playbackCenterToEdgeConstraint: NSLayoutConstraint?
+    private var playbackAccessoryToVolumeConstraint: NSLayoutConstraint?
+    private var playbackAccessoryToEdgeConstraint: NSLayoutConstraint?
     private var playbackTopRowLayoutConfigured = false
     private var audioOutputEnabled = true
     private var playerInterfaceInstalled = false
@@ -423,13 +423,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         bottomControlsStack.distribution = .fill
         bottomControlsStack.spacing = 10
 
-        playbackCenterClusterStack.orientation = .horizontal
-        playbackCenterClusterStack.alignment = .centerY
-        playbackCenterClusterStack.distribution = .fill
-        playbackCenterClusterStack.spacing = playbackControlClusterSpacing
-        playbackCenterClusterStack.setContentHuggingPriority(.required, for: .horizontal)
-        playbackCenterClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        playbackLeadingAccessoryCluster.orientation = .horizontal
+        playbackLeadingAccessoryCluster.alignment = .centerY
+        playbackLeadingAccessoryCluster.spacing = 0
+        playbackLeadingAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
+        playbackLeadingAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        transportClusterStack.translatesAutoresizingMaskIntoConstraints = false
         transportClusterStack.setContentHuggingPriority(.required, for: .horizontal)
         transportClusterStack.setContentCompressionResistancePriority(.required, for: .horizontal)
         transportSpeedLeftCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -3013,6 +3013,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func configurePlaybackAccessoryClusters() {
+        playbackLeadingAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
+
         playbackAccessoryCluster.orientation = .horizontal
         playbackAccessoryCluster.alignment = .centerY
         playbackAccessoryCluster.spacing = 0
@@ -3795,8 +3797,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             primarySubtitlesEnabled = false
             secondarySubtitlesEnabled = false
         } else {
-            let enginePrimary = await isPrimarySubtitlesEnabled()
-            primarySubtitlesEnabled = enginePrimary || uiPrimaryOn
+            primarySubtitlesEnabled = uiPrimaryOn
             secondarySubtitlesEnabled = mpvBackendActive && mpvPlaybackStarted
                 ? (await isSecondarySubtitlesEnabled() || uiSecondaryOn)
                 : false
@@ -4172,18 +4173,47 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
         }
         guard item.status == .readyToPlay else { return }
-        if primarySubtitlesEnabled {
+
+        let resumeRate = nativeSubtitleResumeRate()
+
+        guard let track, primarySubtitlesEnabled else {
             syncNativeSubtitleOverlay()
+            if let resumeRate {
+                player.playImmediately(atRate: resumeRate)
+            }
+            return
         }
-        if let track {
+
+        syncNativeSubtitleOverlay()
+
+        let alreadySelected = await isNativeTrackSelected(track, on: item)
+        if !alreadySelected {
             let applied = await NativeSubtitleSelection.select(track: track, on: item)
             if applied {
                 applyNativeSubtitleLiveStyle(from: SettingsStore.shared)
             }
         } else {
-            _ = await NativeSubtitleSelection.disableSubtitles(on: item)
+            applyNativeSubtitleLiveStyle(from: SettingsStore.shared)
         }
-        syncNativeSubtitleOverlay()
+
+        if let resumeRate {
+            player.playImmediately(atRate: resumeRate)
+        }
+    }
+
+    @MainActor
+    private func nativeSubtitleResumeRate() -> Float? {
+        guard !mpvBackendActive else { return nil }
+        guard player.rate > 0.01 else { return nil }
+        let rate = player.rate
+        return rate > 0.01 ? rate : preferredPlaybackRate
+    }
+
+    @MainActor
+    private func isNativeTrackSelected(_ track: SubtitleTrackInfo, on item: AVPlayerItem) async -> Bool {
+        guard case .avFoundation(let optionIndex) = track.backendID else { return false }
+        guard let selectedIndex = await NativeSubtitleSelection.selectedOptionIndex(for: item) else { return false }
+        return selectedIndex == optionIndex
     }
 
     @MainActor
@@ -4251,7 +4281,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard isEnabled else {
             await applyPrimarySubtitleTrack(nil)
             updateSubtitleControlsAvailability()
-            syncNativeSubtitleOverlay()
             return
         }
 
@@ -4563,8 +4592,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func updatePlaybackVolumeChromeVisibility() {
         let showVolume = activeMediaKind == .video && audioOutputEnabled
         volumeCluster.isHidden = !showVolume
-        playbackCenterToVolumeConstraint?.isActive = showVolume
-        playbackCenterToEdgeConstraint?.isActive = !showVolume
+        playbackAccessoryToVolumeConstraint?.isActive = showVolume
+        playbackAccessoryToEdgeConstraint?.isActive = !showVolume
         if showVolume, playbackTopRowLayoutConfigured {
             let tier = currentControlTier
             volumeSliderWidthConstraint?.constant = volumeSliderWidth(for: tier)
@@ -5554,33 +5583,49 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackTopRowLayoutConfigured = true
 
         playbackTopRowView.translatesAutoresizingMaskIntoConstraints = false
-        playbackCenterClusterStack.translatesAutoresizingMaskIntoConstraints = false
         volumeCluster.translatesAutoresizingMaskIntoConstraints = false
 
-        playbackTopRowView.addSubview(playbackCenterClusterStack)
+        playbackTopRowView.addSubview(playbackLeadingAccessoryCluster)
+        playbackTopRowView.addSubview(transportClusterStack)
+        playbackTopRowView.addSubview(playbackAccessoryCluster)
         playbackTopRowView.addSubview(volumeCluster)
 
-        playbackCenterToVolumeConstraint = playbackCenterClusterStack.trailingAnchor.constraint(
-            lessThanOrEqualTo: volumeCluster.leadingAnchor,
+        playbackAccessoryToVolumeConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
+            equalTo: volumeCluster.leadingAnchor,
             constant: -playbackControlClusterSpacing
         )
-        playbackCenterToEdgeConstraint = playbackCenterClusterStack.trailingAnchor.constraint(
-            lessThanOrEqualTo: playbackTopRowView.trailingAnchor
+        playbackAccessoryToEdgeConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
+            equalTo: playbackTopRowView.trailingAnchor
         )
 
         NSLayoutConstraint.activate([
             playbackTopRowView.heightAnchor.constraint(equalToConstant: 28),
 
+            playbackLeadingAccessoryCluster.trailingAnchor.constraint(
+                equalTo: transportClusterStack.leadingAnchor,
+                constant: -playbackControlClusterSpacing
+            ),
+            playbackLeadingAccessoryCluster.leadingAnchor.constraint(
+                greaterThanOrEqualTo: playbackTopRowView.leadingAnchor
+            ),
+            playbackLeadingAccessoryCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+
+            transportClusterStack.centerXAnchor.constraint(equalTo: playbackTopRowView.centerXAnchor),
+            transportClusterStack.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+
+            playbackAccessoryCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+
             volumeCluster.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
             volumeCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
-            playbackCenterClusterStack.centerXAnchor.constraint(equalTo: playbackTopRowView.centerXAnchor),
-            playbackCenterClusterStack.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
-            playbackCenterClusterStack.leadingAnchor.constraint(greaterThanOrEqualTo: playbackTopRowView.leadingAnchor),
-            playbackCenterToVolumeConstraint!,
-            playbackCenterToEdgeConstraint!
+            transportClusterStack.trailingAnchor.constraint(
+                lessThanOrEqualTo: playbackAccessoryCluster.leadingAnchor,
+                constant: -8
+            ),
+
+            playbackAccessoryToVolumeConstraint!
         ])
-        playbackCenterToEdgeConstraint?.isActive = false
+        playbackAccessoryToEdgeConstraint?.isActive = false
         updatePlaybackVolumeChromeVisibility()
     }
 
@@ -5717,8 +5762,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             topControlsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        playbackCenterClusterStack.arrangedSubviews.forEach { view in
-            playbackCenterClusterStack.removeArrangedSubview(view)
+        playbackLeadingAccessoryCluster.arrangedSubviews.forEach { view in
+            playbackLeadingAccessoryCluster.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
         bottomLeftControlsStack.arrangedSubviews.forEach { view in
@@ -5761,13 +5806,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlaybackSpeedTransportLabels()
         updateQueueTransportButtons()
 
-        playbackCenterClusterStack.addArrangedSubview(playbackSubtitleToggle)
+        playbackLeadingAccessoryCluster.addArrangedSubview(libraryButton)
+        playbackLeadingAccessoryCluster.addArrangedSubview(playbackSubtitleToggle)
         MusicStylePlaybackBar.configureSubtitleToggleButton(playbackSubtitleToggle)
         playbackSubtitleToggle.target = self
         playbackSubtitleToggle.action = #selector(playbackSubtitleTogglePressed)
-        playbackCenterClusterStack.addArrangedSubview(libraryButton)
-        playbackCenterClusterStack.addArrangedSubview(transportClusterStack)
-        playbackCenterClusterStack.addArrangedSubview(playbackAccessoryCluster)
         updateQueueButtonState()
 
         if playbackTopRowView.superview != topControlsStack {

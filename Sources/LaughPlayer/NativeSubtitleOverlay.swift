@@ -24,6 +24,8 @@ final class NativeSubtitleOverlay: NSObject {
     private var bottomConstraint: NSLayoutConstraint?
     private var topConstraint: NSLayoutConstraint?
     private var centerYConstraint: NSLayoutConstraint?
+    /// When false, ignore legible callbacks and hide text without detaching the output (avoids playback stalls).
+    private var displaysSubtitles = false
     /// Only hide AVPlayer's renderer after the overlay has received subtitle text.
     private var suppressesPlayerSubtitleRendering = false
 
@@ -84,14 +86,14 @@ final class NativeSubtitleOverlay: NSObject {
     }
 
     func sync(item: AVPlayerItem?, enabled: Bool, store: SettingsStore) {
+        displaysSubtitles = enabled
         guard enabled else {
-            detach()
-            containerView.isHidden = true
+            clearDisplayedText()
+            legibleOutput.suppressesPlayerRendering = true
             return
         }
         guard let item else {
-            detach()
-            containerView.isHidden = true
+            clearDisplayedText()
             return
         }
 
@@ -160,8 +162,8 @@ final class NativeSubtitleOverlay: NSObject {
     }
 
     func detach() {
-        textField.stringValue = ""
-        textField.attributedStringValue = NSAttributedString()
+        displaysSubtitles = false
+        clearDisplayedText()
         suppressesPlayerSubtitleRendering = false
         legibleOutput.suppressesPlayerRendering = false
         if let item = attachedItem {
@@ -169,6 +171,12 @@ final class NativeSubtitleOverlay: NSObject {
         }
         attachedItem = nil
         legibleOutput.setDelegate(nil, queue: nil)
+    }
+
+    private func clearDisplayedText() {
+        textField.stringValue = ""
+        textField.attributedStringValue = NSAttributedString()
+        containerView.isHidden = true
     }
 
     private func attach(to item: AVPlayerItem) {
@@ -221,7 +229,7 @@ extension NativeSubtitleOverlay: AVPlayerItemLegibleOutputPushDelegate {
     ) {
         let text = strings.map(\.string).filter { !$0.isEmpty }.joined(separator: "\n")
         Task { @MainActor in
-            guard output === self.legibleOutput else { return }
+            guard output === self.legibleOutput, self.displaysSubtitles else { return }
             if !text.isEmpty {
                 self.beginStyledCapture()
             }
