@@ -24,13 +24,15 @@ final class NativeSubtitleOverlay: NSObject {
     private var bottomConstraint: NSLayoutConstraint?
     private var topConstraint: NSLayoutConstraint?
     private var centerYConstraint: NSLayoutConstraint?
+    /// Only hide AVPlayer's renderer after the overlay has received subtitle text.
+    private var suppressesPlayerSubtitleRendering = false
 
     func install(in host: NSView) {
         guard hostView !== host else { return }
         hostView = host
         containerView.translatesAutoresizingMaskIntoConstraints = false
         if containerView.superview !== host {
-            host.addSubview(containerView)
+            host.addSubview(containerView, positioned: .above, relativeTo: nil)
             NSLayoutConstraint.activate([
                 containerView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
                 containerView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
@@ -67,6 +69,7 @@ final class NativeSubtitleOverlay: NSObject {
             centerYConstraint = textField.centerYAnchor.constraint(equalTo: containerView.centerYAnchor)
             bottomConstraint?.isActive = true
         }
+        containerView.wantsLayer = true
         containerView.isHidden = true
     }
 
@@ -74,23 +77,46 @@ final class NativeSubtitleOverlay: NSObject {
         if suppressed {
             detach()
             containerView.isHidden = true
+        } else {
+            suppressesPlayerSubtitleRendering = false
+            legibleOutput.suppressesPlayerRendering = false
         }
     }
 
     func sync(item: AVPlayerItem?, enabled: Bool, store: SettingsStore) {
-        guard !containerView.isHidden || enabled else {
-            detach()
-            return
-        }
-        guard enabled, let item, item.status == .readyToPlay else {
+        guard enabled else {
             detach()
             containerView.isHidden = true
             return
         }
-        attach(to: item)
-        applyVisualStyle(from: store)
-        containerView.isHidden = false
+        guard let item else {
+            detach()
+            containerView.isHidden = true
+            return
+        }
+
+        if item.status == .readyToPlay {
+            attach(to: item)
+        } else if attachedItem !== item {
+            return
+        }
+
+        raiseAboveVideo()
+        refreshAppearance(from: store)
     }
+
+    /// Applies current store styling to visible subtitle text (live slider / color updates).
+    func refreshAppearance(from store: SettingsStore, userInitiated: Bool = false) {
+        if userInitiated, attachedItem != nil {
+            beginStyledCapture()
+        }
+        applyVisualStyle(from: store)
+        if !textField.stringValue.isEmpty {
+            containerView.isHidden = false
+        }
+    }
+
+    var hasAttachedItem: Bool { attachedItem != nil }
 
     func applyVisualStyle(from store: SettingsStore) {
         let size = max(12, store.subtitleFontSize * store.subtitleScale)
@@ -122,9 +148,22 @@ final class NativeSubtitleOverlay: NSObject {
         updateVerticalPosition(userPosition: store.subtitlePosition)
     }
 
+    /// Route legible text through this overlay instead of AVPlayerLayer (required for live styling).
+    private func beginStyledCapture() {
+        suppressesPlayerSubtitleRendering = true
+        legibleOutput.suppressesPlayerRendering = true
+    }
+
+    private func raiseAboveVideo() {
+        guard let host = hostView, containerView.superview === host else { return }
+        host.addSubview(containerView, positioned: .above, relativeTo: nil)
+    }
+
     func detach() {
         textField.stringValue = ""
         textField.attributedStringValue = NSAttributedString()
+        suppressesPlayerSubtitleRendering = false
+        legibleOutput.suppressesPlayerRendering = false
         if let item = attachedItem {
             item.remove(legibleOutput)
         }
@@ -134,10 +173,11 @@ final class NativeSubtitleOverlay: NSObject {
 
     private func attach(to item: AVPlayerItem) {
         if attachedItem === item, item.outputs.contains(where: { $0 === legibleOutput }) {
+            legibleOutput.suppressesPlayerRendering = suppressesPlayerSubtitleRendering
             return
         }
         detach()
-        legibleOutput.suppressesPlayerRendering = true
+        legibleOutput.suppressesPlayerRendering = false
         legibleOutput.setDelegate(self, queue: .main)
         item.add(legibleOutput)
         attachedItem = item
@@ -162,7 +202,6 @@ final class NativeSubtitleOverlay: NSObject {
             centerYConstraint?.constant = CGFloat(t * 120)
             centerYConstraint?.isActive = true
         }
-        containerView.layoutSubtreeIfNeeded()
     }
 
     private func centeredParagraphStyle() -> NSParagraphStyle {
@@ -183,9 +222,13 @@ extension NativeSubtitleOverlay: AVPlayerItemLegibleOutputPushDelegate {
         let text = strings.map(\.string).filter { !$0.isEmpty }.joined(separator: "\n")
         Task { @MainActor in
             guard output === self.legibleOutput else { return }
+            if !text.isEmpty {
+                self.beginStyledCapture()
+            }
             self.textField.stringValue = text
             self.applyVisualStyle(from: SettingsStore.shared)
             self.containerView.isHidden = text.isEmpty
+            self.raiseAboveVideo()
         }
     }
 }

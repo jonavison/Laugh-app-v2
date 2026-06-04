@@ -8,6 +8,8 @@ final class MainWindowController: NSWindowController {
     private let playerViewController = PlayerViewController()
     private var shouldCenterOnNextPlacement = false
     private var didRestoreWindowFrame = false
+    private var pendingAspectRatio: CGFloat?
+    private var aspectUpdateScheduled = false
 
     private var playbackWindow: PlaybackWindow? {
         window as? PlaybackWindow
@@ -188,59 +190,47 @@ extension MainWindowController: NSWindowDelegate {
 
 extension MainWindowController: PlayerViewControllerDelegate {
     func playerViewController(_ controller: PlayerViewController, didRequestWindowAspectRatio ratio: CGFloat?) {
-        applyWindowAspectRatioConstraints(ratio)
-        guard let ratio, ratio > 0, let window, !window.styleMask.contains(.fullScreen) else { return }
-        resizeWindowContent(toAspectRatio: ratio)
+        scheduleWindowAspectUpdate(ratio)
+    }
+
+    func playerViewController(_ controller: PlayerViewController, didUpdatePlayingTitle title: String?) {
+        guard let window else { return }
+        let formatted = ImmersiveWindowChrome.formattedTitle(playingName: title)
+        guard window.title != formatted else { return }
+        window.title = formatted
+    }
+
+    /// Defer window constraint changes until after the current AppKit display/layout cycle.
+    private func scheduleWindowAspectUpdate(_ ratio: CGFloat?) {
+        pendingAspectRatio = ratio
+        guard !aspectUpdateScheduled else { return }
+        aspectUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.aspectUpdateScheduled = false
+                self.applyWindowAspectRatioConstraintsNow(self.pendingAspectRatio)
+            }
+        }
+    }
+
+    private func applyWindowAspectRatioConstraintsNow(_ ratio: CGFloat?) {
+        // Only update live-resize snapping — never touch NSWindow.contentAspectRatio /
+        // contentMinSize / minSize here. Those properties re-layout the window frame and
+        // crash if applied while AppKit is flushing the display cycle (NSScrollView KVO).
+        playbackWindow?.aspectLockRatio = ratio
     }
 
     private func applyWindowAspectRatioConstraints(_ ratio: CGFloat?) {
-        guard let window else { return }
-
-        playbackWindow?.aspectLockRatio = ratio
-
-        guard let ratio, ratio > 0 else {
-            window.contentAspectRatio = .zero
-            window.contentMinSize = .zero
-            window.minSize = Self.defaultWindowMinSize
-            return
-        }
-
-        window.contentAspectRatio = NSSize(width: ratio * 1000, height: 1000)
-        let contentMin = PlaybackWindow.minimumContentSize(forAspectRatio: ratio)
-        window.contentMinSize = contentMin
-        window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: contentMin)).size
+        scheduleWindowAspectUpdate(ratio)
     }
 
     private func reassertWindowAspectConstraintsFromSettings() {
-        applyWindowAspectRatioConstraints(activeLockedAspectRatio())
+        scheduleWindowAspectUpdate(activeLockedAspectRatio())
     }
 
     private func activeLockedAspectRatio() -> CGFloat? {
         playerViewController.resolvedWindowAspectRatio()
-    }
-
-    private func resizeWindowContent(toAspectRatio ratio: CGFloat) {
-        guard let window, ratio > 0 else { return }
-
-        let current = window.contentLayoutRect.size
-        guard current.width > 1, current.height > 1 else { return }
-
-        let minSize = window.contentMinSize
-        var width = current.width
-        var height = width / ratio
-
-        if minSize.height > 0, height < minSize.height {
-            height = minSize.height
-            width = height * ratio
-        }
-        if minSize.width > 0, width < minSize.width {
-            width = minSize.width
-            height = width / ratio
-        }
-
-        let target = NSSize(width: width.rounded(.toNearestOrAwayFromZero), height: height.rounded(.toNearestOrAwayFromZero))
-        guard abs(target.width - current.width) > 1 || abs(target.height - current.height) > 1 else { return }
-        window.setContentSize(target)
     }
 
     func playerViewControllerDidRequestOpenVideo(_ controller: PlayerViewController) {

@@ -23,7 +23,7 @@ final class SimpleColorOpacityPickerViewController: NSViewController {
 
     private let preview = NSView()
     private let alphaSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
-    private var swatchButtons: [ColorSwatchButton] = []
+    private var swatchViews: [ColorSwatchView] = []
     private var selectedSwatchIndex = 0
     private var alphaValue: CGFloat = 1
 
@@ -108,15 +108,16 @@ final class SimpleColorOpacityPickerViewController: NSViewController {
             row.alignment = .centerY
             for _ in 0..<Self.columns where index < Self.palette.count {
                 let rgb = Self.palette[index]
-                let button = ColorSwatchButton(
+                let swatch = ColorSwatchView(
                     color: NSColor(srgbRed: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1),
                     size: Self.swatchSize
                 )
-                button.tag = index
-                button.target = self
-                button.action = #selector(swatchPressed(_:))
-                swatchButtons.append(button)
-                row.addArrangedSubview(button)
+                swatch.paletteIndex = index
+                swatch.onSelect = { [weak self] view in
+                    self?.swatchSelected(view)
+                }
+                swatchViews.append(swatch)
+                row.addArrangedSubview(swatch)
                 index += 1
             }
             container.addArrangedSubview(row)
@@ -124,8 +125,8 @@ final class SimpleColorOpacityPickerViewController: NSViewController {
         return container
     }
 
-    @objc private func swatchPressed(_ sender: ColorSwatchButton) {
-        selectedSwatchIndex = sender.tag
+    private func swatchSelected(_ swatch: ColorSwatchView) {
+        selectedSwatchIndex = swatch.paletteIndex
         updateSelectionHighlight()
         refreshPreview()
         onColorChanged?(currentColor())
@@ -138,8 +139,8 @@ final class SimpleColorOpacityPickerViewController: NSViewController {
     }
 
     private func updateSelectionHighlight() {
-        for button in swatchButtons {
-            button.isChosen = button.tag == selectedSwatchIndex
+        for swatch in swatchViews {
+            swatch.isChosen = swatch.paletteIndex == selectedSwatchIndex
         }
     }
 
@@ -170,25 +171,22 @@ final class SimpleColorOpacityPickerViewController: NSViewController {
     }
 }
 
-// MARK: - Swatch cell
+// MARK: - Swatch cell (NSView — avoids NSButton drawing “Button” / “Bu” text)
 
-private final class ColorSwatchButton: NSButton {
-    private let swatchColor: NSColor
+private final class ColorSwatchView: NSView {
+    var paletteIndex = 0
+    var onSelect: ((ColorSwatchView) -> Void)?
 
     var isChosen = false {
         didSet { needsDisplay = true }
     }
 
     init(color: NSColor, size: CGFloat) {
-        swatchColor = color
         super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
-        isBordered = false
-        bezelStyle = .inline
         wantsLayer = true
         layer?.cornerRadius = 4
         layer?.masksToBounds = true
         layer?.backgroundColor = color.cgColor
-        setButtonType(.momentaryChange)
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: size).isActive = true
         heightAnchor.constraint(equalToConstant: size).isActive = true
@@ -199,15 +197,21 @@ private final class ColorSwatchButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onSelect?(self)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        if isChosen {
-            let inset: CGFloat = 1.5
-            let ring = bounds.insetBy(dx: inset, dy: inset)
-            let path = NSBezierPath(roundedRect: ring, xRadius: 3, yRadius: 3)
-            NSColor.controlAccentColor.setStroke()
-            path.lineWidth = 2
-            path.stroke()
-        }
+        guard isChosen else { return }
+        let inset: CGFloat = 1.5
+        let ring = bounds.insetBy(dx: inset, dy: inset)
+        let path = NSBezierPath(roundedRect: ring, xRadius: 3, yRadius: 3)
+        NSColor.controlAccentColor.setStroke()
+        path.lineWidth = 2
+        path.stroke()
     }
 }

@@ -82,6 +82,43 @@ enum FFmpegVideoFallback {
         queue.setSpecific(key: processQueueKey, value: ())
         return queue
     }()
+    private static let availabilityLock = NSLock()
+    private static var cachedAvailability: Bool?
+
+    /// Probe ffmpeg once on a background queue so opening media never blocks the main thread.
+    static func warmAvailabilityCache() {
+        processQueue.async {
+            _ = isAvailable()
+        }
+    }
+
+    static func isAvailable() -> Bool {
+        availabilityLock.lock()
+        if let cachedAvailability {
+            availabilityLock.unlock()
+            return cachedAvailability
+        }
+        availabilityLock.unlock()
+
+        let available: Bool
+        if DispatchQueue.getSpecific(key: processQueueKey) != nil {
+            available = probeAvailabilityUnlocked()
+        } else {
+            available = onProcessQueue {
+                probeAvailabilityUnlocked()
+            }
+        }
+
+        availabilityLock.lock()
+        cachedAvailability = available
+        availabilityLock.unlock()
+        return available
+    }
+
+    private static func probeAvailabilityUnlocked() -> Bool {
+        guard BundledCodecTools.ffmpegExecutablePath() != nil else { return false }
+        return runUnlocked(arguments: ["-version"]) == 0
+    }
 
     /// Runs `work` on `processQueue`, inlining when already on that queue (avoids dispatch_sync deadlock).
     private static func onProcessQueue<T>(_ work: () -> T) -> T {
@@ -99,10 +136,6 @@ enum FFmpegVideoFallback {
 
     /// Minimum bytes before attempting to open a fragmented preview MP4.
     private static let progressivePlayableMinBytes = 64 * 1024
-
-    static func isAvailable() -> Bool {
-        run(arguments: ["-version"]) == 0
-    }
 
     /// Reads the primary video stream codec tag from ffmpeg's header probe (stderr).
     static func probePrimaryVideoCodecTag(for inputURL: URL) -> String? {
@@ -138,8 +171,10 @@ enum FFmpegVideoFallback {
 
     /// Skip fragmented remux when audio must be transcoded — blocking remux is more reliable.
     static func shouldPreferBlockingRemux(for inputURL: URL) -> Bool {
-        guard sourceHasAudioStreams(for: inputURL),
-              let codec = probePrimaryAudioCodec(for: inputURL) else { return false }
+        guard isAvailable() else { return false }
+        let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
+        guard stderr.contains("Audio:"),
+              let codec = parsePrimaryAudioCodec(from: stderr) else { return false }
         return requiresAudioTranscodeForNativePlayback(codec: codec)
     }
 
@@ -185,24 +220,42 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Waits for a subprocess without pumping the AppKit run loop (`waitUntilExit` re-enters layout).
+    private static func waitForTermination(of process: Process) -> Int32 {
+        if !process.isRunning {
+            return process.terminationStatus
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            semaphore.signal()
+        }
+        if process.isRunning {
+            semaphore.wait()
+        }
+        process.terminationHandler = nil
+        return process.terminationStatus
+    }
+
     /// Warm the disk cache before the user presses play (library / recents).
     static func prefetchFullRemux(for inputURL: URL) {
-        guard isAvailable() else { return }
-        guard cachedPlayableURL(for: inputURL) == nil else { return }
-        let fullURL = makeOutputURL(for: inputURL)
-        guard !isBackgroundFullRemuxing(outputURL: fullURL) else { return }
-        if FileManager.default.fileExists(atPath: fullURL.path),
-           remuxOutputHasVideoStream(at: fullURL),
-           (!sourceHasAudioStreams(for: inputURL) || remuxOutputHasAudioStream(at: fullURL)),
-           outputDurationMeetsSource(outputURL: fullURL, inputURL: inputURL) {
-            markOutputReadyIfValid(fullURL, inputURL: inputURL)
-            storeCache(inputURL: inputURL, outputURL: fullURL)
-            return
+        processQueue.async {
+            guard isAvailable() else { return }
+            guard cachedPlayableURL(for: inputURL) == nil else { return }
+            let fullURL = makeOutputURL(for: inputURL)
+            guard !isBackgroundFullRemuxing(outputURL: fullURL) else { return }
+            if FileManager.default.fileExists(atPath: fullURL.path),
+               remuxOutputHasVideoStream(at: fullURL),
+               (!sourceHasAudioStreams(for: inputURL) || remuxOutputHasAudioStream(at: fullURL)),
+               outputDurationMeetsSource(outputURL: fullURL, inputURL: inputURL) {
+                markOutputReadyIfValid(fullURL, inputURL: inputURL)
+                storeCache(inputURL: inputURL, outputURL: fullURL)
+                return
+            }
+            if FileManager.default.fileExists(atPath: fullURL.path) {
+                try? FileManager.default.removeItem(at: fullURL)
+            }
+            _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
         }
-        if FileManager.default.fileExists(atPath: fullURL.path) {
-            try? FileManager.default.removeItem(at: fullURL)
-        }
-        _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
     }
 
     static func probeSourceDurationSec(for inputURL: URL) -> Double? {
@@ -706,11 +759,11 @@ enum FFmpegVideoFallback {
         do {
             onProcessQueue { activeProcesses.append(process) }
             try process.run()
-            process.waitUntilExit()
+            let exit = waitForTermination(of: process)
             onProcessQueue { activeProcesses.removeAll { $0 === process } }
             let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             let stderr = String(data: data, encoding: .utf8) ?? ""
-            return CommandResult(exit: process.terminationStatus, stderr: stderr)
+            return CommandResult(exit: exit, stderr: stderr)
         } catch {
             onProcessQueue { activeProcesses.removeAll { $0 === process } }
             return CommandResult(exit: -1, stderr: error.localizedDescription)
@@ -809,7 +862,7 @@ enum FFmpegVideoFallback {
         return nil
     }
 
-    private static func runCapturingStderr(arguments: [String]) -> String {
+    private static func runCapturingStderrUnlocked(arguments: [String]) -> String {
         guard let bundled = BundledCodecTools.ffmpegExecutablePath() else { return "" }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: bundled)
@@ -818,20 +871,29 @@ enum FFmpegVideoFallback {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe
         do {
-            onProcessQueue { activeProcesses.append(process) }
+            activeProcesses.append(process)
             try process.run()
-            process.waitUntilExit()
-            onProcessQueue { activeProcesses.removeAll { $0 === process } }
+            _ = waitForTermination(of: process)
+            activeProcesses.removeAll { $0 === process }
             let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
-            onProcessQueue { activeProcesses.removeAll { $0 === process } }
+            activeProcesses.removeAll { $0 === process }
             return ""
         }
     }
 
+    private static func runCapturingStderr(arguments: [String]) -> String {
+        if DispatchQueue.getSpecific(key: processQueueKey) != nil {
+            return runCapturingStderrUnlocked(arguments: arguments)
+        }
+        return onProcessQueue {
+            runCapturingStderrUnlocked(arguments: arguments)
+        }
+    }
+
     @discardableResult
-    private static func run(arguments: [String]) -> Int32 {
+    private static func runUnlocked(arguments: [String]) -> Int32 {
         guard let bundled = BundledCodecTools.ffmpegExecutablePath() else {
             return -1
         }
@@ -841,20 +903,24 @@ enum FFmpegVideoFallback {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
-            onProcessQueue {
-                activeProcesses.append(process)
-            }
+            activeProcesses.append(process)
             try process.run()
-            process.waitUntilExit()
-            onProcessQueue {
-                activeProcesses.removeAll { $0 === process }
-            }
-            return process.terminationStatus
+            let exit = waitForTermination(of: process)
+            activeProcesses.removeAll { $0 === process }
+            return exit
         } catch {
-            onProcessQueue {
-                activeProcesses.removeAll { $0 === process }
-            }
+            activeProcesses.removeAll { $0 === process }
             return -1
+        }
+    }
+
+    @discardableResult
+    private static func run(arguments: [String]) -> Int32 {
+        if DispatchQueue.getSpecific(key: processQueueKey) != nil {
+            return runUnlocked(arguments: arguments)
+        }
+        return onProcessQueue {
+            runUnlocked(arguments: arguments)
         }
     }
 }

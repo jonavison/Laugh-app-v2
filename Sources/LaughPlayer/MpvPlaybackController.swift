@@ -299,7 +299,20 @@ final class MpvPlaybackController: @unchecked Sendable {
         }
     }
 
-    func applySubtitleAppearance(from store: SettingsStore) {
+    func applySubtitleAppearance(from store: SettingsStore, refreshTrack: Bool = false) async {
+        await withCheckedContinuation { continuation in
+            applySubtitleAppearance(from: store, refreshTrack: refreshTrack) {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Applies subtitle styling on the IPC queue, optionally re-selecting the active track so changes appear live.
+    func applySubtitleAppearance(
+        from store: SettingsStore,
+        refreshTrack: Bool,
+        completion: @escaping @Sendable () -> Void
+    ) {
         let style = SubtitleAppearanceStyle.assForceStyle(from: store)
         let fontColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleFontColor)
         let borderColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleBorderColor)
@@ -308,36 +321,87 @@ final class MpvPlaybackController: @unchecked Sendable {
             * (store.subtitleFontSize / SubtitleAppearanceStyle.defaultFontSize)
         let backColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleBackgroundColor)
         let borderStyle = store.subtitleBackgroundEnabled ? "background-box" : "outline-and-shadow"
+        let fontSize = store.subtitleFontSize
+        let borderWidth = store.subtitleBorderWidth
+        let delaySec = store.subtitleDelaySec
+        let backgroundEnabled = store.subtitleBackgroundEnabled
 
-        ipcQueue.sync {
-            guard writeFD >= 0 else { return }
-            _ = setStringPropertyOnQueue("sub-ass-override", value: "force")
-            _ = setStringPropertyOnQueue("sub-font", value: SubtitleFont.mpvFontName)
-            _ = setStringPropertyOnQueue("sub-ass-force-style", value: style)
-            _ = setStringPropertyOnQueue("sub-color", value: fontColor)
-            _ = setStringPropertyOnQueue("sub-outline-color", value: borderColor)
-            _ = setNumericPropertyOnQueue("sub-font-size", value: store.subtitleFontSize)
-            _ = setNumericPropertyOnQueue("sub-outline-size", value: store.subtitleBorderWidth)
-            _ = setStringPropertyOnQueue("sub-border-style", value: borderStyle)
-            if store.subtitleBackgroundEnabled {
-                _ = setStringPropertyOnQueue("sub-back-color", value: backColor)
+        ipcQueue.async { [weak self] in
+            guard let self, self.writeFD >= 0 else {
+                DispatchQueue.main.async(execute: completion)
+                return
             }
-            _ = setNumericPropertyOnQueue("sub-delay", value: store.subtitleDelaySec)
-            _ = setNumericPropertyOnQueue("sub-pos", value: subPos)
-            _ = setNumericPropertyOnQueue("sub-scale", value: fontScale)
-            _ = setNumericPropertyOnQueue("secondary-sub-delay", value: store.subtitleDelaySec)
-            _ = setNumericPropertyOnQueue("secondary-sub-pos", value: subPos)
-            _ = setNumericPropertyOnQueue("secondary-sub-scale", value: fontScale)
+
+            let trackID = refreshTrack ? self.selectedSubtitleTrackIDOnQueue(secondary: false) : nil
+
+            self.setStringPropertyOnQueue("sub-ass-override", value: "yes", waitForReply: false)
+            self.setStringPropertyOnQueue("sub-font", value: SubtitleFont.assFontName, waitForReply: false)
+            self.setStringPropertyOnQueue("sub-ass-force-style", value: style, waitForReply: false)
+            self.setStringPropertyOnQueue("sub-color", value: fontColor, waitForReply: false)
+            self.setStringPropertyOnQueue("sub-outline-color", value: borderColor, waitForReply: false)
+            self.setNumericPropertyOnQueue("sub-font-size", value: fontSize, waitForReply: false)
+            self.setNumericPropertyOnQueue("sub-outline-size", value: borderWidth, waitForReply: false)
+            self.setStringPropertyOnQueue("sub-border-style", value: borderStyle, waitForReply: false)
+            if backgroundEnabled {
+                self.setStringPropertyOnQueue("sub-back-color", value: backColor, waitForReply: false)
+            }
+            self.setNumericPropertyOnQueue("sub-delay", value: delaySec, waitForReply: false)
+            self.setNumericPropertyOnQueue("sub-pos", value: subPos, waitForReply: false)
+            self.setNumericPropertyOnQueue("sub-scale", value: fontScale, waitForReply: false)
+            self.setNumericPropertyOnQueue("secondary-sub-delay", value: delaySec, waitForReply: false)
+            self.setNumericPropertyOnQueue("secondary-sub-pos", value: subPos, waitForReply: false)
+            self.setNumericPropertyOnQueue("secondary-sub-scale", value: fontScale, waitForReply: false)
+
+            if let trackID {
+                self.setStringPropertyOnQueue("sid", value: "no", waitForReply: false)
+                usleep(80_000)
+                self.setNumericPropertyOnQueue("sid", value: Double(trackID), waitForReply: false)
+            }
+
+            self.nudgeSubtitleDisplayOnQueue()
+            DispatchQueue.main.async(execute: completion)
         }
     }
 
-    @discardableResult
-    private func setNumericPropertyOnQueue(_ name: String, value: Double) -> Bool {
-        guard writeFD >= 0 else { return false }
+    private func selectedSubtitleTrackIDOnQueue(secondary: Bool) -> Int? {
+        if secondary {
+            if let sid = getPropertyDoubleUnlocked("secondary-sid"), sid >= 0 { return Int(sid) }
+            return SubtitleTrackCatalog.selectedMpvTrackID(
+                fromMpvTrackList: getPropertyValueOnQueue("track-list"),
+                secondary: true
+            )
+        }
+        if let sid = getPropertyDoubleUnlocked("sid"), sid >= 0 { return Int(sid) }
+        return SubtitleTrackCatalog.selectedMpvTrackID(
+            fromMpvTrackList: getPropertyValueOnQueue("track-list"),
+            secondary: false
+        )
+    }
+
+    private func getPropertyValueOnQueue(_ name: String) -> Any? {
+        guard writeFD >= 0 else { return nil }
         let id = nextRequestIDUnlocked()
         pendingReplies.removeValue(forKey: id)
-        sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
-        return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+        sendCommandUnlocked(["get_property", name], requestID: id, reply: true)
+        return waitForAnyReplyUnlocked(requestID: id, timeout: 0.6)
+    }
+
+    private func nudgeSubtitleDisplayOnQueue() {
+        sendCommandUnlocked(["set_property", "sub-visibility", false], reply: false)
+        sendCommandUnlocked(["set_property", "sub-visibility", true], reply: false)
+    }
+
+    @discardableResult
+    private func setNumericPropertyOnQueue(_ name: String, value: Double, waitForReply: Bool = true) -> Bool {
+        guard writeFD >= 0 else { return false }
+        if waitForReply {
+            let id = nextRequestIDUnlocked()
+            pendingReplies.removeValue(forKey: id)
+            sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
+            return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+        }
+        sendCommandUnlocked(["set_property", name, value], reply: false)
+        return true
     }
 
     @discardableResult
@@ -355,12 +419,16 @@ final class MpvPlaybackController: @unchecked Sendable {
     }
 
     @discardableResult
-    private func setStringPropertyOnQueue(_ name: String, value: String) -> Bool {
+    private func setStringPropertyOnQueue(_ name: String, value: String, waitForReply: Bool = true) -> Bool {
         guard writeFD >= 0 else { return false }
-        let id = nextRequestIDUnlocked()
-        pendingReplies.removeValue(forKey: id)
-        sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
-        return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+        if waitForReply {
+            let id = nextRequestIDUnlocked()
+            pendingReplies.removeValue(forKey: id)
+            sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
+            return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+        }
+        sendCommandUnlocked(["set_property", name, value], reply: false)
+        return true
     }
 
     func setEmbeddingWindowID(_ wid: Int) {

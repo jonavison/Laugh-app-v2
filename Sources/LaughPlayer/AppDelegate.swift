@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaughTheme.activate()
         SubtitleFont.registerIfNeeded()
+        FFmpegVideoFallback.warmAvailabilityCache()
         LaunchLog.emit("applicationWillFinishLaunching")
     }
 

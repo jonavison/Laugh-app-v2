@@ -5,6 +5,7 @@ import CoreMedia
 
 protocol PlayerViewControllerDelegate: AnyObject {
     func playerViewController(_ controller: PlayerViewController, didRequestWindowAspectRatio ratio: CGFloat?)
+    func playerViewController(_ controller: PlayerViewController, didUpdatePlayingTitle title: String?)
     func playerViewControllerDidRequestOpenVideo(_ controller: PlayerViewController)
     func playerViewControllerDidRequestOpenSettings(_ controller: PlayerViewController)
     func playerViewController(_ controller: PlayerViewController, setImmersiveChromeVisible visible: Bool, animated: Bool)
@@ -177,7 +178,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var observedItemLoadGeneration = 0
     private var observedItemPlayableURL: URL?
     private var fallbackConvertedOutputPaths: Set<String> = []
-    private var fallbackInProgress = false
+    private var fallbackInProgress = false {
+        didSet {
+            if oldValue, !fallbackInProgress {
+                flushPendingWindowAspectIfReady()
+            }
+        }
+    }
     private var pendingStartTimeAfterLoad: CMTime?
     private var fallbackStartedAt: CFAbsoluteTime?
     private var fallbackResumeTargetSec: Double?
@@ -216,6 +223,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var libraryChromeInstalled = false
     private let playbackControlClusterSpacing: CGFloat = 20
     private var lastAppliedUIScale: CGFloat = 1
+    private var responsiveControlsLayoutScheduled = false
+    private var titleBarLayoutUpdateScheduled = false
+    private var uiScaleUpdateScheduled = false
+    private var playbackBarLayoutUpdateScheduled = false
+    private var pendingWindowAspectRefresh = false
+    private var settingsBottomInsetScheduled = false
     private enum PlaybackLibraryOverlay {
         case closed
         case sidebarOnly
@@ -255,7 +268,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             showFullMediaLibrary()
             setImmersiveChromeVisible(true, animated: false)
         }
-        view.layoutSubtreeIfNeeded()
         LaunchLog.emit("prepareInterfaceForDisplay: bounds=\(view.bounds)")
     }
 
@@ -851,7 +863,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func likelyNeedsCompatibilityRemux(_ url: URL) -> Bool {
         guard !isGeneratedFallbackURL(url) else { return false }
-        guard FFmpegVideoFallback.isAvailable() else { return false }
         let ext = url.pathExtension.lowercased()
         let remuxContainers: Set<String> = [
             "mkv", "webm", "avi", "flv", "wmv", "ogv", "rm", "rmvb"
@@ -888,11 +899,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
+    private func flushPendingWindowAspectIfReady() {
+        guard pendingWindowAspectRefresh, !playbackPrepareActive, !fallbackInProgress else { return }
+        pendingWindowAspectRefresh = false
+        delegate?.playerViewController(self, didRequestWindowAspectRatio: resolvedWindowAspectRatio())
+    }
+
     private func leavePlaybackPrepareUI() {
         guard playbackPrepareActive else { return }
         playbackPrepareActive = false
         updateSeekBarPreparingState()
         syncPlaybackBarVisibilityForCurrentState()
+        flushPendingWindowAspectIfReady()
         if usesImmersiveChrome, !immersiveChromePinnedVisible {
             resetImmersiveChromeAfterMediaChange()
         }
@@ -920,7 +938,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         RecentlyViewedStore.shared.record(url: sourceURL, kind: .video)
         disconnectPlayerFromVideoSurfaces()
         playerSurfaceView.setMpvEmbeddingActive(true)
-        view.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            self?.view.layoutSubtreeIfNeeded()
+        }
 
         let wid = playerSurfaceView.mpvEmbeddingWindowID
         guard wid > 0 else {
@@ -1005,7 +1025,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.startMpvTimelinePolling()
             self.refreshMpvDebugMetadata()
             self.applyPlaybackEQToActiveMpv()
-            self.applySubtitleAppearanceToActiveMpv()
+            Task { @MainActor in
+                await self.applySubtitleAppearanceToPlayback()
+            }
             Task {
                 let companions = CompanionSubtitleDiscovery.discover(for: sourceURL)
                 let controller = self.mpvController
@@ -2035,10 +2057,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         openButton.isHidden = true
         hintLabel.isHidden = true
         applyContextualSettingsTabs()
-        updateSettingsContentBottomInset()
+        scheduleSettingsContentBottomInsetUpdate()
         raisePlaybackChromeToFront()
-        updatePlaybackBarWidth()
-        applyResponsiveControlsLayout()
+        schedulePlaybackBarLayoutUpdate()
+        scheduleResponsiveControlsLayout()
         updatePlaybackVolumeChromeVisibility()
         syncQueueChrome()
         syncPlayingWindowTitle()
@@ -2228,8 +2250,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updateSettingsContentBottomInset() {
-        let clearance = activeMediaKind == .empty ? settingsPanelInnerInset : settingsContentBottomClearance
-        settingsContentBottomConstraint?.constant = -clearance
+        scheduleSettingsContentBottomInsetUpdate()
+    }
+
+    private func scheduleSettingsContentBottomInsetUpdate() {
+        guard !settingsBottomInsetScheduled else { return }
+        settingsBottomInsetScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.settingsBottomInsetScheduled = false
+            let clearance = self.activeMediaKind == .empty
+                ? self.settingsPanelInnerInset
+                : self.settingsContentBottomClearance
+            self.settingsContentBottomConstraint?.constant = -clearance
+        }
     }
 
     private func applyContextualSettingsTabs() {
@@ -2321,11 +2355,58 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     override func viewDidLayout() {
         super.viewDidLayout()
         guard playerInterfaceInstalled else { return }
-        updateTitleBarChromeLayout()
-        applyUIScaleIfNeeded()
-        updatePlaybackBarWidth()
-        updateMiniPreviewLayout()
-        applyResponsiveControlsLayout()
+        scheduleTitleBarChromeLayoutUpdate()
+        scheduleUIScaleUpdateIfNeeded()
+        schedulePlaybackBarLayoutUpdate()
+        scheduleMiniPreviewLayoutUpdate()
+        scheduleResponsiveControlsLayout()
+    }
+
+    private func schedulePlaybackBarLayoutUpdate() {
+        guard !playbackBarLayoutUpdateScheduled else { return }
+        playbackBarLayoutUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.playbackBarLayoutUpdateScheduled = false
+            self.updatePlaybackBarWidth()
+        }
+    }
+
+    private func scheduleMiniPreviewLayoutUpdate() {
+        schedulePlaybackBarLayoutUpdate()
+        DispatchQueue.main.async { [weak self] in
+            self?.updateMiniPreviewLayout()
+        }
+    }
+
+    private func scheduleTitleBarChromeLayoutUpdate() {
+        guard !titleBarLayoutUpdateScheduled else { return }
+        titleBarLayoutUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.titleBarLayoutUpdateScheduled = false
+            self.updateTitleBarChromeLayout()
+        }
+    }
+
+    private func scheduleUIScaleUpdateIfNeeded() {
+        guard !uiScaleUpdateScheduled else { return }
+        uiScaleUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.uiScaleUpdateScheduled = false
+            self.applyUIScaleIfNeeded()
+        }
+    }
+
+    private func scheduleResponsiveControlsLayout() {
+        guard !responsiveControlsLayoutScheduled else { return }
+        responsiveControlsLayoutScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.responsiveControlsLayoutScheduled = false
+            self.applyResponsiveControlsLayout()
+        }
     }
 
     private func uiScaleForCurrentViewport() -> CGFloat {
@@ -2460,14 +2541,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         let activeGeneration = generation ?? videoLoadGeneration
 
-        guard FFmpegVideoFallback.isAvailable() else {
-            let lookup = BundledCodecTools.diagnosticSummary(for: "ffmpeg")
-            showCompatibilityFailure(
-                "Native playback failed for this codec.\n\nBundled compatibility decoder is not available in this build.\n\nFFmpeg lookup:\n\(lookup)"
-            )
-            return
-        }
-
         if !isMutedForSwitch {
             preparePlayerForVideoSwitch()
         }
@@ -2484,19 +2557,56 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         let rawResumeTargetSec = CMTimeGetSeconds(resumeTime)
 
-        if FFmpegVideoFallback.shouldPreferBlockingRemux(for: inputURL) {
-            print("[DEBUG-fallback] blocking remux preferred (audio transcode)")
-            runBlockingRemuxFallback(
-                inputURL: inputURL,
-                activeGeneration: activeGeneration,
-                resumeTime: resumeTime,
-                rawResumeTargetSec: rawResumeTargetSec,
-                plannedRoute: plannedRoute
-            )
-            return
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            guard FFmpegVideoFallback.isAvailable() else {
+                let lookup = BundledCodecTools.diagnosticSummary(for: "ffmpeg")
+                await MainActor.run {
+                    self.showCompatibilityFailure(
+                        "Native playback failed for this codec.\n\nBundled compatibility decoder is not available in this build.\n\nFFmpeg lookup:\n\(lookup)"
+                    )
+                }
+                return
+            }
+            if !plannedRoute, FFmpegVideoFallback.shouldPreferBlockingRemux(for: inputURL) {
+                await MainActor.run {
+                    guard activeGeneration == self.videoLoadGeneration else { return }
+                    print("[DEBUG-fallback] blocking remux preferred (audio transcode)")
+                    self.runBlockingRemuxFallback(
+                        inputURL: inputURL,
+                        activeGeneration: activeGeneration,
+                        resumeTime: resumeTime,
+                        rawResumeTargetSec: rawResumeTargetSec,
+                        plannedRoute: plannedRoute
+                    )
+                }
+                return
+            }
+            let remuxStart = FFmpegVideoFallback.beginRemux(inputURL: inputURL)
+            await MainActor.run {
+                guard activeGeneration == self.videoLoadGeneration else { return }
+                self.applyRemuxStart(
+                    remuxStart,
+                    inputURL: inputURL,
+                    activeGeneration: activeGeneration,
+                    resumeTime: resumeTime,
+                    rawResumeTargetSec: rawResumeTargetSec,
+                    plannedRoute: plannedRoute
+                )
+            }
         }
+    }
 
-        switch FFmpegVideoFallback.beginRemux(inputURL: inputURL) {
+    @MainActor
+    private func applyRemuxStart(
+        _ remuxStart: FFmpegVideoFallback.RemuxStart,
+        inputURL: URL,
+        activeGeneration: Int,
+        resumeTime: CMTime,
+        rawResumeTargetSec: Double,
+        plannedRoute: Bool
+    ) {
+        switch remuxStart {
         case .cacheHit(let cachedURL):
             print("[DEBUG-fallback] cache hit path=\(cachedURL.path)")
             fallbackInProgress = true
@@ -2505,10 +2615,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 pendingStartTimeAfterLoad = resumeTime
             }
             resolveAndAttach(playableURL: cachedURL, sourceURL: inputURL, generation: activeGeneration)
-            return
         case .failed:
             showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
-            return
         case .progressivePreview(let previewOutput, let fullTarget):
             startProgressivePreviewPlayback(
                 previewURL: previewOutput,
@@ -2519,7 +2627,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 rawResumeTargetSec: rawResumeTargetSec,
                 plannedRoute: plannedRoute
             )
-            return
         }
     }
 
@@ -3687,7 +3794,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
         updateCompanionSubtitlesUI()
         updateSubtitleControlsAvailability()
-        applySubtitleAppearanceToActiveMpv()
+        await applySubtitleAppearanceToPlayback()
         await syncSubtitleSelectionFromUI(tracks: tracks)
     }
 
@@ -3938,8 +4045,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateSubtitleControlsAvailability() {
         let extended = mpvBackendActive && mpvPlaybackStarted
-        let nativeItem = nativeSubtitlePlayerItem()
-        let nativeActive = activeMediaKind == .video && !mpvBackendActive && nativeItem != nil
+        let nativeActive = activeMediaKind == .video && !mpvBackendActive
+            && (committedPlayerItemID != nil || nativeSubtitlePlayerItem() != nil)
         let canEditAppearance = activeMediaKind == .video && (extended || nativeActive)
 
         subtitlesSettings.setAppearanceControlsEnabled(canEditAppearance, delayEnabled: extended)
@@ -3954,24 +4061,55 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlaybackSubtitleToggle()
     }
 
-    func applySubtitleAppearanceToActiveMpv() {
+    @MainActor
+    func applySubtitleAppearanceToPlayback() async {
         subtitlesSettings.saveAppearanceToStore()
+        let store = SettingsStore.shared
+
         if mpvBackendActive, mpvPlaybackStarted {
-            mpvController.applySubtitleAppearance(from: SettingsStore.shared)
+            await mpvController.applySubtitleAppearance(
+                from: store,
+                refreshTrack: primarySubtitlesEnabled
+            )
+            return
+        }
+        if mpvBackendActive {
+            await mpvController.applySubtitleAppearance(from: store, refreshTrack: false)
+            return
+        }
+
+        applyNativeSubtitleLiveStyle(from: store)
+    }
+
+    /// Immediate native subtitle styling — overlay text + AVFoundation rules, no seek / track toggle.
+    @MainActor
+    private func applyNativeSubtitleLiveStyle(from store: SettingsStore) {
+        guard !mpvBackendActive else { return }
+
+        if primarySubtitlesEnabled {
+            syncNativeSubtitleOverlay()
+            nativeSubtitleOverlay.refreshAppearance(from: store, userInitiated: true)
         } else {
             syncNativeSubtitleOverlay()
+            return
         }
+
+        guard let item = nativeSubtitlePlayerItem(), item.status == .readyToPlay else { return }
+        if let committed = committedPlayerItemID, ObjectIdentifier(item) != committed { return }
+
+        let rules = NativeSubtitleAppearance.makeRules(from: store)
+        item.textStyleRules = rules.isEmpty ? nil : rules
     }
 
     @MainActor
     private func syncNativeSubtitleOverlay() {
         guard !mpvBackendActive else { return }
         let store = SettingsStore.shared
-        guard primarySubtitlesEnabled, let item = nativeSubtitlePlayerItem() else {
-            nativeSubtitleOverlay.sync(item: nil, enabled: false, store: store)
-            return
-        }
-        nativeSubtitleOverlay.sync(item: item, enabled: true, store: store)
+        nativeSubtitleOverlay.sync(
+            item: nativeSubtitlePlayerItem(),
+            enabled: primarySubtitlesEnabled,
+            store: store
+        )
     }
 
     private func updatePlaybackSubtitleToggle() {
@@ -4017,25 +4155,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
         }
         guard item.status == .readyToPlay else { return }
+        if primarySubtitlesEnabled {
+            syncNativeSubtitleOverlay()
+        }
         if let track {
             let applied = await NativeSubtitleSelection.select(track: track, on: item)
             if applied {
-                nudgeNativeSubtitleDisplay()
+                applyNativeSubtitleLiveStyle(from: SettingsStore.shared)
             }
         } else {
             _ = await NativeSubtitleSelection.disableSubtitles(on: item)
         }
         syncNativeSubtitleOverlay()
-    }
-
-    private func nudgeNativeSubtitleDisplay() {
-        let time = player.currentTime()
-        guard time.isValid, !time.isIndefinite else { return }
-        player.seek(
-            to: time,
-            toleranceBefore: CMTime(value: 1, timescale: 600),
-            toleranceAfter: CMTime(value: 1, timescale: 600)
-        )
     }
 
     @MainActor
@@ -4189,15 +4320,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subtitlesSettings.updateValueLabels()
         suppressSubtitleAppearanceCallback = false
 
-        applySubtitleAppearanceToActiveMpv()
         Task { @MainActor in
+            await self.applySubtitleAppearanceToPlayback()
             await self.refreshPrimarySubtitleAfterAppearanceReset()
         }
     }
 
-    /// Re-select the active track so native subs recover after appearance changes.
+    /// Re-select the active track so native subs recover after appearance reset.
     @MainActor
     private func refreshPrimarySubtitleAfterAppearanceReset() async {
+        applyNativeSubtitleLiveStyle(from: SettingsStore.shared)
         guard !mpvBackendActive, primarySubtitlesEnabled, !cachedSubtitleTracks.isEmpty else { return }
         let popUpIndex = subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem
         let trackIndex = popUpIndex > 0 ? popUpIndex - 1 : 0
@@ -4209,7 +4341,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard !suppressSubtitleAppearanceCallback else { return }
         subtitlesSettings.updateValueLabels()
         subtitlesSettings.saveAppearanceToStore()
-        applySubtitleAppearanceToActiveMpv()
+
+        if mpvBackendActive {
+            Task { @MainActor in
+                await self.applySubtitleAppearanceToPlayback()
+            }
+        } else if activeMediaKind == .video {
+            applyNativeSubtitleLiveStyle(from: SettingsStore.shared)
+        }
     }
 
     @MainActor
@@ -4602,6 +4741,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     func applyWindowAspectFromSettings() {
+        guard !playbackPrepareActive, !fallbackInProgress else {
+            pendingWindowAspectRefresh = true
+            return
+        }
         delegate?.playerViewController(self, didRequestWindowAspectRatio: resolvedWindowAspectRatio())
     }
 
@@ -5140,7 +5283,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func syncPlayingWindowTitle() {
-        delegate?.playerViewController(self, setImmersiveChromeVisible: isTitleBarChromeShowing, animated: false)
+        delegate?.playerViewController(self, didUpdatePlayingTitle: currentPlayingDisplayTitle())
     }
 
     private func syncPlaybackBarVisibilityForCurrentState() {

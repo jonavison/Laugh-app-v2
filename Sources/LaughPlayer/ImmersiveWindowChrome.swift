@@ -67,10 +67,18 @@ enum ImmersiveWindowChrome {
     }
 
     static func setTitleBarVisible(_ visible: Bool, playingName: String?, on window: NSWindow, animated: Bool) {
-        window.title = formattedTitle(playingName: playingName)
+        let title = formattedTitle(playingName: playingName)
+        let buttonsHidden = !visible
+        let titleVisible = visible
+        let alreadyApplied = window.title == title
+            && window.titleVisibility == (titleVisible ? .visible : .hidden)
+            && Self.standardButtonsHiddenState(on: window) == buttonsHidden
+        if alreadyApplied { return }
+
+        window.title = title
         let apply = {
-            window.titleVisibility = visible ? .visible : .hidden
-            setStandardButtonsHidden(!visible, on: window)
+            window.titleVisibility = titleVisible ? .visible : .hidden
+            setStandardButtonsHidden(buttonsHidden, on: window)
         }
         guard animated else {
             apply()
@@ -81,6 +89,10 @@ enum ImmersiveWindowChrome {
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             apply()
         }
+    }
+
+    private static func standardButtonsHiddenState(on window: NSWindow) -> Bool {
+        window.standardWindowButton(.closeButton)?.isHidden ?? false
     }
 
 }
