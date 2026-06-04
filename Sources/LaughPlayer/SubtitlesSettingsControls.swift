@@ -14,19 +14,21 @@ final class SubtitlesSettingsControls {
 
     let delaySlider = NSSlider(value: 0, minValue: SubtitleAppearanceStyle.delayMin, maxValue: SubtitleAppearanceStyle.delayMax, target: nil, action: nil)
     let delayValueLabel = NSTextField(labelWithString: "0.0 s")
-    let positionSlider = NSSlider(value: 100, minValue: SubtitleAppearanceStyle.positionMin, maxValue: SubtitleAppearanceStyle.positionMax, target: nil, action: nil)
+    let positionSlider = NSSlider(value: 0, minValue: SubtitleAppearanceStyle.positionMin, maxValue: SubtitleAppearanceStyle.positionMax, target: nil, action: nil)
     let positionValueLabel = NSTextField(labelWithString: "Bottom")
     let scaleSlider = NSSlider(value: 1, minValue: SubtitleAppearanceStyle.scaleMin, maxValue: SubtitleAppearanceStyle.scaleMax, target: nil, action: nil)
     let scaleValueLabel = NSTextField(labelWithString: "1.0×")
 
     let fontSizeSlider = NSSlider(value: 36, minValue: SubtitleAppearanceStyle.fontSizeMin, maxValue: SubtitleAppearanceStyle.fontSizeMax, target: nil, action: nil)
     let fontSizeValueLabel = NSTextField(labelWithString: "36 pt")
-    let fontColorWell = NSColorWell()
+    let fontFamilyLabel = NSTextField(labelWithString: SubtitleFont.assFontName)
+    let fontColorWell = SettingsColorWell()
     let borderWidthSlider = NSSlider(value: 2, minValue: SubtitleAppearanceStyle.borderWidthMin, maxValue: SubtitleAppearanceStyle.borderWidthMax, target: nil, action: nil)
     let borderWidthValueLabel = NSTextField(labelWithString: "2")
-    let borderColorWell = NSColorWell()
+    let borderColorWell = SettingsColorWell()
     let backgroundEnabledCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    let backgroundColorWell = NSColorWell()
+    let backgroundColorWell = SettingsColorWell()
+    let resetAppearanceButton = NSButton(title: "Reset to defaults", target: nil, action: nil)
 
     init() {
         [primaryTrackPopUp, secondaryTrackPopUp].forEach {
@@ -56,6 +58,10 @@ final class SubtitlesSettingsControls {
         loadExternalButton.bezelStyle = .rounded
         loadExternalButton.controlSize = .small
 
+        resetAppearanceButton.bezelStyle = .rounded
+        resetAppearanceButton.controlSize = .small
+        resetAppearanceButton.font = .systemFont(ofSize: 12)
+
         [delayValueLabel, positionValueLabel, scaleValueLabel, fontSizeValueLabel, borderWidthValueLabel].forEach {
             $0.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
             $0.textColor = .secondaryLabelColor
@@ -63,27 +69,60 @@ final class SubtitlesSettingsControls {
             $0.setContentHuggingPriority(.required, for: .horizontal)
         }
 
+        fontFamilyLabel.font = .systemFont(ofSize: 13)
+        fontFamilyLabel.textColor = .labelColor
+        fontFamilyLabel.alignment = .right
+        fontFamilyLabel.setContentHuggingPriority(.required, for: .horizontal)
+
         [delaySlider, positionSlider, scaleSlider, fontSizeSlider, borderWidthSlider].forEach {
             $0.controlSize = .small
             $0.isContinuous = true
         }
 
         [fontColorWell, borderColorWell, backgroundColorWell].forEach {
-            $0.isBordered = true
-            $0.controlSize = .small
+            $0.setContentHuggingPriority(.required, for: .horizontal)
         }
 
-        delaySlider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.accent)
-        positionSlider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.accent)
-        scaleSlider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.accent)
-        fontSizeSlider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.accent)
-        borderWidthSlider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.accent)
+        let trackH = SubtitleAppearanceStyle.settingsSliderTrackHeight
+        delaySlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
+        positionSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
+        scaleSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
+        fontSizeSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
+        borderWidthSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
 
         LaughTheme.applySettingsAccentChrome(to: primaryTrackPopUp)
         LaughTheme.applySettingsAccentChrome(to: secondaryTrackPopUp)
         LaughTheme.applySettingsAccentChrome(to: backgroundEnabledCheckbox)
         LaughTheme.applySettingsAccentChrome(to: loadExternalButton)
         LaughTheme.applySettingsAccentChrome(to: extendedPlaybackButton)
+        LaughTheme.applySettingsAccentChrome(to: resetAppearanceButton)
+    }
+
+    func applyDefaultsToControls() {
+        delaySlider.doubleValue = SubtitleAppearanceStyle.defaultDelaySec
+        positionSlider.doubleValue = SubtitleAppearanceStyle.defaultPosition
+        scaleSlider.doubleValue = SubtitleAppearanceStyle.defaultScale
+        fontSizeSlider.doubleValue = SubtitleAppearanceStyle.defaultFontSize
+        borderWidthSlider.doubleValue = SubtitleAppearanceStyle.defaultBorderWidth
+        setColorWellColors(
+            font: SubtitleAppearanceStyle.defaultFontColor,
+            border: SubtitleAppearanceStyle.defaultBorderColor,
+            background: SubtitleAppearanceStyle.defaultBackgroundColor
+        )
+        backgroundEnabledCheckbox.state = SubtitleAppearanceStyle.defaultBackgroundEnabled ? .on : .off
+        updateValueLabels()
+    }
+
+    private func setColorWellColors(font: NSColor, border: NSColor, background: NSColor) {
+        for well in [fontColorWell, borderColorWell, backgroundColorWell] {
+            well.suppressNotifications = true
+        }
+        fontColorWell.color = font
+        borderColorWell.color = border
+        backgroundColorWell.color = background
+        for well in [fontColorWell, borderColorWell, backgroundColorWell] {
+            well.suppressNotifications = false
+        }
     }
 
     func loadAppearanceFromStore() {
@@ -93,10 +132,12 @@ final class SubtitlesSettingsControls {
         scaleSlider.doubleValue = store.subtitleScale
         fontSizeSlider.doubleValue = store.subtitleFontSize
         borderWidthSlider.doubleValue = store.subtitleBorderWidth
-        fontColorWell.color = store.subtitleFontColor
-        borderColorWell.color = store.subtitleBorderColor
+        setColorWellColors(
+            font: store.subtitleFontColor,
+            border: store.subtitleBorderColor,
+            background: store.subtitleBackgroundColor
+        )
         backgroundEnabledCheckbox.state = store.subtitleBackgroundEnabled ? .on : .off
-        backgroundColorWell.color = store.subtitleBackgroundColor
         updateValueLabels()
     }
 
@@ -115,26 +156,49 @@ final class SubtitlesSettingsControls {
 
     func updateValueLabels() {
         delayValueLabel.stringValue = String(format: "%+.1f s", delaySlider.doubleValue)
-        if positionSlider.doubleValue <= 20 {
-            positionValueLabel.stringValue = "Top"
-        } else if positionSlider.doubleValue >= 80 {
-            positionValueLabel.stringValue = "Bottom"
-        } else {
-            positionValueLabel.stringValue = "Middle"
-        }
+        positionValueLabel.stringValue = SubtitleAppearanceStyle.positionLabel(
+            for: positionSlider.doubleValue
+        )
         scaleValueLabel.stringValue = String(format: "%.2f×", scaleSlider.doubleValue)
         fontSizeValueLabel.stringValue = "\(Int(round(fontSizeSlider.doubleValue))) pt"
         borderWidthValueLabel.stringValue = "\(Int(round(borderWidthSlider.doubleValue)))"
     }
 
-    func setExtendedControlsEnabled(_ enabled: Bool) {
+    func setAppearanceControlsEnabled(_ enabled: Bool, delayEnabled: Bool = true) {
         [
-            delaySlider, positionSlider, scaleSlider,
+            positionSlider, scaleSlider,
             fontSizeSlider, borderWidthSlider,
             fontColorWell, borderColorWell, backgroundColorWell,
-            secondaryEnabledSwitch, secondaryTrackPopUp,
-            loadExternalButton, backgroundEnabledCheckbox
+            backgroundEnabledCheckbox
         ].forEach { $0.isEnabled = enabled }
+        delaySlider.isEnabled = enabled && delayEnabled
+    }
+
+    func setMpvExclusiveControlsEnabled(_ extended: Bool) {
+        secondaryEnabledSwitch.isEnabled = extended
+        secondaryTrackPopUp.isEnabled = extended
+        loadExternalButton.isEnabled = extended
+    }
+
+    func updateExtendedHint(extendedActive: Bool, nativePlayback: Bool) {
+        if extendedActive {
+            extendedOnlyLabel.isHidden = true
+            return
+        }
+        extendedOnlyLabel.isHidden = false
+        if nativePlayback {
+            extendedOnlyLabel.stringValue =
+                "Font, color, position, and scale apply while you adjust the sliders. Subtitle delay and bitmap (PGS) subs need extended playback — use the button above."
+        } else {
+            extendedOnlyLabel.stringValue =
+                "Subtitle timing and styling need extended playback. Use the button above to switch."
+        }
+    }
+
+    /// Legacy name — enables appearance sliders only.
+    func setExtendedControlsEnabled(_ enabled: Bool) {
+        setAppearanceControlsEnabled(enabled)
+        setMpvExclusiveControlsEnabled(enabled)
         extendedOnlyLabel.isHidden = enabled
     }
 }

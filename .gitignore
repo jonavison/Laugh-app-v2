@@ -27,6 +27,7 @@ dist/
 
 # Bundled codec binaries (see scripts/bundle-codec-tools.sh)
 Sources/LaughPlayer/codec-tools/bin/
+Sources/LaughPlayer/codec-tools/lib/
 
 # Logs and temp
 *.log

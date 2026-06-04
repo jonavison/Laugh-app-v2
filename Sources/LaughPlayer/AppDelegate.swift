@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaughTheme.activate()
+        SubtitleFont.registerIfNeeded()
         LaunchLog.emit("applicationWillFinishLaunching")
     }
 

@@ -153,7 +153,9 @@ final class SettingsStore {
 
     var subtitlePosition: Double {
         get {
-            if defaults.object(forKey: Keys.subtitlePosition) == nil { return 100 }
+            if defaults.object(forKey: Keys.subtitlePosition) == nil {
+                return SubtitleAppearanceStyle.defaultPosition
+            }
             return defaults.double(forKey: Keys.subtitlePosition)
         }
         set {
@@ -191,7 +193,7 @@ final class SettingsStore {
     }
 
     var subtitleFontColor: NSColor {
-        get { color(forKey: Keys.subtitleFontColor) ?? .white }
+        get { color(forKey: Keys.subtitleFontColor) ?? SubtitleAppearanceStyle.defaultFontColor }
         set { saveColor(newValue, forKey: Keys.subtitleFontColor) }
     }
 
@@ -206,7 +208,7 @@ final class SettingsStore {
     }
 
     var subtitleBorderColor: NSColor {
-        get { color(forKey: Keys.subtitleBorderColor) ?? .black }
+        get { color(forKey: Keys.subtitleBorderColor) ?? SubtitleAppearanceStyle.defaultBorderColor }
         set { saveColor(newValue, forKey: Keys.subtitleBorderColor) }
     }
 
@@ -219,22 +221,47 @@ final class SettingsStore {
     }
 
     var subtitleBackgroundColor: NSColor {
-        get { color(forKey: Keys.subtitleBackgroundColor) ?? NSColor.black.withAlphaComponent(0.65) }
+        get { color(forKey: Keys.subtitleBackgroundColor) ?? SubtitleAppearanceStyle.defaultBackgroundColor }
         set { saveColor(newValue, forKey: Keys.subtitleBackgroundColor) }
     }
 
+    /// Clears saved subtitle appearance and restores factory defaults.
+    func resetSubtitleAppearanceToDefaults() {
+        [
+            Keys.subtitleDelaySec,
+            Keys.subtitlePosition,
+            Keys.subtitleScale,
+            Keys.subtitleFontSize,
+            Keys.subtitleFontColor,
+            Keys.subtitleBorderWidth,
+            Keys.subtitleBorderColor,
+            Keys.subtitleBackgroundEnabled,
+            Keys.subtitleBackgroundColor
+        ].forEach { defaults.removeObject(forKey: $0) }
+    }
+
     private func color(forKey key: String) -> NSColor? {
-        guard let data = defaults.data(forKey: key),
-              let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) else {
-            return nil
+        guard let data = defaults.data(forKey: key) else { return nil }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Double],
+           let r = json["r"], let g = json["g"], let b = json["b"], let a = json["a"] {
+            return NSColor(srgbRed: r, green: g, blue: b, alpha: a)
         }
-        return color
+        if let archived = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
+            return archived.usingColorSpace(.sRGB)
+        }
+        return nil
     }
 
     private func saveColor(_ color: NSColor, forKey key: String) {
-        if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: true) {
-            defaults.set(data, forKey: key)
-        }
+        guard let rgb = color.usingColorSpace(.sRGB) else { return }
+        let payload: [String: Double] = [
+            "r": rgb.redComponent,
+            "g": rgb.greenComponent,
+            "b": rgb.blueComponent,
+            "a": rgb.alphaComponent
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        defaults.set(data, forKey: key)
     }
 
     private let defaults = UserDefaults.standard

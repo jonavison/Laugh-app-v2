@@ -10,8 +10,10 @@ copy_if_exists() {
   local src="$1"
   local name="$2"
   if [[ -x "${src}" ]]; then
-    cp "${src}" "${TARGET_DIR}/${name}"
-    chmod +x "${TARGET_DIR}/${name}"
+    local dest="${TARGET_DIR}/${name}"
+    rm -f "${dest}"
+    cp "${src}" "${dest}"
+    chmod +x "${dest}"
     echo "[bundle-codec-tools] bundled ${name} from ${src}"
   fi
 }

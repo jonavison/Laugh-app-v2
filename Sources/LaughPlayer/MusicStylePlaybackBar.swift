@@ -28,6 +28,7 @@ enum MusicStylePlaybackBar {
     static let minBarWidthCompact: CGFloat = 280
     /// Medium corner radius for the floating playback bar.
     static let barCornerRadius: CGFloat = 12
+    static let accessoryButtonHeight: CGFloat = 28
     static let barBottomInsetLow: CGFloat = 24
     static let barBottomInsetHigh: CGFloat = 100
     static let barBottomInsetRampStart: CGFloat = 720
@@ -87,6 +88,25 @@ enum MusicStylePlaybackBar {
         }
         button.setContentHuggingPriority(.required, for: .horizontal)
         return button
+    }
+
+    static func configureSubtitleToggleButton(_ button: PlaybackSubtitleToggleButton) {
+        button.bezelStyle = .accessoryBarAction
+        button.isBordered = false
+        button.title = ""
+        button.toolTip = "Toggle subtitles"
+        button.contentTintColor = accessoryIconTintColor
+        pinButtonSize(button, width: 26, height: accessoryButtonHeight)
+    }
+
+    static var accessoryIconTintColor: NSColor { .secondaryLabelColor }
+
+    private static func pinButtonSize(_ button: NSButton, width: CGFloat, height: CGFloat) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: width),
+            button.heightAnchor.constraint(equalToConstant: height)
+        ])
     }
 
     static func playPauseButton(pointSize: CGFloat = 22) -> NSButton {

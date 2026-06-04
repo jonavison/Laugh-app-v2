@@ -87,7 +87,7 @@ final class MpvPlaybackController: @unchecked Sendable {
 
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: executable)
-            proc.arguments = [
+            var arguments = [
                 "--no-terminal",
                 "--keep-open=no",
                 "--force-window=no",
@@ -99,6 +99,10 @@ final class MpvPlaybackController: @unchecked Sendable {
                 "--wid=\(wid)",
                 url.path
             ]
+            if let fontDir = SubtitleFont.bundledFontsDirectoryURL?.path {
+                arguments.insert("--sub-fonts-dir=\(fontDir)", at: arguments.count - 1)
+            }
+            proc.arguments = arguments
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice
 
@@ -297,23 +301,49 @@ final class MpvPlaybackController: @unchecked Sendable {
 
     func applySubtitleAppearance(from store: SettingsStore) {
         let style = SubtitleAppearanceStyle.assForceStyle(from: store)
-        _ = setStringProperty("sub-ass-force-style", value: style)
-        _ = setNumericProperty("sub-delay", value: store.subtitleDelaySec)
-        _ = setNumericProperty("sub-pos", value: store.subtitlePosition)
-        _ = setNumericProperty("sub-scale", value: store.subtitleScale)
-        _ = setNumericProperty("secondary-sub-delay", value: store.subtitleDelaySec)
-        _ = setNumericProperty("secondary-sub-pos", value: store.subtitlePosition)
-        _ = setNumericProperty("secondary-sub-scale", value: store.subtitleScale)
+        let fontColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleFontColor)
+        let borderColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleBorderColor)
+        let subPos = SubtitleAppearanceStyle.mpvSubPos(fromUserPosition: store.subtitlePosition)
+        let fontScale = store.subtitleScale
+            * (store.subtitleFontSize / SubtitleAppearanceStyle.defaultFontSize)
+        let backColor = SubtitleAppearanceStyle.mpvSubColorString(from: store.subtitleBackgroundColor)
+        let borderStyle = store.subtitleBackgroundEnabled ? "background-box" : "outline-and-shadow"
+
+        ipcQueue.sync {
+            guard writeFD >= 0 else { return }
+            _ = setStringPropertyOnQueue("sub-ass-override", value: "force")
+            _ = setStringPropertyOnQueue("sub-font", value: SubtitleFont.mpvFontName)
+            _ = setStringPropertyOnQueue("sub-ass-force-style", value: style)
+            _ = setStringPropertyOnQueue("sub-color", value: fontColor)
+            _ = setStringPropertyOnQueue("sub-outline-color", value: borderColor)
+            _ = setNumericPropertyOnQueue("sub-font-size", value: store.subtitleFontSize)
+            _ = setNumericPropertyOnQueue("sub-outline-size", value: store.subtitleBorderWidth)
+            _ = setStringPropertyOnQueue("sub-border-style", value: borderStyle)
+            if store.subtitleBackgroundEnabled {
+                _ = setStringPropertyOnQueue("sub-back-color", value: backColor)
+            }
+            _ = setNumericPropertyOnQueue("sub-delay", value: store.subtitleDelaySec)
+            _ = setNumericPropertyOnQueue("sub-pos", value: subPos)
+            _ = setNumericPropertyOnQueue("sub-scale", value: fontScale)
+            _ = setNumericPropertyOnQueue("secondary-sub-delay", value: store.subtitleDelaySec)
+            _ = setNumericPropertyOnQueue("secondary-sub-pos", value: subPos)
+            _ = setNumericPropertyOnQueue("secondary-sub-scale", value: fontScale)
+        }
+    }
+
+    @discardableResult
+    private func setNumericPropertyOnQueue(_ name: String, value: Double) -> Bool {
+        guard writeFD >= 0 else { return false }
+        let id = nextRequestIDUnlocked()
+        pendingReplies.removeValue(forKey: id)
+        sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
+        return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
     }
 
     @discardableResult
     private func setNumericProperty(_ name: String, value: Double) -> Bool {
         ipcQueue.sync {
-            guard writeFD >= 0 else { return false }
-            let id = nextRequestIDUnlocked()
-            pendingReplies.removeValue(forKey: id)
-            sendCommandUnlocked(["set_property", name, value], requestID: id, reply: true)
-            return waitForCommandSuccessUnlocked(requestID: id, timeout: 0.6)
+            setNumericPropertyOnQueue(name, value: value)
         }
     }
 

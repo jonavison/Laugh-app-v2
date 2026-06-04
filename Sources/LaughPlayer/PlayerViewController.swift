@@ -95,11 +95,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subtitlesSettings = SubtitlesSettingsControls()
     private var cachedSubtitleTracks: [SubtitleTrackInfo] = []
     private var suppressSubtitlePopUpAction = false
+    private var suppressSubtitleAppearanceCallback = false
     private var primarySubtitlesEnabled = false
     private var secondarySubtitlesEnabled = false
     private var lastExternalSubtitlePath: String?
     private var cachedDiscoveredCompanions: [DiscoveredCompanionSubtitle] = []
     private let subtitlesTabView = NSStackView()
+    private let nativeSubtitleOverlay = NativeSubtitleOverlay()
+    private let playbackSubtitleToggle = PlaybackSubtitleToggleButton()
     private let imageTabView = NSStackView()
     private let imageFitTabView = NSStackView()
     private var activeMediaKind: ActiveMediaKind = .empty
@@ -154,6 +157,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var seekGeneration = 0
     private var currentControlTier: ControlDensityTier = .regular
     private var outsideClickMonitor: Any?
+    private var suppressSettingsDismissForColorPicker = false
     private var immersivePointerMonitor: Any?
     private var keyboardShortcutMonitor: Any?
     private var videoDoubleClickMonitor: Any?
@@ -222,7 +226,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let settingsPanelInnerInset: CGFloat = 12
     private let settingsTabsTopInset: CGFloat = 40
     private let settingsContentBottomClearance: CGFloat = 108
-    private let settingsStackSpacing: CGFloat = 10
+    private let settingsStackSpacing: CGFloat = 4
     private let settingsSectionExtraGap: CGFloat = 14
 
     private enum ControlDensityTier {
@@ -276,6 +280,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         playerSurfaceView.videoGravity = .resizeAspect
         playerSurfaceView.translatesAutoresizingMaskIntoConstraints = false
+        nativeSubtitleOverlay.install(in: playerSurfaceView)
         playerSurfaceView.onMpvLayoutChanged = { [weak self] in
             guard let self, self.mpvBackendActive else { return }
             let wid = self.playerSurfaceView.mpvEmbeddingWindowID
@@ -908,6 +913,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         mpvBackendActive = true
         mpvPlaybackStarted = false
         activeSession = nil
+        nativeSubtitleOverlay.setSuppressedForAlternateBackend(true)
 
         activeMediaKind = .video
         showVideoChrome()
@@ -1055,6 +1061,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if activeSession is MpvPlaybackSession {
             activeSession = nil
         }
+        nativeSubtitleOverlay.setSuppressedForAlternateBackend(false)
         playerSurfaceView.setMpvEmbeddingActive(false)
     }
 
@@ -3014,19 +3021,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             stack.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         }
 
-        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Decode", isFirst: true))
-        videoTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Path", control: playbackSourcePopUp))
-
-        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Playback"))
-        videoTabView.addArrangedSubview(makePlaybackSpeedRow())
-        videoTabView.addArrangedSubview(makeSettingsCheckboxRow(title: "Loop playback", checkbox: loopPlaybackCheckbox))
-
-        videoTabView.addArrangedSubview(makeSettingsSectionHeader("Display"))
-        videoTabView.addArrangedSubview(makeSettingsSegmentedRow(title: "Scale", control: videoFitModeControl))
-        videoTabView.addArrangedSubview(makeSettingsSegmentedRow(title: "Aspect", control: windowAspectControl))
-        videoTabView.addArrangedSubview(
-            makeSettingsCheckboxRow(title: "Lock window to video aspect", checkbox: lockAspectCheckbox)
-        )
+        addSettingsSection(to: videoTabView, title: "Decode", isFirst: true) { card in
+            card.addFinalRow(SettingsRowFactory.valueRow(title: "Path", control: playbackSourcePopUp))
+        }
+        addSettingsSection(to: videoTabView, title: "Playback") { card in
+            card.addRow(makePlaybackSpeedSectionRow())
+            card.addFinalRow(SettingsRowFactory.toggleRow(title: "Loop playback", control: loopPlaybackCheckbox))
+        }
+        addSettingsSection(to: videoTabView, title: "Display") { card in
+            card.addRow(SettingsRowFactory.stackedRow(title: "Scale", control: videoFitModeControl))
+            card.addRow(SettingsRowFactory.stackedRow(title: "Aspect", control: windowAspectControl))
+            card.addFinalRow(
+                SettingsRowFactory.toggleRow(title: "Lock window to video aspect", control: lockAspectCheckbox)
+            )
+        }
 
         configureAudioSettingsTab()
         configureSubtitlesSettingsTab()
@@ -3341,20 +3349,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func configureAudioSettingsTab() {
-        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Track", isFirst: true))
         audioSettings.trackPopUp.target = self
         audioSettings.trackPopUp.action = #selector(audioTrackPopUpChanged)
-        audioTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Audio", control: audioSettings.trackPopUp))
+        addSettingsSection(to: audioTabView, title: "Track", isFirst: true) { card in
+            card.addFinalRow(SettingsRowFactory.valueRow(title: "Audio", control: audioSettings.trackPopUp))
+        }
 
-        audioTabView.addArrangedSubview(makeSettingsSectionHeader("Equalizer"))
         audioSettings.eqPresetPopUp.target = self
         audioSettings.eqPresetPopUp.action = #selector(audioEQPresetChanged)
-        audioTabView.addArrangedSubview(makeSettingsLabeledRow(title: "Preset", control: audioSettings.eqPresetPopUp))
-        audioTabView.addArrangedSubview(audioSettings.eqUnavailableLabel)
-        audioTabView.addArrangedSubview(audioSettings.eqBandsRow)
         for slider in audioSettings.eqBandSliders {
             slider.target = self
             slider.action = #selector(audioEQBandChanged)
+        }
+        addSettingsSection(to: audioTabView, title: "Equalizer") { card in
+            card.addRow(SettingsRowFactory.valueRow(title: "Preset", control: audioSettings.eqPresetPopUp))
+            card.addRow(SettingsRowFactory.fullWidthRow(audioSettings.eqUnavailableLabel))
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(audioSettings.eqBandsRow))
         }
         audioSettings.loadBandsFromStore()
         updateAudioEQAvailability()
@@ -3363,65 +3373,83 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func configureSubtitlesSettingsTab() {
         let s = subtitlesSettings
 
-        subtitlesTabView.addArrangedSubview(makeSettingsSectionHeader("Tracks", isFirst: true))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSubtitleTrackRow(
-                enableSwitch: s.primaryEnabledSwitch,
-                title: "Primary",
-                popUp: s.primaryTrackPopUp
-            )
-        )
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSubtitleTrackRow(
-                enableSwitch: s.secondaryEnabledSwitch,
-                title: "Secondary",
-                popUp: s.secondaryTrackPopUp
-            )
-        )
+        s.loadExternalButton.target = self
+        s.loadExternalButton.action = #selector(loadExternalSubtitlePressed)
+        s.extendedPlaybackButton.target = self
+        s.extendedPlaybackButton.action = #selector(extendedPlaybackForSubtitlesPressed)
 
         let externalRow = NSStackView()
         externalRow.orientation = .horizontal
         externalRow.alignment = .centerY
         externalRow.spacing = 8
-        s.loadExternalButton.target = self
-        s.loadExternalButton.action = #selector(loadExternalSubtitlePressed)
         externalRow.addArrangedSubview(s.loadExternalButton)
         externalRow.addArrangedSubview(s.externalFileLabel)
-        subtitlesTabView.addArrangedSubview(externalRow)
 
-        subtitlesTabView.addArrangedSubview(s.companionFilesLabel)
-        s.extendedPlaybackButton.target = self
-        s.extendedPlaybackButton.action = #selector(extendedPlaybackForSubtitlesPressed)
-        subtitlesTabView.addArrangedSubview(s.extendedPlaybackButton)
+        addSettingsSection(to: subtitlesTabView, title: "Tracks", isFirst: true) { card in
+            card.addRow(makeSettingsSubtitleTrackBlock(
+                title: "Primary",
+                toggle: s.primaryEnabledSwitch,
+                popUp: s.primaryTrackPopUp
+            ))
+            card.addRow(makeSettingsSubtitleTrackBlock(
+                title: "Secondary",
+                toggle: s.secondaryEnabledSwitch,
+                popUp: s.secondaryTrackPopUp
+            ))
+            card.addRow(SettingsRowFactory.fullWidthRow(externalRow))
+            card.addRow(SettingsRowFactory.fullWidthRow(s.companionFilesLabel))
+            card.addRow(SettingsRowFactory.fullWidthRow(s.extendedPlaybackButton))
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(s.extendedOnlyLabel))
+        }
 
-        subtitlesTabView.addArrangedSubview(s.extendedOnlyLabel)
+        addSettingsSection(to: subtitlesTabView, title: "Timing") { card in
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Delay",
+                slider: s.delaySlider,
+                valueLabel: s.delayValueLabel
+            ))
+        }
 
-        subtitlesTabView.addArrangedSubview(makeSettingsSectionHeader("Timing"))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSliderRow(title: "Delay", slider: s.delaySlider, valueLabel: s.delayValueLabel)
-        )
+        addSettingsSection(to: subtitlesTabView, title: "Placement") { card in
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Position",
+                slider: s.positionSlider,
+                valueLabel: s.positionValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Scale",
+                slider: s.scaleSlider,
+                valueLabel: s.scaleValueLabel
+            ))
+        }
 
-        subtitlesTabView.addArrangedSubview(makeSettingsSectionHeader("Placement"))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSliderRow(title: "Position", slider: s.positionSlider, valueLabel: s.positionValueLabel)
-        )
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSliderRow(title: "Scale", slider: s.scaleSlider, valueLabel: s.scaleValueLabel)
-        )
+        addSettingsSection(to: subtitlesTabView, title: "Text style") { card in
+            card.addRow(SettingsRowFactory.valueRow(title: "Font", control: s.fontFamilyLabel))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Size",
+                slider: s.fontSizeSlider,
+                valueLabel: s.fontSizeValueLabel
+            ))
+            card.addRow(SettingsRowFactory.valueRow(title: "Color", control: s.fontColorWell))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Border",
+                slider: s.borderWidthSlider,
+                valueLabel: s.borderWidthValueLabel
+            ))
+            card.addRow(SettingsRowFactory.valueRow(title: "Border color", control: s.borderColorWell))
+            card.addRow(SettingsRowFactory.toggleRow(title: "Background", control: s.backgroundEnabledCheckbox))
+            card.addFinalRow(SettingsRowFactory.valueRow(title: "Background color", control: s.backgroundColorWell))
+        }
 
-        subtitlesTabView.addArrangedSubview(makeSettingsSectionHeader("Text style"))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSliderRow(title: "Size", slider: s.fontSizeSlider, valueLabel: s.fontSizeValueLabel)
-        )
-        subtitlesTabView.addArrangedSubview(makeSettingsColorRow(title: "Color", well: s.fontColorWell))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsSliderRow(title: "Border", slider: s.borderWidthSlider, valueLabel: s.borderWidthValueLabel)
-        )
-        subtitlesTabView.addArrangedSubview(makeSettingsColorRow(title: "Border color", well: s.borderColorWell))
-        subtitlesTabView.addArrangedSubview(
-            makeSettingsCheckboxRow(title: "Background", checkbox: s.backgroundEnabledCheckbox)
-        )
-        subtitlesTabView.addArrangedSubview(makeSettingsColorRow(title: "Background color", well: s.backgroundColorWell))
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.distribution = .equalCentering
+        s.resetAppearanceButton.target = self
+        s.resetAppearanceButton.action = #selector(resetSubtitleAppearancePressed)
+        footer.addArrangedSubview(s.resetAppearanceButton)
+        subtitlesTabView.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalTo: subtitlesTabView.widthAnchor).isActive = true
 
         s.primaryEnabledSwitch.target = self
         s.primaryEnabledSwitch.action = #selector(primarySubtitlesEnabledChanged)
@@ -3443,15 +3471,85 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         s.borderWidthSlider.action = #selector(subtitleAppearanceChanged)
         s.backgroundEnabledCheckbox.target = self
         s.backgroundEnabledCheckbox.action = #selector(subtitleAppearanceChanged)
-        s.fontColorWell.target = self
-        s.fontColorWell.action = #selector(subtitleAppearanceChanged)
-        s.borderColorWell.target = self
-        s.borderColorWell.action = #selector(subtitleAppearanceChanged)
-        s.backgroundColorWell.target = self
-        s.backgroundColorWell.action = #selector(subtitleAppearanceChanged)
+
+        let appearanceHandler: () -> Void = { [weak self] in
+            self?.subtitleAppearanceChanged()
+        }
+        for well in [s.fontColorWell, s.borderColorWell, s.backgroundColorWell] {
+            well.interactionDelegate = self
+            well.onColorChanged = appearanceHandler
+        }
 
         s.loadAppearanceFromStore()
         updateSubtitleControlsAvailability()
+    }
+
+    private func makePlaybackSpeedSectionRow() -> NSView {
+        let column = NSStackView()
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 8
+        column.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.distribution = .fill
+        header.spacing = 8
+        let title = NSTextField(labelWithString: "Speed")
+        title.font = .systemFont(ofSize: 13)
+        title.textColor = .labelColor
+        playbackSpeedValueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        playbackSpeedValueLabel.textColor = .secondaryLabelColor
+        playbackSpeedValueLabel.alignment = .right
+        header.addArrangedSubview(title)
+        header.addArrangedSubview(playbackSpeedValueLabel)
+
+        let controls = NSStackView()
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.distribution = .fill
+        controls.spacing = 8
+        playbackSpeedSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        controls.addArrangedSubview(playbackSpeedStepDownButton)
+        controls.addArrangedSubview(playbackSpeedSlider)
+        controls.addArrangedSubview(playbackSpeedStepUpButton)
+
+        column.addArrangedSubview(header)
+        column.addArrangedSubview(controls)
+        controls.leadingAnchor.constraint(equalTo: column.leadingAnchor).isActive = true
+        controls.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
+        return SettingsRowFactory.fullWidthRow(column)
+    }
+
+    private func addSettingsSection(
+        to stack: NSStackView,
+        title: String,
+        isFirst: Bool = false,
+        configure: (SettingsSectionCard) -> Void
+    ) {
+        let block = SettingsSectionBuilder.sectionBlock(title: title, isFirst: isFirst, configure: configure)
+        stack.addArrangedSubview(block)
+        block.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func makeSettingsSubtitleTrackBlock(
+        title: String,
+        toggle: CompactTealToggle,
+        popUp: NSPopUpButton
+    ) -> NSView {
+        toggle.setAccessibilityLabel("\(title) subtitles")
+        let column = NSStackView()
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 10
+        column.translatesAutoresizingMaskIntoConstraints = false
+        column.addArrangedSubview(SettingsRowFactory.toggleRow(title: title, control: toggle))
+        popUp.translatesAutoresizingMaskIntoConstraints = false
+        column.addArrangedSubview(popUp)
+        popUp.leadingAnchor.constraint(equalTo: column.leadingAnchor).isActive = true
+        popUp.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
+        return SettingsRowFactory.fullWidthRow(column)
     }
 
     private func makeSettingsSubtitleTrackRow(
@@ -3840,19 +3938,58 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateSubtitleControlsAvailability() {
         let extended = mpvBackendActive && mpvPlaybackStarted
-        subtitlesSettings.setExtendedControlsEnabled(extended)
-        subtitlesSettings.secondaryEnabledSwitch.isEnabled = extended && !cachedSubtitleTracks.isEmpty
-        subtitlesSettings.secondaryTrackPopUp.isEnabled = extended && secondarySubtitlesEnabled && !cachedSubtitleTracks.isEmpty
+        let nativeItem = nativeSubtitlePlayerItem()
+        let nativeActive = activeMediaKind == .video && !mpvBackendActive && nativeItem != nil
+        let canEditAppearance = activeMediaKind == .video && (extended || nativeActive)
+
+        subtitlesSettings.setAppearanceControlsEnabled(canEditAppearance, delayEnabled: extended)
+        subtitlesSettings.setMpvExclusiveControlsEnabled(extended)
+        subtitlesSettings.updateExtendedHint(extendedActive: extended, nativePlayback: nativeActive)
+
         subtitlesSettings.primaryEnabledSwitch.isEnabled = !cachedSubtitleTracks.isEmpty
         subtitlesSettings.primaryTrackPopUp.isEnabled = primarySubtitlesEnabled && !cachedSubtitleTracks.isEmpty
-        subtitlesSettings.loadExternalButton.isEnabled = extended
+        subtitlesSettings.secondaryEnabledSwitch.isEnabled = extended && !cachedSubtitleTracks.isEmpty
+        subtitlesSettings.secondaryTrackPopUp.isEnabled = extended && secondarySubtitlesEnabled && !cachedSubtitleTracks.isEmpty
         updateCompanionSubtitlesUI()
+        updatePlaybackSubtitleToggle()
     }
 
     func applySubtitleAppearanceToActiveMpv() {
-        guard mpvBackendActive, mpvPlaybackStarted else { return }
         subtitlesSettings.saveAppearanceToStore()
-        mpvController.applySubtitleAppearance(from: SettingsStore.shared)
+        if mpvBackendActive, mpvPlaybackStarted {
+            mpvController.applySubtitleAppearance(from: SettingsStore.shared)
+        } else {
+            syncNativeSubtitleOverlay()
+        }
+    }
+
+    @MainActor
+    private func syncNativeSubtitleOverlay() {
+        guard !mpvBackendActive else { return }
+        let store = SettingsStore.shared
+        guard primarySubtitlesEnabled, let item = nativeSubtitlePlayerItem() else {
+            nativeSubtitleOverlay.sync(item: nil, enabled: false, store: store)
+            return
+        }
+        nativeSubtitleOverlay.sync(item: item, enabled: true, store: store)
+    }
+
+    private func updatePlaybackSubtitleToggle() {
+        let show = activeMediaKind == .video
+        playbackSubtitleToggle.isHidden = !show
+        playbackSubtitleToggle.isEnabled = show && !cachedSubtitleTracks.isEmpty
+        playbackSubtitleToggle.subtitlesActive = primarySubtitlesEnabled
+        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.accessoryIconTintColor
+        let state = primarySubtitlesEnabled ? "on" : "off"
+        playbackSubtitleToggle.setAccessibilityLabel("Subtitles \(state)")
+        playbackSubtitleToggle.toolTip = primarySubtitlesEnabled ? "Turn subtitles off" : "Turn subtitles on"
+    }
+
+    @objc private func playbackSubtitleTogglePressed() {
+        guard activeMediaKind == .video, !cachedSubtitleTracks.isEmpty else { return }
+        let enable = !primarySubtitlesEnabled
+        subtitlesSettings.primaryEnabledSwitch.applySwitchState(enable)
+        primarySubtitlesEnabledChanged()
     }
 
     @MainActor
@@ -3888,6 +4025,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         } else {
             _ = await NativeSubtitleSelection.disableSubtitles(on: item)
         }
+        syncNativeSubtitleOverlay()
     }
 
     private func nudgeNativeSubtitleDisplay() {
@@ -3965,6 +4103,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard isEnabled else {
             await applyPrimarySubtitleTrack(nil)
             updateSubtitleControlsAvailability()
+            syncNativeSubtitleOverlay()
             return
         }
 
@@ -4042,7 +4181,32 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         Task { await refreshSubtitleSettings() }
     }
 
+    @objc private func resetSubtitleAppearancePressed() {
+        suppressSubtitleAppearanceCallback = true
+        SettingsStore.shared.resetSubtitleAppearanceToDefaults()
+        subtitlesSettings.applyDefaultsToControls()
+        subtitlesSettings.saveAppearanceToStore()
+        subtitlesSettings.updateValueLabels()
+        suppressSubtitleAppearanceCallback = false
+
+        applySubtitleAppearanceToActiveMpv()
+        Task { @MainActor in
+            await self.refreshPrimarySubtitleAfterAppearanceReset()
+        }
+    }
+
+    /// Re-select the active track so native subs recover after appearance changes.
+    @MainActor
+    private func refreshPrimarySubtitleAfterAppearanceReset() async {
+        guard !mpvBackendActive, primarySubtitlesEnabled, !cachedSubtitleTracks.isEmpty else { return }
+        let popUpIndex = subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem
+        let trackIndex = popUpIndex > 0 ? popUpIndex - 1 : 0
+        guard trackIndex < cachedSubtitleTracks.count else { return }
+        await applyPrimarySubtitleTrack(cachedSubtitleTracks[trackIndex])
+    }
+
     @objc private func subtitleAppearanceChanged() {
+        guard !suppressSubtitleAppearanceCallback else { return }
         subtitlesSettings.updateValueLabels()
         subtitlesSettings.saveAppearanceToStore()
         applySubtitleAppearanceToActiveMpv()
@@ -4802,13 +4966,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func shouldKeepSettingsSheetOpen(for event: NSEvent) -> Bool {
+        if suppressSettingsDismissForColorPicker { return true }
         let pointInView = view.convert(event.locationInWindow, from: nil)
         if rightSettingsSheet.frame.contains(pointInView) { return true }
         if settingsButton.frame.contains(pointInView) || imageSettingsButton.frame.contains(pointInView) {
             return true
         }
         if isTransientMenuWindow(event.window) { return true }
+        if isColorPickerAuxiliaryWindow(event.window) { return true }
         return false
+    }
+
+    private func isColorPickerAuxiliaryWindow(_ window: NSWindow?) -> Bool {
+        guard let window, window !== view.window else { return false }
+        let name = String(describing: type(of: window)).lowercased()
+        return name.contains("popover") || name.contains("colorpanel") || name.contains("colorpicker")
     }
 
     private func installOutsideClickMonitor() {
@@ -5429,6 +5601,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlaybackSpeedTransportLabels()
         updateQueueTransportButtons()
 
+        playbackCenterClusterStack.addArrangedSubview(playbackSubtitleToggle)
+        MusicStylePlaybackBar.configureSubtitleToggleButton(playbackSubtitleToggle)
+        playbackSubtitleToggle.target = self
+        playbackSubtitleToggle.action = #selector(playbackSubtitleTogglePressed)
         playbackCenterClusterStack.addArrangedSubview(libraryButton)
         playbackCenterClusterStack.addArrangedSubview(transportClusterStack)
         playbackCenterClusterStack.addArrangedSubview(playbackAccessoryCluster)
@@ -5893,6 +6069,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc func imageFit() {
         imageSurfaceView.resetZoom()
+    }
+}
+
+extension PlayerViewController: SettingsColorWellInteractionDelegate {
+    func colorWellDidBeginInteraction(_ colorWell: SettingsColorWell) {
+        suppressSettingsDismissForColorPicker = true
+    }
+
+    func colorWellDidEndInteraction(_ colorWell: SettingsColorWell) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.suppressSettingsDismissForColorPicker = false
+        }
     }
 }
 
