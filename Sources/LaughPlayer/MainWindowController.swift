@@ -93,15 +93,21 @@ final class MainWindowController: NSWindowController {
     }
 
     func openVideoPanel() {
+        guard let window else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = true
         panel.allowedContentTypes = VideoAssetLoader.openPanelContentTypes()
-        if panel.runModal() == .OK, let url = panel.url {
-            playerViewController.loadVideo(url: url)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.playerViewController.loadVideo(url: url)
         }
+    }
+
+    func openMediaURLs(_ urls: [URL]) {
+        playerViewController.openMediaFiles(urls)
     }
 
     func toggleFullScreen() {
@@ -122,13 +128,15 @@ final class MainWindowController: NSWindowController {
     }
 
     func openImagePanel() {
+        guard let window else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = MediaKindDetector.openPanelImageContentTypes()
-        if panel.runModal() == .OK, let url = panel.url {
-            playerViewController.loadImage(url: url)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.playerViewController.loadImage(url: url)
         }
     }
 

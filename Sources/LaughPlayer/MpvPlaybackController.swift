@@ -88,19 +88,20 @@ final class MpvPlaybackController: @unchecked Sendable {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: executable)
             var arguments = [
+                "--no-config",
                 "--no-terminal",
                 "--keep-open=no",
                 "--force-window=no",
+                "--idle",
                 "--hwdec=auto",
                 "--vo=gpu",
                 "--pause",
                 "--sub-auto=no",
                 "--input-ipc-server=\(socket)",
-                "--wid=\(wid)",
-                url.path
+                "--wid=\(wid)"
             ]
             if let fontDir = SubtitleFont.bundledFontsDirectoryURL?.path {
-                arguments.insert("--sub-fonts-dir=\(fontDir)", at: arguments.count - 1)
+                arguments.append("--sub-fonts-dir=\(fontDir)")
             }
             proc.arguments = arguments
             proc.standardOutput = FileHandle.nullDevice
@@ -129,6 +130,7 @@ final class MpvPlaybackController: @unchecked Sendable {
             }
 
             self.observePropertiesUnlocked()
+            self.sendCommandUnlocked(["loadfile", url.path, "replace"], reply: false)
             self.sendCommandUnlocked(["set_property", "pause", true], reply: false)
 
             let readyDeadline = CFAbsoluteTimeGetCurrent() + 4

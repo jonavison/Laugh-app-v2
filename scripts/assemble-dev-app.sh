@@ -77,6 +77,26 @@ cat > "${CONTENTS}/Info.plist" <<'EOF'
   <false/>
   <key>LSUIElement</key>
   <false/>
+  <key>LSMultipleInstancesProhibited</key>
+  <true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Video</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.movie</string>
+        <string>public.video</string>
+        <string>public.mpeg-4</string>
+        <string>com.apple.quicktime-movie</string>
+      </array>
+    </dict>
+  </array>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>

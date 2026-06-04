@@ -41,9 +41,9 @@ launch_dev_app() {
   echo "Launching ${APP_DIR}"
   if [[ "${wait_for_quit}" == "true" ]]; then
     echo "Close the LaughPlayer window to return to this terminal."
-    open -n -W "${APP_DIR}"
+    open -W "${APP_DIR}"
   else
-    open -n "${APP_DIR}"
+    open "${APP_DIR}"
     echo "LaughPlayer is running in the background (Dock). Use killall LaughPlayer to stop."
   fi
 }
@@ -62,7 +62,7 @@ if [[ "${WATCH_MODE}" == "true" ]]; then
     killall LaughPlayer 2>/dev/null || true
     sleep 0.2
     ./scripts/assemble-dev-app.sh debug
-    open -n "${APP_DIR}"
+    open "${APP_DIR}"
   done
 else
   launch_dev_app true

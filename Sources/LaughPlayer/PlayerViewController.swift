@@ -709,6 +709,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         raisePlaybackChromeToFront()
     }
 
+    func openMediaFiles(_ urls: [URL]) {
+        _ = handleDroppedURLs(urls, queueOnly: false)
+    }
+
     func loadVideo(url: URL, replaceCurrent: Bool = true, startAt: CMTime? = nil, forceDirectMpv: Bool = false) {
         pendingVideoLoadWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -873,6 +877,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     /// Show playback chrome and animated seek bar immediately while remux/decode prepares.
     private func enterInstantPlaybackPrepareUI(for url: URL) {
         playbackPrepareActive = true
+        cancelEdgePanelHoverTimers()
+        hideSettingsSheet()
         hideCompatibilityFailure()
         showVideoChrome()
         currentTimeLabel.stringValue = "···"
@@ -938,31 +944,42 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         RecentlyViewedStore.shared.record(url: sourceURL, kind: .video)
         disconnectPlayerFromVideoSurfaces()
         playerSurfaceView.setMpvEmbeddingActive(true)
+
         DispatchQueue.main.async { [weak self] in
-            self?.view.layoutSubtreeIfNeeded()
-        }
-
-        let wid = playerSurfaceView.mpvEmbeddingWindowID
-        guard wid > 0 else {
-            print("[DEBUG-mpv] embedding wid unavailable; falling back to remux")
-            mpvBackendActive = false
-            playerSurfaceView.setMpvEmbeddingActive(false)
-            startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
-            return
-        }
-
-        wireMpvCallbacks(generation: generation, sourceURL: sourceURL)
-
-        mpvController.load(url: sourceURL, wid: wid) { [weak self] result in
             guard let self, generation == self.videoLoadGeneration else { return }
-            switch result {
-            case .success:
-                self.leavePlaybackPrepareUI()
-                self.finishMpvPlaybackStart(sourceURL: sourceURL, generation: generation)
-            case .failed(let message):
-                print("[DEBUG-mpv] load failed: \(message); falling back to remux")
-                self.stopMpvBackend()
+            self.view.layoutSubtreeIfNeeded()
+            guard self.playerSurfaceView.window != nil,
+                  self.playerSurfaceView.bounds.width > 1,
+                  self.playerSurfaceView.bounds.height > 1 else {
+                print("[DEBUG-mpv] embedding view not ready; falling back to remux")
+                self.mpvBackendActive = false
+                self.playerSurfaceView.setMpvEmbeddingActive(false)
                 self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
+                return
+            }
+
+            let wid = self.playerSurfaceView.mpvEmbeddingWindowID
+            guard wid > 0 else {
+                print("[DEBUG-mpv] embedding wid unavailable; falling back to remux")
+                self.mpvBackendActive = false
+                self.playerSurfaceView.setMpvEmbeddingActive(false)
+                self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
+                return
+            }
+
+            self.wireMpvCallbacks(generation: generation, sourceURL: sourceURL)
+
+            self.mpvController.load(url: sourceURL, wid: wid) { [weak self] result in
+                guard let self, generation == self.videoLoadGeneration else { return }
+                switch result {
+                case .success:
+                    self.leavePlaybackPrepareUI()
+                    self.finishMpvPlaybackStart(sourceURL: sourceURL, generation: generation)
+                case .failed(let message):
+                    print("[DEBUG-mpv] load failed: \(message); falling back to remux")
+                    self.stopMpvBackend()
+                    self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
+                }
             }
         }
     }

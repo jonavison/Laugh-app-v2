@@ -3,6 +3,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
     private var preferencesWindowController: PreferencesWindowController?
+    private var pendingOpenFileURLs: [URL] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaughTheme.activate()
@@ -24,8 +25,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             LaunchLog.emit("applicationDidFinishLaunching: bringMainWindowToFront")
             self?.bringMainWindowToFront()
+            self?.consumePendingOpenFileURLs()
         }
         LaunchLog.emit("applicationDidFinishLaunching: end")
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        guard !urls.isEmpty else {
+            sender.reply(toOpenOrPrint: .success)
+            return
+        }
+        LaunchLog.emit("application(openFiles): count=\(urls.count) first=\(urls[0].lastPathComponent)")
+        if windowController?.window?.contentViewController != nil {
+            openMediaURLs(urls)
+        } else {
+            pendingOpenFileURLs.append(contentsOf: urls)
+        }
+        bringMainWindowToFront()
+        sender.reply(toOpenOrPrint: .success)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -41,6 +59,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bringMainWindowToFront()
         return true
+    }
+
+    private func consumePendingOpenFileURLs() {
+        guard !pendingOpenFileURLs.isEmpty else { return }
+        let urls = pendingOpenFileURLs
+        pendingOpenFileURLs.removeAll()
+        openMediaURLs(urls)
+    }
+
+    private func openMediaURLs(_ urls: [URL]) {
+        windowController?.openMediaURLs(urls)
     }
 
     private func bringMainWindowToFront() {
