@@ -8,6 +8,8 @@ struct SubtitleTrackInfo: Equatable {
         case avFoundation(optionIndex: Int)
         case mpv(trackID: Int)
         case externalMpv(trackID: Int, path: String)
+        /// Sidecar on disk — playable via extended (DirectMpv) playback.
+        case companionSidecar(path: String)
     }
 
     let backendID: BackendID
@@ -28,6 +30,9 @@ struct SubtitleTrackInfo: Equatable {
             parts.append(codec)
         }
         if case .externalMpv(_, let path) = backendID {
+            parts.append((path as NSString).lastPathComponent)
+        }
+        if case .companionSidecar(let path) = backendID {
             parts.append((path as NSString).lastPathComponent)
         }
         return parts.joined(separator: " · ")

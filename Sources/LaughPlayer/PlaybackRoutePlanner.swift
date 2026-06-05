@@ -53,6 +53,10 @@ enum PlaybackRoutePlanner {
         if let codecTag {
             let tag = normalizeFourCC(codecTag)
             if remuxVideoCodecTags.contains(tag) {
+                let hasSidecars = !CompanionSubtitleDiscovery.discover(for: url).isEmpty
+                if ["mp4", "m4v", "mov"].contains(ext), hasSidecars, mpvAvailable {
+                    return .directMpv(reason: "codec.\(tag).sidecars")
+                }
                 // MP4/MOV: remux for AVFoundation instead of mpv — mpv briefly opens its
                 // own titled window on macOS before embed/fallback, which looks like a bug.
                 if ["mp4", "m4v", "mov"].contains(ext), remuxAvailable {

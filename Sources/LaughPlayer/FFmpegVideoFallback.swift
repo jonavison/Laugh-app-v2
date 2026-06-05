@@ -205,6 +205,26 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Disk/cache lookup only — never spawns ffmpeg (safe on the main thread).
+    static func knownCachedPlayableURL(for inputURL: URL) -> URL? {
+        if let identity = sourceIdentity(for: inputURL) {
+            let cachedURL: URL? = onProcessQueue {
+                remuxCache[identity]?.outputURL
+            }
+            if let cachedURL,
+               FileManager.default.fileExists(atPath: cachedURL.path),
+               isOutputReadyForPlayback(at: cachedURL) {
+                return cachedURL
+            }
+        }
+        let outputURL = makeOutputURL(for: inputURL)
+        guard FileManager.default.fileExists(atPath: outputURL.path),
+              isOutputReadyForPlayback(at: outputURL) else {
+            return nil
+        }
+        return outputURL
+    }
+
     static func isFullRemuxReady(at fullURL: URL) -> Bool {
         isOutputReadyForPlayback(at: fullURL)
     }

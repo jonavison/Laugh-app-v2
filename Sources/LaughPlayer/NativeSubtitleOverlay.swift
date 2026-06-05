@@ -28,6 +28,7 @@ final class NativeSubtitleOverlay: NSObject {
     private var displaysSubtitles = false
     /// Only hide AVPlayer's renderer after the overlay has received subtitle text.
     private var suppressesPlayerSubtitleRendering = false
+    private var sidecarCues: [SidecarSubtitleCue] = []
 
     func install(in host: NSView) {
         guard hostView !== host else { return }
@@ -78,6 +79,7 @@ final class NativeSubtitleOverlay: NSObject {
     func setSuppressedForAlternateBackend(_ suppressed: Bool) {
         if suppressed {
             detach()
+            clearSidecar()
             containerView.isHidden = true
         } else {
             suppressesPlayerSubtitleRendering = false
@@ -85,11 +87,45 @@ final class NativeSubtitleOverlay: NSObject {
         }
     }
 
+    var usesSidecarPlayback: Bool { !sidecarCues.isEmpty }
+
+    func loadSidecar(url: URL) {
+        sidecarCues = SidecarSubtitleLoader.load(from: url)
+        beginStyledCapture()
+    }
+
+    func clearSidecar() {
+        sidecarCues = []
+        clearDisplayedText()
+    }
+
+    func updateSidecar(at timeSec: Double, enabled: Bool, store: SettingsStore) {
+        displaysSubtitles = enabled
+        guard enabled, !sidecarCues.isEmpty else {
+            if sidecarCues.isEmpty {
+                clearDisplayedText()
+            }
+            return
+        }
+        let adjusted = timeSec + store.subtitleDelaySec
+        let text = SidecarSubtitleLoader.text(at: adjusted, in: sidecarCues)
+        textField.stringValue = text
+        applyVisualStyle(from: store)
+        containerView.isHidden = text.isEmpty
+        raiseAboveVideo()
+    }
+
     func sync(item: AVPlayerItem?, enabled: Bool, store: SettingsStore) {
         displaysSubtitles = enabled
         guard enabled else {
             clearDisplayedText()
             legibleOutput.suppressesPlayerRendering = true
+            return
+        }
+        if !sidecarCues.isEmpty {
+            legibleOutput.suppressesPlayerRendering = true
+            raiseAboveVideo()
+            refreshAppearance(from: store)
             return
         }
         guard let item else {
@@ -164,6 +200,7 @@ final class NativeSubtitleOverlay: NSObject {
     func detach() {
         displaysSubtitles = false
         clearDisplayedText()
+        clearSidecar()
         suppressesPlayerSubtitleRendering = false
         legibleOutput.suppressesPlayerRendering = false
         if let item = attachedItem {
@@ -229,7 +266,7 @@ extension NativeSubtitleOverlay: AVPlayerItemLegibleOutputPushDelegate {
     ) {
         let text = strings.map(\.string).filter { !$0.isEmpty }.joined(separator: "\n")
         Task { @MainActor in
-            guard output === self.legibleOutput, self.displaysSubtitles else { return }
+            guard output === self.legibleOutput, self.displaysSubtitles, self.sidecarCues.isEmpty else { return }
             if !text.isEmpty {
                 self.beginStyledCapture()
             }

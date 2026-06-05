@@ -209,7 +209,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## CompanionSubtitleDiscovery
 
-`CompanionSubtitleDiscovery` is how LaughPlayer finds **CompanionSubtitleFile**s for the open **VideoMedia**: case-insensitive basename match; extensions `.srt`, `.vtt`, `.ass`, `.ssa`; optional language tag (two–three letters or common names such as English) and optional `forced` before the extension. Search locations are the media folder, a sibling flat `Subs/` or `subtitles/` folder, and `Subs/<basename>/` or `subtitles/<basename>/` (Plex-style per-title folder)—not a recursive library-wide scan. All matches are attached; the user chooses among them in **SubtitleTrackPicker**.
+`CompanionSubtitleDiscovery` is how LaughPlayer finds **CompanionSubtitleFile**s for the open **VideoMedia**: case-insensitive basename match; extensions `.srt`, `.vtt`, `.ass`, `.ssa`; optional language tag (two–three letters or common names such as English) and optional `forced` before the extension. Search locations are the media folder, a sibling flat `Subs/` or `subtitles/` folder, and `Subs/<basename>/` or `subtitles/<basename>/` (Plex-style per-title folder)—not a recursive library-wide scan. Inside a per-title folder only that episode’s files are considered (any subtitle extension; language parsed from names like `2_English.srt`). A flat `Subs/` or `subtitles/` folder beside the video also accepts loose names (e.g. `3_English.srt` for a single movie). The media folder itself still requires basename match so unrelated sidecars are not picked up. All matches are attached; the user chooses among them in **SubtitleTrackPicker**.
 
 ## ExtendedPlaybackForSubtitles
 

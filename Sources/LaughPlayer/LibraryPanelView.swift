@@ -293,7 +293,7 @@ final class LibrarySidebarView: NSVisualEffectView, NSTableViewDelegate, NSTable
         switch sidebarRow {
         case .recentItem(let file):
             let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
-            cell.configure(title: file.url.lastPathComponent, style: .menuSubButton, toolTip: file.url.path)
+            cell.configure(title: file.url.lastPathComponent, style: .menuSubButton, toolTip: "")
             return cell
         case .recentHeader:
             let cell = tableView.makeView(withIdentifier: SidebarListCell.reuseID, owner: self) as? SidebarListCell ?? SidebarListCell()
@@ -452,7 +452,7 @@ private final class SidebarListCell: NSTableCellView {
     func configure(title: String, style: Style, toolTip: String, symbol: String? = nil) {
         nameLabel.stringValue = title
         self.style = style
-        self.toolTip = toolTip
+        self.toolTip = toolTip.isEmpty ? nil : toolTip
         applySectionIcon(symbol: symbol)
         applyRowMetrics()
         applyTextAppearance()
@@ -1461,7 +1461,7 @@ private final class LibraryRecentListCell: NSTableCellView {
 
     func configure(file: LibraryMediaFile) {
         nameLabel.stringValue = file.url.lastPathComponent
-        toolTip = file.url.path
+        toolTip = nil
         let symbol = file.kind == .video ? "film" : "photo"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
             iconView.image = image.withSymbolConfiguration(LaughTheme.Sidebar.MenuButton.symbolConfiguration())

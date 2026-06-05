@@ -100,6 +100,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var primarySubtitlesEnabled = false
     private var secondarySubtitlesEnabled = false
     private var lastExternalSubtitlePath: String?
+    private var pendingCompanionSubtitlePath: String?
+    private var userDisabledSubtitlesForSourcePath: String?
+    private var autoExtendedPlaybackAttemptedForSourcePath: String?
     private var cachedDiscoveredCompanions: [DiscoveredCompanionSubtitle] = []
     private let subtitlesTabView = NSStackView()
     private let nativeSubtitleOverlay = NativeSubtitleOverlay()
@@ -766,6 +769,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             updateSeekBarPreparingState()
             print("[DEBUG-fallback] invalidated due to switch to \(url.lastPathComponent)")
         }
+        setPrimarySubtitlesEnabled(false)
+        secondarySubtitlesEnabled = false
+        resetNativeSubtitlePresentationForSourceChange()
         if mpvBackendActive {
             stopMpvBackend()
         }
@@ -789,9 +795,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastPlaybackStartedItemID = nil
         committedPlayerItemID = nil
         let previousMediaURL = currentMediaURL
+        if previousMediaURL?.standardizedFileURL.path != url.standardizedFileURL.path {
+            userDisabledSubtitlesForSourcePath = nil
+            autoExtendedPlaybackAttemptedForSourcePath = nil
+        }
         currentMediaURL = url
+        if isVideoFileURL(url) {
+            activeMediaKind = .video
+        }
         if !isGeneratedFallbackURL(url) {
             playbackSourceURL = url
+            cachedDiscoveredCompanions = CompanionSubtitleDiscovery.discover(for: url)
+            syncSubtitleTrackPopUpsToCache()
         }
         lastVideoCodecFourCC = nil
         lastVideoSize = nil
@@ -823,6 +838,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if likelyNeedsCompatibilityRemux(url) {
             print("[DEBUG-route] fast remux path=\(url.path)")
             startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
+            return
+        }
+
+        if !cachedDiscoveredCompanions.isEmpty,
+           MpvPlaybackController.isAvailable(),
+           ["mp4", "m4v", "mov"].contains(url.pathExtension.lowercased()) {
+            print("[DEBUG-route] sidecars present — direct mpv path=\(url.path)")
+            startDirectMpvPlayback(sourceURL: url, generation: generation)
             return
         }
 
@@ -891,16 +914,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             RecentlyViewedStore.shared.record(url: url, kind: .video)
         }
 
+        let sourceURL = url.standardizedFileURL
         Task.detached(priority: .utility) { [weak self] in
             let sourceDuration = FFmpegVideoFallback.probeSourceDurationSec(for: url)
-            await MainActor.run {
-                guard url.standardizedFileURL == self?.currentMediaURL?.standardizedFileURL else { return }
-                self?.activePreviewSourceDurationSec = sourceDuration
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard sourceURL == self.currentMediaURL?.standardizedFileURL else { return }
+                self.activePreviewSourceDurationSec = sourceDuration
                 if let sourceDuration, sourceDuration > 0 {
-                    self?.seekSlider.maxValue = sourceDuration
-                    self?.totalTimeLabel.stringValue = self?.formatTime(sourceDuration) ?? "--:--"
+                    self.seekSlider.maxValue = sourceDuration
+                    self.totalTimeLabel.stringValue = self.formatTime(sourceDuration)
                 }
-                self?.updateSeekBarPreparingState()
+                self.updateSeekBarPreparingState()
             }
         }
     }
@@ -954,6 +979,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 print("[DEBUG-mpv] embedding view not ready; falling back to remux")
                 self.mpvBackendActive = false
                 self.playerSurfaceView.setMpvEmbeddingActive(false)
+                self.autoExtendedPlaybackAttemptedForSourcePath = nil
                 self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
                 return
             }
@@ -963,6 +989,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 print("[DEBUG-mpv] embedding wid unavailable; falling back to remux")
                 self.mpvBackendActive = false
                 self.playerSurfaceView.setMpvEmbeddingActive(false)
+                self.autoExtendedPlaybackAttemptedForSourcePath = nil
                 self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
                 return
             }
@@ -978,6 +1005,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 case .failed(let message):
                     print("[DEBUG-mpv] load failed: \(message); falling back to remux")
                     self.stopMpvBackend()
+                    self.autoExtendedPlaybackAttemptedForSourcePath = nil
                     self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
                 }
             }
@@ -1043,9 +1071,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.refreshMpvDebugMetadata()
             self.applyPlaybackEQToActiveMpv()
             Task { @MainActor in
-                await self.applySubtitleAppearanceToPlayback()
-            }
-            Task {
                 let companions = CompanionSubtitleDiscovery.discover(for: sourceURL)
                 let controller = self.mpvController
                 await Task.detached {
@@ -1053,6 +1078,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }.value
                 await self.refreshAudioTrackPicker()
                 await self.refreshSubtitleSettings()
+                await self.applyPendingCompanionSubtitleSelectionIfNeeded()
+                await self.applySubtitleAppearanceToPlayback()
             }
             print("[DEBUG-mpv] playback started path=\(sourceURL.path)")
         }
@@ -2229,20 +2256,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    private func raiseSettingsSheetAbovePlaybackChrome() {
-        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: controlsContainer)
-        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: imageControlsContainer)
-        view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: queueDropZone)
-        ensureSettingsTabRowsAboveContent()
-    }
-
     private func raisePlaybackChromeToFront() {
+        // Keep the playback bar above the settings sheet so queue/settings stay clickable while the panel is open.
+        view.addSubview(controlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
+        view.addSubview(imageControlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
+        view.addSubview(queueDropZone, positioned: .above, relativeTo: rightSettingsSheet)
         if !rightSettingsSheet.isHidden {
-            raiseSettingsSheetAbovePlaybackChrome()
-        } else {
-            view.addSubview(controlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
-            view.addSubview(imageControlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
-            view.addSubview(queueDropZone, positioned: .above, relativeTo: rightSettingsSheet)
+            ensureSettingsTabRowsAboveContent()
         }
         if libraryChromeInstalled {
             if !openButton.isHidden {
@@ -3332,9 +3352,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     /// Temp MP4 from **CompatibilityRemux** when FFmpeg already built one for this file.
     private func compatibilityRemuxURL(for source: URL?) -> URL? {
         guard let source else { return nil }
-        guard let cached = FFmpegVideoFallback.cachedPlayableURL(for: source),
-              cached.standardizedFileURL != source.standardizedFileURL,
-              FileManager.default.fileExists(atPath: cached.path) else {
+        let sourceNorm = source.standardizedFileURL
+        if let active = activePlaybackFileURL,
+           isGeneratedFallbackURL(active),
+           active.standardizedFileURL != sourceNorm,
+           FileManager.default.fileExists(atPath: active.path) {
+            return active
+        }
+        guard let cached = FFmpegVideoFallback.knownCachedPlayableURL(for: source),
+              cached.standardizedFileURL != sourceNorm else {
             return nil
         }
         return cached
@@ -3754,8 +3780,106 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return await Task.detached { controller.subtitleTracks() }.value
     }
 
+    private func mergeCompanionSubtitleTracks(with tracks: [SubtitleTrackInfo]) -> [SubtitleTrackInfo] {
+        let existingPaths = Set(tracks.compactMap { track -> String? in
+            switch track.backendID {
+            case .externalMpv(_, let path), .companionSidecar(let path):
+                return CompanionSubtitleDiscovery.normalizePath(path)
+            case .avFoundation, .mpv:
+                return nil
+            }
+        })
+        let companionsToAdd = cachedDiscoveredCompanions.filter {
+            !existingPaths.contains(CompanionSubtitleDiscovery.normalizePath($0.url.path))
+        }
+        var merged = tracks
+        if !companionsToAdd.isEmpty {
+            merged += CompanionSubtitleDiscovery.subtitleTracks(
+                from: companionsToAdd,
+                startingDisplayIndex: merged.count
+            )
+        }
+        return merged.filter { track in
+            guard case .companionSidecar(let path) = track.backendID else { return true }
+            let normalized = CompanionSubtitleDiscovery.normalizePath(path)
+            return !merged.contains { other in
+                guard case .externalMpv(_, let otherPath) = other.backendID else { return false }
+                return CompanionSubtitleDiscovery.normalizePath(otherPath) == normalized
+            }
+        }
+    }
+
+    private func resolvedPlayableSubtitleTrack(_ track: SubtitleTrackInfo) -> SubtitleTrackInfo {
+        guard case .companionSidecar(let path) = track.backendID else { return track }
+        let normalized = CompanionSubtitleDiscovery.normalizePath(path)
+        if let external = cachedSubtitleTracks.first(where: { candidate in
+            guard case .externalMpv(_, let candidatePath) = candidate.backendID else { return false }
+            return CompanionSubtitleDiscovery.normalizePath(candidatePath) == normalized
+        }) {
+            return external
+        }
+        return track
+    }
+
+    private func resolvedSubtitleTracksForUI() -> [SubtitleTrackInfo] {
+        if let sourceURL = playbackSourceURL ?? currentMediaURL {
+            cachedDiscoveredCompanions = CompanionSubtitleDiscovery.discover(for: sourceURL)
+        }
+        return mergeCompanionSubtitleTracks(with: cachedSubtitleTracks)
+    }
+
+    private func isSubtitlePlaybackReady() -> Bool {
+        (mpvBackendActive && mpvPlaybackStarted) || nativeSubtitlePlayerItem() != nil
+    }
+
     @MainActor
-    private func refreshSubtitleSettings() async {
+    private func setPrimarySubtitlesEnabled(_ enabled: Bool) {
+        primarySubtitlesEnabled = enabled
+        subtitlesSettings.primaryEnabledSwitch.applySwitchState(enabled)
+        updatePlaybackSubtitleToggle()
+    }
+
+    /// Turn on the first discovered track in settings UI unless the user turned subs off for this file.
+    @MainActor
+    private func applySubtitleUIDefaultIfNeeded(tracks: [SubtitleTrackInfo]) {
+        guard !tracks.isEmpty else { return }
+        guard !primarySubtitlesEnabled else { return }
+        let sourcePath = (playbackSourceURL ?? currentMediaURL)?.standardizedFileURL.path
+        guard let sourcePath else { return }
+        guard userDisabledSubtitlesForSourcePath != sourcePath else { return }
+        setPrimarySubtitlesEnabled(true)
+    }
+
+    @MainActor
+    private func syncSubtitleTrackPopUpsToCache(allowHeavyProbe: Bool = true) {
+        guard activeMediaKind == .video else {
+            cachedSubtitleTracks = []
+            populateSubtitleTrackPopUps(tracks: [], primarySelected: nil, secondarySelected: nil)
+            updateSubtitleControlsAvailability(allowHeavyProbe: false)
+            return
+        }
+        let displayTracks = resolvedSubtitleTracksForUI()
+        cachedSubtitleTracks = displayTracks
+        applySubtitleUIDefaultIfNeeded(tracks: displayTracks)
+        let primarySelected = primarySubtitlesEnabled ? displayTracks.first : nil
+        populateSubtitleTrackPopUps(
+            tracks: displayTracks,
+            primarySelected: primarySelected,
+            secondarySelected: nil
+        )
+        updateSubtitleControlsAvailability(allowHeavyProbe: allowHeavyProbe && displayTracks.isEmpty)
+    }
+
+    @MainActor
+    private func applyCachedSubtitleSettingsUI() {
+        syncSubtitleTrackPopUpsToCache()
+    }
+
+    @MainActor
+    private func refreshSubtitleSettings(
+        syncPlayback: Bool = true,
+        applyAppearance: Bool = true
+    ) async {
         guard activeMediaKind == .video else {
             populateSubtitleTrackPopUps(tracks: [], primarySelected: nil, secondarySelected: nil)
             updateSubtitleControlsAvailability()
@@ -3772,6 +3896,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         if mpvBackendActive, mpvPlaybackStarted {
             tracks = await fetchMpvSubtitleTracks()
+            if tracks.isEmpty, !cachedDiscoveredCompanions.isEmpty {
+                let controller = mpvController
+                let companionURLs = cachedDiscoveredCompanions.map(\.url)
+                await Task.detached {
+                    controller.prepareSubtitleTracks(companionURLs: companionURLs)
+                }.value
+                tracks = await fetchMpvSubtitleTracks()
+            }
             if let sourceURL {
                 tracks = tracks.map { CompanionSubtitleDiscovery.enrich($0, mediaURL: sourceURL) }
             }
@@ -3790,30 +3922,43 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
         }
 
-        cachedSubtitleTracks = tracks
-        let uiPrimaryOn = subtitlesSettings.primaryEnabledSwitch.isOn
+        let availableTracks = mergeCompanionSubtitleTracks(with: tracks)
+        cachedSubtitleTracks = availableTracks
         let uiSecondaryOn = subtitlesSettings.secondaryEnabledSwitch.isOn
-        if tracks.isEmpty {
-            primarySubtitlesEnabled = false
+        if availableTracks.isEmpty {
+            setPrimarySubtitlesEnabled(false)
             secondarySubtitlesEnabled = false
         } else {
-            primarySubtitlesEnabled = uiPrimaryOn
+            applySubtitleUIDefaultIfNeeded(tracks: availableTracks)
+            let sourcePath = (playbackSourceURL ?? currentMediaURL)?.standardizedFileURL.path
+            if let sourcePath, userDisabledSubtitlesForSourcePath == sourcePath {
+                setPrimarySubtitlesEnabled(false)
+            }
             secondarySubtitlesEnabled = mpvBackendActive && mpvPlaybackStarted
                 ? (await isSecondarySubtitlesEnabled() || uiSecondaryOn)
                 : false
         }
 
-        let primarySelected = primarySubtitlesEnabled ? await currentPrimarySubtitleTrack(in: tracks) : nil
-        let secondarySelected = secondarySubtitlesEnabled ? await currentSecondarySubtitleTrack(in: tracks) : nil
+        let primarySelected = primarySubtitlesEnabled
+            ? await currentPrimarySubtitleTrack(in: availableTracks) ?? availableTracks.first
+            : nil
+        let secondarySelected = secondarySubtitlesEnabled
+            ? await currentSecondarySubtitleTrack(in: availableTracks)
+            : nil
         populateSubtitleTrackPopUps(
-            tracks: tracks,
+            tracks: availableTracks,
             primarySelected: primarySelected,
             secondarySelected: secondarySelected
         )
         updateCompanionSubtitlesUI()
         updateSubtitleControlsAvailability()
-        await applySubtitleAppearanceToPlayback()
-        await syncSubtitleSelectionFromUI(tracks: tracks)
+        if applyAppearance {
+            await applySubtitleAppearanceToPlayback()
+        }
+        if syncPlayback, primarySubtitlesEnabled, isSubtitlePlaybackReady() {
+            await syncSubtitleSelectionFromUI(tracks: availableTracks)
+        }
+        updatePlaybackSubtitleToggle()
     }
 
     /// Active native item for subtitle track catalog / selection (matches what's playing, not the source MKV).
@@ -3847,7 +3992,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 track = tracks.first
             }
             if let track {
-                await applyPrimarySubtitleTrack(track)
+                await applyPrimarySubtitleTrack(resolvedPlayableSubtitleTrack(track))
             }
         } else if !mpvBackendActive {
             await applyPrimarySubtitleTrack(nil)
@@ -3870,7 +4015,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    private func updateCompanionSubtitlesUI() {
+    private func updateCompanionSubtitlesUI(allowHeavyProbe: Bool = true) {
         let s = subtitlesSettings
         var infoLines: [String] = []
 
@@ -3880,6 +4025,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         if cachedSubtitleTracks.isEmpty,
+           allowHeavyProbe,
            let sourceURL = playbackSourceURL ?? currentMediaURL {
             let embedded = FFmpegVideoFallback.probeEmbeddedSubtitleStreams(for: sourceURL)
             if !embedded.isEmpty {
@@ -3939,7 +4085,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         pendingResumePlayingAfterLoad = wasPlaying
-        primarySubtitlesEnabled = false
+        setPrimarySubtitlesEnabled(false)
         secondarySubtitlesEnabled = false
         performLoadVideo(
             url: source,
@@ -4050,7 +4196,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         s.primaryEnabledSwitch.applySwitchState(primarySubtitlesEnabled)
         s.secondaryEnabledSwitch.applySwitchState(secondarySubtitlesEnabled)
-        s.primaryTrackPopUp.isEnabled = primarySubtitlesEnabled && !tracks.isEmpty
+        s.primaryTrackPopUp.isEnabled = !tracks.isEmpty
         s.secondaryTrackPopUp.isEnabled = secondarySubtitlesEnabled && !tracks.isEmpty
 
         if let path = lastExternalSubtitlePath, !path.isEmpty {
@@ -4061,7 +4207,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         suppressSubtitlePopUpAction = false
     }
 
-    private func updateSubtitleControlsAvailability() {
+    private func updateSubtitleControlsAvailability(allowHeavyProbe: Bool = true) {
         let extended = mpvBackendActive && mpvPlaybackStarted
         let nativeActive = activeMediaKind == .video && !mpvBackendActive
             && (committedPlayerItemID != nil || nativeSubtitlePlayerItem() != nil)
@@ -4072,10 +4218,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subtitlesSettings.updateExtendedHint(extendedActive: extended, nativePlayback: nativeActive)
 
         subtitlesSettings.primaryEnabledSwitch.isEnabled = !cachedSubtitleTracks.isEmpty
-        subtitlesSettings.primaryTrackPopUp.isEnabled = primarySubtitlesEnabled && !cachedSubtitleTracks.isEmpty
+        subtitlesSettings.primaryTrackPopUp.isEnabled = !cachedSubtitleTracks.isEmpty
         subtitlesSettings.secondaryEnabledSwitch.isEnabled = extended && !cachedSubtitleTracks.isEmpty
         subtitlesSettings.secondaryTrackPopUp.isEnabled = extended && secondarySubtitlesEnabled && !cachedSubtitleTracks.isEmpty
-        updateCompanionSubtitlesUI()
+        updateCompanionSubtitlesUI(allowHeavyProbe: allowHeavyProbe)
         updatePlaybackSubtitleToggle()
     }
 
@@ -4107,11 +4253,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if primarySubtitlesEnabled {
             syncNativeSubtitleOverlay()
             nativeSubtitleOverlay.refreshAppearance(from: store, userInitiated: true)
+            if nativeSubtitleOverlay.usesSidecarPlayback, let currentSec = nativePlaybackTimeSec() {
+                nativeSubtitleOverlay.updateSidecar(at: currentSec, enabled: true, store: store)
+            }
         } else {
             syncNativeSubtitleOverlay()
             return
         }
 
+        guard !nativeSubtitleOverlay.usesSidecarPlayback else { return }
         guard let item = nativeSubtitlePlayerItem(), item.status == .readyToPlay else { return }
         if let committed = committedPlayerItemID, ObjectIdentifier(item) != committed { return }
 
@@ -4130,6 +4280,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
     }
 
+    @MainActor
+    private func resetNativeSubtitlePresentationForSourceChange() {
+        pendingCompanionSubtitlePath = nil
+        nativeSubtitleOverlay.clearSidecar()
+        nativeSubtitleOverlay.detach()
+    }
+
     private func updatePlaybackSubtitleToggle() {
         let show = activeMediaKind == .video
         playbackSubtitleToggle.isHidden = !show
@@ -4145,11 +4302,85 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard activeMediaKind == .video, !cachedSubtitleTracks.isEmpty else { return }
         let enable = !primarySubtitlesEnabled
         subtitlesSettings.primaryEnabledSwitch.applySwitchState(enable)
+        if !enable, let sourcePath = (playbackSourceURL ?? currentMediaURL)?.standardizedFileURL.path {
+            userDisabledSubtitlesForSourcePath = sourcePath
+        } else {
+            userDisabledSubtitlesForSourcePath = nil
+        }
         primarySubtitlesEnabledChanged()
+    }
+
+    private func hasNativePlayableSubtitleTracks() -> Bool {
+        cachedSubtitleTracks.contains { track in
+            if case .avFoundation = track.backendID { return true }
+            return false
+        }
+    }
+
+    @MainActor
+    private func applyPendingCompanionSubtitleSelectionIfNeeded() async {
+        guard let pendingPath = pendingCompanionSubtitlePath else { return }
+        pendingCompanionSubtitlePath = nil
+        let pendingNormalized = CompanionSubtitleDiscovery.normalizePath(pendingPath)
+        guard let index = cachedSubtitleTracks.firstIndex(where: { track in
+            switch track.backendID {
+            case .externalMpv(_, let path), .companionSidecar(let path):
+                return CompanionSubtitleDiscovery.normalizePath(path) == pendingNormalized
+            case .avFoundation, .mpv:
+                return false
+            }
+        }) else { return }
+
+        setPrimarySubtitlesEnabled(true)
+        suppressSubtitlePopUpAction = true
+        subtitlesSettings.primaryTrackPopUp.selectItem(at: index + 1)
+        suppressSubtitlePopUpAction = false
+        updateSubtitleControlsAvailability()
+        await applyPrimarySubtitleTrack(resolvedPlayableSubtitleTrack(cachedSubtitleTracks[index]))
     }
 
     @MainActor
     private func applyPrimarySubtitleTrack(_ track: SubtitleTrackInfo?) async {
+        if let track, case .companionSidecar(let path) = track.backendID {
+            if mpvBackendActive, mpvPlaybackStarted {
+                let url = URL(fileURLWithPath: path)
+                _ = await Task.detached { [mpvController] in
+                    mpvController.addExternalSubtitle(url: url, select: true)
+                }.value
+                await refreshSubtitleSettings(syncPlayback: false, applyAppearance: true)
+                if let refreshed = cachedSubtitleTracks.first(where: { candidate in
+                    guard case .externalMpv(_, let candidatePath) = candidate.backendID else { return false }
+                    return CompanionSubtitleDiscovery.normalizePath(candidatePath)
+                        == CompanionSubtitleDiscovery.normalizePath(path)
+                }) {
+                    await applyPrimarySubtitleTrack(refreshed)
+                }
+                return
+            }
+            if SidecarSubtitleLoader.isNativeRenderableSidecar(path) {
+                nativeSubtitleOverlay.loadSidecar(url: URL(fileURLWithPath: path))
+                syncNativeSubtitleOverlay()
+                if let currentSec = nativePlaybackTimeSec() {
+                    nativeSubtitleOverlay.updateSidecar(
+                        at: currentSec,
+                        enabled: true,
+                        store: SettingsStore.shared
+                    )
+                }
+                return
+            }
+            let sourcePath = (playbackSourceURL ?? currentMediaURL)?.standardizedFileURL.path
+            if let sourcePath, autoExtendedPlaybackAttemptedForSourcePath == sourcePath {
+                return
+            }
+            pendingCompanionSubtitlePath = path
+            setPrimarySubtitlesEnabled(false)
+            if let sourcePath {
+                autoExtendedPlaybackAttemptedForSourcePath = sourcePath
+            }
+            extendedPlaybackForSubtitlesPressed()
+            return
+        }
         if mpvBackendActive, mpvPlaybackStarted {
             if let track, case .mpv(let id) = track.backendID {
                 _ = await Task.detached { [mpvController] in
@@ -4164,6 +4395,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     mpvController.disableSubtitleTrack(secondary: false)
                 }.value
             }
+            await applySubtitleAppearanceToPlayback()
+            updatePlaybackSubtitleToggle()
             return
         }
         guard let item = nativeSubtitlePlayerItem() else { return }
@@ -4177,7 +4410,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let resumeRate = nativeSubtitleResumeRate()
 
         guard let track, primarySubtitlesEnabled else {
+            nativeSubtitleOverlay.clearSidecar()
             syncNativeSubtitleOverlay()
+            if let resumeRate {
+                player.playImmediately(atRate: resumeRate)
+            }
+            return
+        }
+
+        if case .companionSidecar(let path) = track.backendID,
+           SidecarSubtitleLoader.isNativeRenderableSidecar(path) {
+            nativeSubtitleOverlay.loadSidecar(url: URL(fileURLWithPath: path))
+            syncNativeSubtitleOverlay()
+            if let currentSec = nativePlaybackTimeSec() {
+                nativeSubtitleOverlay.updateSidecar(
+                    at: currentSec,
+                    enabled: true,
+                    store: SettingsStore.shared
+                )
+            }
             if let resumeRate {
                 player.playImmediately(atRate: resumeRate)
             }
@@ -4199,6 +4450,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if let resumeRate {
             player.playImmediately(atRate: resumeRate)
         }
+    }
+
+    private func nativePlaybackTimeSec() -> Double? {
+        let currentSec = CMTimeGetSeconds(player.currentTime())
+        guard currentSec.isFinite else { return nil }
+        return max(0, currentSec)
     }
 
     @MainActor
@@ -4236,17 +4493,39 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc private func primarySubtitlesEnabledChanged() {
         let enable = subtitlesSettings.primaryEnabledSwitch.isOn
-        primarySubtitlesEnabled = enable
+        setPrimarySubtitlesEnabled(enable)
+        let sourcePath = (playbackSourceURL ?? currentMediaURL)?.standardizedFileURL.path
+        if enable {
+            userDisabledSubtitlesForSourcePath = nil
+        } else if let sourcePath {
+            userDisabledSubtitlesForSourcePath = sourcePath
+        }
         if enable,
            !(mpvBackendActive && mpvPlaybackStarted),
-           cachedSubtitleTracks.isEmpty,
+           !hasNativePlayableSubtitleTracks(),
            !cachedDiscoveredCompanions.isEmpty {
-            primarySubtitlesEnabled = false
-            subtitlesSettings.primaryEnabledSwitch.applySwitchState(false)
-            let alert = NSAlert()
-            alert.messageText = "Sidecar subtitles need extended playback"
-            alert.informativeText = "This file’s subtitles are in separate files next to the video. Use extended playback to load them."
-            alert.runModal()
+            let popUpIndex = subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem
+            let path: String?
+            if popUpIndex > 0, popUpIndex - 1 < cachedSubtitleTracks.count {
+                switch cachedSubtitleTracks[popUpIndex - 1].backendID {
+                case .companionSidecar(let sidecarPath):
+                    path = sidecarPath
+                case .externalMpv(_, let sidecarPath):
+                    path = sidecarPath
+                default:
+                    path = cachedDiscoveredCompanions.first?.url.path
+                }
+            } else {
+                path = cachedDiscoveredCompanions.first?.url.path
+            }
+            if let path, SidecarSubtitleLoader.isNativeRenderableSidecar(path) {
+                updateSubtitleControlsAvailability()
+                Task { await applyPrimarySubtitleFromUI(autoSelectDefault: true, enabled: true) }
+                return
+            }
+            pendingCompanionSubtitlePath = path
+            setPrimarySubtitlesEnabled(false)
+            extendedPlaybackForSubtitlesPressed()
             updateSubtitleControlsAvailability()
             return
         }
@@ -4267,6 +4546,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc private func primarySubtitleTrackChanged() {
         guard !suppressSubtitlePopUpAction else { return }
+        if subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem > 0, !primarySubtitlesEnabled {
+            setPrimarySubtitlesEnabled(true)
+        }
         Task { await applyPrimarySubtitleFromUI() }
     }
 
@@ -4299,8 +4581,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         guard index - 1 < cachedSubtitleTracks.count else { return }
-        subtitlesSettings.primaryEnabledSwitch.applySwitchState(true)
-        await applyPrimarySubtitleTrack(cachedSubtitleTracks[index - 1])
+        setPrimarySubtitlesEnabled(true)
+        await applyPrimarySubtitleTrack(resolvedPlayableSubtitleTrack(cachedSubtitleTracks[index - 1]))
         updateSubtitleControlsAvailability()
     }
 
@@ -4353,8 +4635,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastExternalSubtitlePath = url.path
         subtitlesSettings.externalFileLabel.stringValue = url.lastPathComponent
         _ = mpvController.addExternalSubtitle(url: url, select: true)
-        primarySubtitlesEnabled = true
-        subtitlesSettings.primaryEnabledSwitch.applySwitchState(true)
+        setPrimarySubtitlesEnabled(true)
         Task { await refreshSubtitleSettings() }
     }
 
@@ -4969,10 +5250,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateSettingsTabVisibility()
         applySettingsPanelAccentChrome()
         syncVideoSettingsControlsFromStore()
-        updateVideoInfoLabels()
-        raiseSettingsSheetAbovePlaybackChrome()
+        if activeMediaKind == .video {
+            if isSubtitlePlaybackReady() {
+                Task { await refreshSubtitleSettings(syncPlayback: true, applyAppearance: false) }
+            } else {
+                syncSubtitleTrackPopUpsToCache()
+            }
+        }
+        raisePlaybackChromeToFront()
         installOutsideClickMonitor()
-        Task { await refreshSubtitleSettings() }
+        if activeMediaKind == .video, selectedVideoSettingsTabIndex == 2, !isSubtitlePlaybackReady() {
+            Task { await refreshSubtitleSettings(syncPlayback: false, applyAppearance: false) }
+        }
     }
 
     func currentMediaAspectRatio() -> CGFloat? {
@@ -5154,13 +5443,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return name.contains("Menu") || name.contains("Popup")
     }
 
+    private func activePlaybackBarInView() -> NSView {
+        activeMediaKind == .image ? imageControlsContainer : controlsContainer
+    }
+
+    private func isClickOnPlaybackBar(for event: NSEvent) -> Bool {
+        let bar = activePlaybackBarInView()
+        guard !bar.isHidden else { return false }
+        let pointInView = view.convert(event.locationInWindow, from: nil)
+        return bar.frame.contains(pointInView)
+    }
+
+    private func isSettingsToggleButtonClick(for event: NSEvent) -> Bool {
+        let pointInView = view.convert(event.locationInWindow, from: nil)
+        guard let hitView = view.hitTest(pointInView) else { return false }
+        let button = activeMediaKind == .image ? imageSettingsButton : settingsButton
+        return hitView === button || hitView.isDescendant(of: button)
+    }
+
     private func shouldKeepSettingsSheetOpen(for event: NSEvent) -> Bool {
         if suppressSettingsDismissForColorPicker { return true }
+        if isClickOnPlaybackBar(for: event) { return false }
         let pointInView = view.convert(event.locationInWindow, from: nil)
         if rightSettingsSheet.frame.contains(pointInView) { return true }
-        if settingsButton.frame.contains(pointInView) || imageSettingsButton.frame.contains(pointInView) {
-            return true
-        }
         if isTransientMenuWindow(event.window) { return true }
         if isColorPickerAuxiliaryWindow(event.window) { return true }
         return false
@@ -5180,6 +5485,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             let pointInView = self.view.convert(event.locationInWindow, from: nil)
 
             if !self.rightSettingsSheet.isHidden {
+                if self.isSettingsToggleButtonClick(for: event) {
+                    self.hideSettingsSheet()
+                    return nil
+                }
                 if self.shouldKeepSettingsSheetOpen(for: event) {
                     return event
                 }
@@ -5898,6 +6207,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             currentTimeLabel.stringValue = formatTime(currentSec)
             totalTimeLabel.stringValue = formatTime(durationSec)
         }
+        if !mpvBackendActive, primarySubtitlesEnabled, nativeSubtitleOverlay.usesSidecarPlayback {
+            nativeSubtitleOverlay.updateSidecar(
+                at: currentSec,
+                enabled: true,
+                store: SettingsStore.shared
+            )
+        }
         updateSeekBarPreparingState()
     }
 
@@ -6251,6 +6567,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if selectedVideoSettingsTabIndex == 1 {
             updateAudioEQAvailability()
             Task { await refreshAudioTrackPicker() }
+        } else if selectedVideoSettingsTabIndex == 2 {
+            let syncPlayback = isSubtitlePlaybackReady()
+            Task { await refreshSubtitleSettings(syncPlayback: syncPlayback, applyAppearance: false) }
         }
     }
 

@@ -97,6 +97,7 @@ final class MpvPlaybackController: @unchecked Sendable {
                 "--vo=gpu",
                 "--pause",
                 "--sub-auto=no",
+                "--sub-visibility=yes",
                 "--input-ipc-server=\(socket)",
                 "--wid=\(wid)"
             ]
@@ -289,14 +290,22 @@ final class MpvPlaybackController: @unchecked Sendable {
         }
     }
 
-    /// Disables both subtitle streams and attaches sidecar files without selecting them.
+    /// Attaches sidecar files; selects the first so subtitles render immediately.
     func prepareSubtitleTracks(companionURLs: [URL]) {
         ipcQueue.sync {
             guard writeFD >= 0 else { return }
-            setStringPropertyOnQueue("sid", value: "no")
             setStringPropertyOnQueue("secondary-sid", value: "no")
-            for url in companionURLs {
-                sendCommandUnlocked(["sub-add", url.path], reply: false)
+            for (index, url) in companionURLs.enumerated() {
+                let command: [Any] = index == 0
+                    ? ["sub-add", url.path, "select"]
+                    : ["sub-add", url.path]
+                sendCommandUnlocked(command, reply: false)
+            }
+            if companionURLs.isEmpty {
+                setStringPropertyOnQueue("sid", value: "no")
+            } else {
+                setStringPropertyOnQueue("sub-visibility", value: "yes", waitForReply: false)
+                nudgeSubtitleDisplayOnQueue()
             }
         }
     }
