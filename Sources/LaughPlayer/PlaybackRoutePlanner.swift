@@ -9,8 +9,16 @@ enum PlaybackRoute: Equatable {
 }
 
 enum PlaybackRoutePlanner {
+    struct Inputs: Equatable {
+        var pathExtension: String
+        var mpvAvailable: Bool
+        var remuxAvailable: Bool
+        var videoCodecTag: String?
+        var hasSidecars: Bool
+    }
+
     /// Containers macOS AVFoundation often cannot open reliably; remux to MP4 first.
-    private static let remuxContainerExtensions: Set<String> = [
+    static let remuxContainerExtensions: Set<String> = [
         "mkv", "webm", "avi", "flv", "wmv", "ogv", "rm", "rmvb"
     ]
 
@@ -38,6 +46,54 @@ enum PlaybackRoutePlanner {
         }
 
         if remuxContainerExtensions.contains(ext) {
+            return route(from: Inputs(
+                pathExtension: ext,
+                mpvAvailable: mpvAvailable,
+                remuxAvailable: remuxAvailable,
+                videoCodecTag: nil,
+                hasSidecars: false
+            ))
+        }
+
+        var codecTag = FFmpegVideoFallback.probePrimaryVideoCodecTag(for: url)
+        if codecTag == nil {
+            codecTag = await probeVideoCodecTagViaAVFoundation(url: url)
+        }
+        let hasSidecars = !CompanionSubtitleDiscovery.discover(for: url).isEmpty
+        return route(from: Inputs(
+            pathExtension: ext,
+            mpvAvailable: mpvAvailable,
+            remuxAvailable: remuxAvailable,
+            videoCodecTag: codecTag,
+            hasSidecars: hasSidecars
+        ))
+    }
+
+    /// True when open should skip native attach and go straight to remux/mpv planning.
+    static func prefersFastRemux(for url: URL) -> Bool {
+        remuxContainerExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// DirectMpv already reads duration from the file; an extra `ffmpeg -i` contends for disk on large rips.
+    static func shouldProbeSourceDuration(for route: PlaybackRoute) -> Bool {
+        if case .directMpv = route { return false }
+        return true
+    }
+
+    static func route(from inputs: Inputs) -> PlaybackRoute {
+        let ext = inputs.pathExtension.lowercased()
+        let mpvAvailable = inputs.mpvAvailable
+        let remuxAvailable = inputs.remuxAvailable
+
+        guard remuxAvailable || mpvAvailable else {
+            return .nativeAVFoundation
+        }
+
+        // Picture is AVPlayer (Metal). libmpv's public render API is still OpenGL
+        // (deprecated, black on current macOS); standalone mpv 0.41 cannot embed.
+        // DirectMpv stays only when remux is missing, or when the user forces it
+        // (ExtendedPlaybackForSubtitles).
+        if remuxContainerExtensions.contains(ext) {
             if remuxAvailable {
                 return .compatibilityRemux(reason: "container.\(ext)")
             }
@@ -46,21 +102,12 @@ enum PlaybackRoutePlanner {
             }
         }
 
-        var codecTag = FFmpegVideoFallback.probePrimaryVideoCodecTag(for: url)
-        if codecTag == nil {
-            codecTag = await probeVideoCodecTagViaAVFoundation(url: url)
-        }
-        if let codecTag {
+        if let codecTag = inputs.videoCodecTag {
             let tag = normalizeFourCC(codecTag)
             if remuxVideoCodecTags.contains(tag) {
-                let hasSidecars = !CompanionSubtitleDiscovery.discover(for: url).isEmpty
-                if ["mp4", "m4v", "mov"].contains(ext), hasSidecars, mpvAvailable {
-                    return .directMpv(reason: "codec.\(tag).sidecars")
-                }
-                // MP4/MOV: remux for AVFoundation instead of mpv — mpv briefly opens its
-                // own titled window on macOS before embed/fallback, which looks like a bug.
-                if ["mp4", "m4v", "mov"].contains(ext), remuxAvailable {
-                    return .compatibilityRemux(reason: "codec.\(tag).mp4")
+                if remuxAvailable {
+                    let suffix = ["mp4", "m4v", "mov"].contains(ext) ? ".mp4" : ""
+                    return .compatibilityRemux(reason: "codec.\(tag)\(suffix)")
                 }
                 if mpvAvailable {
                     return .directMpv(reason: "codec.\(tag)")
@@ -77,10 +124,12 @@ enum PlaybackRoutePlanner {
         }
 
         if !ext.isEmpty {
+            if remuxAvailable {
+                return .compatibilityRemux(reason: "container.\(ext)")
+            }
             if mpvAvailable {
                 return .directMpv(reason: "container.\(ext)")
             }
-            return .compatibilityRemux(reason: "container.\(ext)")
         }
 
         return .nativeAVFoundation

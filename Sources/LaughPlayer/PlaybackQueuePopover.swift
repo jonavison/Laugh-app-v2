@@ -13,6 +13,14 @@ struct PlaybackQueueListRow {
 }
 
 final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    private enum Metrics {
+        static let rowHeight: CGFloat = 48
+        static let contentInset: CGFloat = 12
+        static let popoverWidth: CGFloat = 312
+        static let maxHeight: CGFloat = 340
+        static let minHeight: CGFloat = 96
+    }
+
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
     private var rows: [PlaybackQueueListRow] = []
@@ -25,7 +33,8 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.style = .plain
-        tableView.rowHeight = LaughTheme.InlineButton.rowHeight
+        tableView.rowHeight = Metrics.rowHeight
+        tableView.intercellSpacing = NSSize(width: 0, height: 4)
         tableView.dataSource = self
         tableView.delegate = self
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -38,15 +47,23 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(
+            top: Metrics.contentInset,
+            left: Metrics.contentInset,
+            bottom: Metrics.contentInset,
+            right: Metrics.contentInset
+        )
+        scrollView.scrollerInsets = scrollView.contentInsets
 
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 120))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: Metrics.popoverWidth, height: Metrics.minHeight))
         view.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8)
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
     }
 
@@ -54,12 +71,12 @@ final class PlaybackQueueListViewController: NSViewController, NSTableViewDataSo
         self.rows = rows
         tableView.reloadData()
 
-        let rowHeight: CGFloat = LaughTheme.InlineButton.rowHeight
-        let chrome: CGFloat = 24
-        let maxHeight: CGFloat = 320
-        let contentHeight = CGFloat(max(rows.count, 1)) * rowHeight + chrome
-        let height = min(maxHeight, max(88, contentHeight))
-        preferredContentSize = NSSize(width: 300, height: height)
+        let count = CGFloat(max(rows.count, 1))
+        let spacing = tableView.intercellSpacing.height
+        let rowsHeight = count * Metrics.rowHeight + max(0, count - 1) * spacing
+        let chrome = Metrics.contentInset * 2
+        let height = min(Metrics.maxHeight, max(Metrics.minHeight, rowsHeight + chrome))
+        preferredContentSize = NSSize(width: Metrics.popoverWidth, height: height)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -105,24 +122,26 @@ private final class QueueListCellView: NSTableCellView {
         sectionLabel.font = .systemFont(ofSize: 10, weight: .semibold)
         sectionLabel.textColor = .secondaryLabelColor
         sectionLabel.translatesAutoresizingMaskIntoConstraints = false
+        sectionLabel.setContentHuggingPriority(.required, for: .vertical)
 
-        fileLabel.font = .systemFont(ofSize: 12)
+        fileLabel.font = .systemFont(ofSize: 13)
         fileLabel.lineBreakMode = .byTruncatingMiddle
         fileLabel.translatesAutoresizingMaskIntoConstraints = false
+        fileLabel.setContentHuggingPriority(.required, for: .vertical)
 
         addSubview(sectionLabel)
         addSubview(fileLabel)
         textField = fileLabel
 
         NSLayoutConstraint.activate([
-            sectionLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            sectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            sectionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            sectionLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            sectionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            sectionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
 
-            fileLabel.topAnchor.constraint(equalTo: sectionLabel.bottomAnchor, constant: 1),
-            fileLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            fileLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            fileLabel.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -4)
+            fileLabel.topAnchor.constraint(equalTo: sectionLabel.bottomAnchor, constant: 2),
+            fileLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            fileLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            fileLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
         ])
     }
 
@@ -161,7 +180,8 @@ private final class QueueTableRowView: NSTableRowView {
 
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        let rect = LaughTheme.InlineButton.selectionRect(in: bounds)
-        LaughTheme.fillSelection(in: rect)
+        // Soft inset so the pill breathes inside the taller queue rows.
+        let rect = bounds.insetBy(dx: 4, dy: 2)
+        LaughTheme.fillSelection(in: rect, cornerRadius: LaughTheme.InlineButton.cornerRadius)
     }
 }

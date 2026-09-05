@@ -2,6 +2,9 @@ import AppKit
 import AVKit
 import AVFoundation
 import CoreMedia
+import CoreImage
+import Metal
+import UniformTypeIdentifiers
 
 protocol PlayerViewControllerDelegate: AnyObject {
     func playerViewController(_ controller: PlayerViewController, didRequestWindowAspectRatio ratio: CGFloat?)
@@ -21,6 +24,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     weak var delegate: PlayerViewControllerDelegate?
 
     private let player = AVPlayer()
+    private let idleSleepGuard = PlaybackIdleSleepGuard()
     private let mpvController = MpvPlaybackController()
     private var mpvBackendActive = false
     private var mpvPlaybackStarted = false
@@ -34,11 +38,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let imageSurfaceView = ImageSurfaceView()
     private let controlsContainer = RoundedPlaybackBarView()
     private let imageControlsContainer = RoundedPlaybackBarView()
-    private let imageControlsStack = NSStackView()
+    private let imageTopRowView = NSView()
+    private let imageCropBar = ImageCropBarView()
+    private var isImageCropMode = false
+    private let imageLeadingAccessoryCluster = NSStackView()
+    private let imageTransportCluster = NSStackView()
+    private let imageLibraryButton = NSButton(title: "Library", target: nil, action: nil)
+    private let imageQueuePreviousButton = NSButton(title: "", target: nil, action: nil)
     private let imageZoomOutButton = NSButton(title: "Zoom −", target: nil, action: nil)
+    private let imageActualSizeButton = NSButton(title: "Actual", target: nil, action: nil)
     private let imageZoomInButton = NSButton(title: "Zoom +", target: nil, action: nil)
     private let imageFitButton = NSButton(title: "Fit", target: nil, action: nil)
+    private let imageCropButton = NSButton(title: "Crop", target: nil, action: nil)
+    private let imageRotateLeftButton = NSButton(title: "Rotate Left", target: nil, action: nil)
+    private let imageRotateRightButton = NSButton(title: "Rotate Right", target: nil, action: nil)
+    private let imageQueueNextButton = NSButton(title: "", target: nil, action: nil)
     private let imageSettingsButton = NSButton(title: "Settings", target: nil, action: nil)
+    private var imageTopRowLayoutConfigured = false
     private let controlsStack = NSStackView()
     private let transportClusterStack = NSStackView()
     private let playbackLeadingAccessoryCluster = NSStackView()
@@ -50,11 +66,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var playbackBarWidthConstraint: NSLayoutConstraint?
     private var playbackBarBottomConstraint: NSLayoutConstraint?
     private var imageBarWidthConstraint: NSLayoutConstraint?
+    private var imageBarHeightConstraint: NSLayoutConstraint?
     private var imageBarBottomConstraint: NSLayoutConstraint?
     private var miniPreviewWidthConstraint: NSLayoutConstraint?
     private var miniPreviewHeightConstraint: NSLayoutConstraint?
     private let transportSpeedLeftCluster = NSStackView()
-    private let transportSpeedLeftSpacer = NSView()
     private let playbackSpeedSlowLabel = NSTextField(labelWithString: "")
     private let queuePreviousButton = NSButton(title: "", target: nil, action: nil)
     private let speedStepDownButton = NSButton(title: "", target: nil, action: nil)
@@ -63,7 +79,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let speedStepUpButton = NSButton(title: "", target: nil, action: nil)
     private let queueNextButton = NSButton(title: "", target: nil, action: nil)
     private let playbackSpeedFastLabel = NSTextField(labelWithString: "")
-    private let transportSpeedRightSpacer = NSView()
     private let queueButton = NSButton(title: "Queue", target: nil, action: nil)
     private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
     private let playbackAccessoryCluster = NSStackView()
@@ -73,9 +88,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private lazy var librarySidebar = LibrarySidebarView(controller: mediaLibraryController)
     private lazy var libraryBrowse = LibraryBrowseView(controller: mediaLibraryController)
     private let playbackMiniPreview = PlaybackMiniPreviewView()
-    private let titleBarChromeStrip = NSVisualEffectView()
+    private let titleBarChromeStrip = TitleBarChromeStripView()
     private var titleBarChromeHeightConstraint: NSLayoutConstraint?
     private let rightSettingsSheet = NSVisualEffectView()
+    /// Opaque floor for image studio — covers the visual-effect sheet so the edit column matches content chrome.
+    private let settingsColumnFillView = NSView()
+    /// Opaque wash-over-floor fill so the floating tools bar isn’t lightened by the photo underneath.
+    private let imageToolsBarFillView = NSView()
     private let videoSettingsTabsRow = NSStackView()
     private let imageSettingsTabsRow = NSStackView()
     private var videoSettingsTabButtons: [HoverTextButton] = []
@@ -84,8 +103,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var imageSettingsTabHeaders: [SettingsTabHeaderItemView] = []
     private var selectedVideoSettingsTabIndex = 0
     private var selectedImageSettingsTabIndex = 0
-    private let settingsContentContainer = NSView()
+    private let settingsContentContainer = SettingsScrollDocumentView()
+    private let settingsScrollClipHost = SettingsScrollClipHostView()
     private let settingsScrollView = NSScrollView()
+    private let settingsTopOverflowFade = ScrollOverflowFadeView()
+    private let settingsBottomOverflowFade = ScrollOverflowFadeView()
     private let videoTabView = NSStackView()
     private let audioTabView = NSStackView()
     private let audioSettings = AudioSettingsControls()
@@ -109,6 +131,39 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let playbackSubtitleToggle = PlaybackSubtitleToggleButton()
     private let imageTabView = NSStackView()
     private let imageFitTabView = NSStackView()
+    private let imageAdjustSession = ImageAdjustSession()
+    private let imageAdjustControls = ImageAdjustControls()
+    private var imageSectionHeaders: [ImageAdjustSection: CollapsibleSettingsSectionView] = [:]
+    private let imageStudioCommitFooter = ImageStudioCommitFooter()
+    private var imageStudioCommitFooterHeightConstraint: NSLayoutConstraint?
+    private var imageSavedPresetsHost = NSStackView()
+    private let imageFolderCarousel = ImageFolderCarouselView()
+    private let imageStudioMetaBar = ImageStudioMetaBarView()
+    private var imageFolderSiblings: [LibraryMediaFile] = []
+    private var imageSurfaceBottomConstraint: NSLayoutConstraint?
+    private var imageSurfaceLeadingConstraint: NSLayoutConstraint?
+    private var imageSurfaceTrailingConstraint: NSLayoutConstraint?
+    private var imageSurfaceTopConstraint: NSLayoutConstraint?
+    private var imageCarouselHeightConstraint: NSLayoutConstraint?
+    private var imageCarouselLeadingConstraint: NSLayoutConstraint?
+    private var imageCarouselTrailingConstraint: NSLayoutConstraint?
+    private var imageCarouselTrailingToSidebarConstraint: NSLayoutConstraint?
+    private var imageMetaBarLeadingConstraint: NSLayoutConstraint?
+    private var imageMetaBarTrailingConstraint: NSLayoutConstraint?
+    private var imageMetaBarTrailingToSidebarConstraint: NSLayoutConstraint?
+    private var imageMetaBarBottomConstraint: NSLayoutConstraint?
+    private var imageSurfaceTrailingToSidebarConstraint: NSLayoutConstraint?
+    private var libraryBrowseTrailingToEdgeConstraint: NSLayoutConstraint?
+    private var libraryBrowseWidthConstraint: NSLayoutConstraint?
+    private let imageCarouselHeight: CGFloat = 100
+    private let imageMetaBarHeight: CGFloat = 38
+    private let imageLibraryBrowseWidth: CGFloat = 272
+    /// Luminar-like padding around the photo in the main container.
+    private let imageStudioMargin: CGFloat = 56
+    private let imageStudioTopMargin: CGFloat = 52
+    private let imageZoomPercentLabel = NSTextField(labelWithString: "100%")
+    /// User hid the filmstrip via the meta bar toggle.
+    private var imageCarouselUserHidden = false
     private var activeMediaKind: ActiveMediaKind = .empty
     private let seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let volumeCluster = NSStackView()
@@ -157,24 +212,39 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var lastImageSize: CGSize?
     private var lastAudioSummary: String = "Unknown"
     private var lastVideoTrackSummary: String = "Unknown"
+    private var lastPlaybackTraceSecond: Int = -1
     private var isSeekingFromUI = false
     private var seekGeneration = 0
     private var currentControlTier: ControlDensityTier = .regular
     private var outsideClickMonitor: Any?
+    private var edgeHotZoneClickMonitor: Any?
+    /// Armed on mouseDown in an edge zone; fired on mouseUp only if the pointer barely moved.
+    private var pendingEdgeHotZoneAction: (() -> Void)?
+    private var edgeHotZoneMouseDownPoint: NSPoint?
+    /// Tracks whether we pushed `.pointingHand` for an edge hot zone.
+    private var edgeHotZoneCursorPushed = false
     private var suppressSettingsDismissForColorPicker = false
     private var immersivePointerMonitor: Any?
     private var keyboardShortcutMonitor: Any?
+    private var scrollShortcutMonitor: Any?
     private var videoDoubleClickMonitor: Any?
+    private var scrollVolumeAccumulator: CGFloat = 0
+    private var scrollSeekAccumulator: CGFloat = 0
     private var immersiveChromeHideWorkItem: DispatchWorkItem?
     private var immersiveChromeVisible = false
     private var immersiveCursorHiddenUntilMove = false
     private var immersiveCursorWindowObservers: [NSObjectProtocol] = []
+    private var screenParameterObserver: NSObjectProtocol?
     private var dragSessionActive = false
-    /// Brief pause before edge-hover opens a side panel (avoids accidental opens).
-    private static let edgePanelOpenDelay: TimeInterval = 0.4
-    private var pendingLeftEdgePanelOpen: DispatchWorkItem?
-    private var pendingRightEdgePanelOpen: DispatchWorkItem?
+    /// Width of the clickable edge strips that open/close side panels.
+    private static let edgeHotZoneWidth = EdgeHotZoneGeometry.width
+    private let leftEdgeHotZoneAffordance = EdgeHotZoneAffordanceView(edge: .leading)
+    private let rightEdgeHotZoneAffordance = EdgeHotZoneAffordanceView(edge: .trailing)
+    private var rightEdgeHotZoneToWindowTrailingConstraint: NSLayoutConstraint?
+    private var rightEdgeHotZoneToSidebarLeadingConstraint: NSLayoutConstraint?
     private var settingsContentBottomConstraint: NSLayoutConstraint?
+    /// Pins the active tab’s bottom to the scroll document so height tracks content (enables scrolling).
+    private var settingsActiveTabBottomConstraint: NSLayoutConstraint?
     private var securityScopedMediaURL: URL?
     private var videoLoadGeneration = 0
     private var activePlaybackGeneration = 0
@@ -214,9 +284,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var pendingVideoLoadWorkItem: DispatchWorkItem?
     private var committedPlayerItemID: ObjectIdentifier?
     private let baseSettingsPanelWidth: CGFloat = 320
+    /// Narrower docked edit column for image studio.
+    private let imageStudioSettingsPanelWidth: CGFloat = 268
     private let baseLibrarySidebarWidth: CGFloat = LibrarySidebarView.width
     private var librarySidebarWidthConstraint: NSLayoutConstraint?
     private var settingsPanelWidthConstraint: NSLayoutConstraint?
+    private var settingsPanelTopConstraint: NSLayoutConstraint?
+    private var imageSettingsTabsTopConstraint: NSLayoutConstraint?
     private var volumeSliderWidthConstraint: NSLayoutConstraint?
     private var playbackAccessoryToVolumeConstraint: NSLayoutConstraint?
     private var playbackAccessoryToEdgeConstraint: NSLayoutConstraint?
@@ -240,8 +314,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private var playbackLibraryOverlay: PlaybackLibraryOverlay = .closed
     private let settingsPanelInnerInset: CGFloat = 12
+    /// Scroll column hugs the panel’s trailing edge so the overlay knob isn’t on the cards.
+    private let settingsScrollTrailingInset: CGFloat = 4
+    /// Gap between section cards and the vertical scroller.
+    private let settingsScrollerGutter: CGFloat = 12
     private let settingsTabsTopInset: CGFloat = 40
-    private let settingsContentBottomClearance: CGFloat = 108
+    private let settingsContentBottomClearance: CGFloat = 142
     private let settingsStackSpacing: CGFloat = 4
     private let settingsSectionExtraGap: CGFloat = 14
 
@@ -258,20 +336,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     override func viewDidAppear() {
         super.viewDidAppear()
         installImmersiveCursorWindowObserversIfNeeded()
+        installScreenParameterObserverIfNeeded()
         prepareInterfaceForDisplay()
     }
 
     /// Ensures the library empty state is laid out once the window has a real size.
-    func prepareInterfaceForDisplay() {
+    func prepareInterfaceForDisplay(skipLibrary: Bool = false) {
         guard view.window != nil else { return }
         installImmersiveCursorWindowObserversIfNeeded()
         installPlayerInterfaceIfNeeded()
         installLibraryChromeIfNeeded()
-        if activeMediaKind == .empty {
+        if !skipLibrary, activeMediaKind == .empty {
             showFullMediaLibrary()
             setImmersiveChromeVisible(true, animated: false)
         }
-        LaunchLog.emit("prepareInterfaceForDisplay: bounds=\(view.bounds)")
+        LaunchLog.emit("prepareInterfaceForDisplay: bounds=\(view.bounds) skipLibrary=\(skipLibrary)")
     }
 
     override func viewDidLoad() {
@@ -287,6 +366,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         LaunchLog.emit("installPlayerInterfaceIfNeeded: begin")
 
         playerSurfaceView.player = player
+        player.preventsDisplaySleepDuringVideoPlayback = true
         player.automaticallyWaitsToMinimizeStalling = true
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.actionAtItemEnd = .pause
@@ -298,15 +378,54 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         nativeSubtitleOverlay.install(in: playerSurfaceView)
         playerSurfaceView.onMpvLayoutChanged = { [weak self] in
             guard let self, self.mpvBackendActive else { return }
-            let wid = self.playerSurfaceView.mpvEmbeddingWindowID
-            guard wid > 0 else { return }
-            self.mpvController.setEmbeddingWindowID(wid)
+            self.mpvController.requestRenderRefresh()
+        }
+        playerSurfaceView.onScrollWheel = { [weak self] event in
+            self?.handlePlaybackScrollEvent(event) ?? false
         }
         view.addSubview(playerSurfaceView)
 
         imageSurfaceView.translatesAutoresizingMaskIntoConstraints = false
         imageSurfaceView.isHidden = true
         view.addSubview(imageSurfaceView)
+
+        imageFolderCarousel.translatesAutoresizingMaskIntoConstraints = false
+        imageFolderCarousel.isHidden = true
+        imageFolderCarousel.onSelect = { [weak self] url in
+            self?.loadImage(url: url)
+        }
+        view.addSubview(imageFolderCarousel)
+
+        imageStudioMetaBar.translatesAutoresizingMaskIntoConstraints = false
+        imageStudioMetaBar.isHidden = true
+        imageStudioMetaBar.onFavoriteToggle = { [weak self] in self?.toggleImageFavorite() }
+        imageStudioMetaBar.onRatingChange = { [weak self] rating in self?.setImageRating(rating) }
+        imageStudioMetaBar.onZoomMenuChoice = { [weak self] choice in self?.applyImageStudioZoomMenuChoice(choice) }
+        imageStudioMetaBar.onCarouselVisibilityToggle = { [weak self] in self?.toggleImageCarouselVisibility() }
+        imageStudioMetaBar.onBeforeAfterSelect = { [weak self] showingBefore in
+            self?.setImageBeforeAfter(showingBefore: showingBefore)
+        }
+        view.addSubview(imageStudioMetaBar)
+
+        leftEdgeHotZoneAffordance.translatesAutoresizingMaskIntoConstraints = false
+        leftEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: false)
+        leftEdgeHotZoneAffordance.onActivate = { [weak self] in
+            guard let self, self.activeMediaKind != .empty, self.playbackLibraryOverlay == .closed else { return }
+            self.showPlaybackLibrarySidebarOnly()
+        }
+        view.addSubview(leftEdgeHotZoneAffordance)
+
+        rightEdgeHotZoneAffordance.translatesAutoresizingMaskIntoConstraints = false
+        rightEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: false)
+        rightEdgeHotZoneAffordance.onActivate = { [weak self] in
+            guard let self, self.activeMediaKind != .empty, self.playbackLibraryOverlay == .closed else { return }
+            if self.isSettingsPanelFullyOpen() {
+                self.hideSettingsSheet()
+            } else {
+                self.showSettingsSheet()
+            }
+        }
+        view.addSubview(rightEdgeHotZoneAffordance)
 
         queueDropZone.translatesAutoresizingMaskIntoConstraints = false
         queueDropZone.isHidden = true
@@ -337,12 +456,42 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageControlsContainer.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(imageControlsContainer)
 
-        imageControlsStack.orientation = .horizontal
-        imageControlsStack.alignment = .centerY
-        imageControlsStack.spacing = 8
-        imageControlsStack.translatesAutoresizingMaskIntoConstraints = false
-        imageControlsContainer.addSubview(imageControlsStack)
+        imageToolsBarFillView.translatesAutoresizingMaskIntoConstraints = false
+        imageToolsBarFillView.wantsLayer = true
+        imageToolsBarFillView.isHidden = true
+        imageControlsContainer.addSubview(imageToolsBarFillView, positioned: .below, relativeTo: nil)
+
+        imageTopRowView.translatesAutoresizingMaskIntoConstraints = false
+        imageControlsContainer.addSubview(imageTopRowView)
         configureImageControls()
+        setupImageTopRowLayout()
+        imageSurfaceView.onDoubleClick = { [weak self] in
+            self?.toggleImageFitActualSize()
+        }
+        imageSurfaceView.onZoomScaleChanged = { [weak self] in
+            self?.updateImageZoomPercentLabel()
+        }
+        imageSurfaceView.onCropChanged = { [weak self] in
+            guard let self else { return }
+            if !self.imageSurfaceView.isCropMode {
+                self.isImageCropMode = false
+                self.updateImageCropChrome()
+                self.updateImageZoomPercentLabel()
+            }
+            self.updateImageStudioCommitFooter()
+        }
+        imageAdjustControls.bind(to: imageAdjustSession)
+        imageAdjustSession.onChange = { [weak self] quality in
+            guard let self else { return }
+            self.imageSurfaceView.setAdjustParameters(
+                self.imageAdjustSession.presentationParameters,
+                quality: quality
+            )
+        }
+        imageAdjustSession.onChromeChange = { [weak self] in
+            self?.refreshImageSectionEditChrome()
+            self?.updateImageStudioCommitFooter()
+        }
 
         mediaLibraryController.delegate = self
 
@@ -364,6 +513,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         rightSettingsSheet.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(rightSettingsSheet)
 
+        settingsColumnFillView.translatesAutoresizingMaskIntoConstraints = false
+        settingsColumnFillView.wantsLayer = true
+        settingsColumnFillView.isHidden = true
+        rightSettingsSheet.addSubview(settingsColumnFillView, positioned: .below, relativeTo: nil)
+
         videoSettingsTabsRow.translatesAutoresizingMaskIntoConstraints = false
         rightSettingsSheet.addSubview(videoSettingsTabsRow)
 
@@ -374,13 +528,43 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         settingsScrollView.translatesAutoresizingMaskIntoConstraints = false
         settingsScrollView.hasVerticalScroller = true
+        settingsScrollView.hasHorizontalScroller = false
         settingsScrollView.autohidesScrollers = true
+        settingsScrollView.scrollerStyle = .overlay
         settingsScrollView.drawsBackground = false
         settingsScrollView.borderType = .noBorder
-        rightSettingsSheet.addSubview(settingsScrollView)
+        settingsScrollView.verticalScrollElasticity = .allowed
+        settingsScrollView.horizontalScrollElasticity = .none
+        settingsScrollView.automaticallyAdjustsContentInsets = false
+        settingsScrollView.contentView.drawsBackground = false
+        settingsScrollView.verticalScroller = SoftThinScroller()
+        settingsScrollView.verticalScroller?.controlSize = .mini
+        settingsScrollView.verticalScroller?.scrollerStyle = .overlay
+        settingsScrollClipHost.translatesAutoresizingMaskIntoConstraints = false
+        rightSettingsSheet.addSubview(settingsScrollClipHost)
+        settingsScrollClipHost.addSubview(settingsScrollView)
+
+        settingsTopOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+        settingsTopOverflowFade.edge = .top
+        settingsScrollClipHost.addSubview(settingsTopOverflowFade, positioned: .above, relativeTo: settingsScrollView)
+
+        settingsBottomOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+        settingsBottomOverflowFade.edge = .bottom
+        settingsScrollClipHost.addSubview(settingsBottomOverflowFade, positioned: .above, relativeTo: settingsScrollView)
+
+        imageStudioCommitFooter.isHidden = true
+        imageStudioCommitFooter.resetAllButton.target = self
+        imageStudioCommitFooter.resetAllButton.action = #selector(imageStudioResetAllPressed)
+        imageStudioCommitFooter.exportButton.target = self
+        imageStudioCommitFooter.exportButton.action = #selector(imageStudioExportPressed)
+        imageStudioCommitFooter.savePresetButton.target = self
+        imageStudioCommitFooter.savePresetButton.action = #selector(imageStudioSavePresetPressed)
+        rightSettingsSheet.addSubview(imageStudioCommitFooter)
 
         settingsContentContainer.translatesAutoresizingMaskIntoConstraints = false
         settingsScrollView.documentView = settingsContentContainer
+        settingsTopOverflowFade.attach(to: settingsScrollView)
+        settingsBottomOverflowFade.attach(to: settingsScrollView)
         ensureSettingsTabRowsAboveContent()
 
         configureSettingsTabViews()
@@ -400,19 +584,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         transportSpeedLeftCluster.orientation = .horizontal
         transportSpeedLeftCluster.alignment = .centerY
-        transportSpeedLeftCluster.spacing = 1
-        configureTransportSpeedClusterSpacer(transportSpeedLeftSpacer)
-        transportSpeedLeftCluster.addArrangedSubview(transportSpeedLeftSpacer)
-        transportSpeedLeftCluster.addArrangedSubview(playbackSpeedSlowLabel)
+        transportSpeedLeftCluster.spacing = 0
         transportSpeedLeftCluster.addArrangedSubview(speedStepDownButton)
 
         transportSpeedRightCluster.orientation = .horizontal
         transportSpeedRightCluster.alignment = .centerY
-        transportSpeedRightCluster.spacing = 1
+        transportSpeedRightCluster.spacing = 0
         transportSpeedRightCluster.addArrangedSubview(speedStepUpButton)
-        transportSpeedRightCluster.addArrangedSubview(playbackSpeedFastLabel)
-        configureTransportSpeedClusterSpacer(transportSpeedRightSpacer)
-        transportSpeedRightCluster.addArrangedSubview(transportSpeedRightSpacer)
         transportSpeedLeftCluster.translatesAutoresizingMaskIntoConstraints = false
         transportSpeedRightCluster.translatesAutoresizingMaskIntoConstraints = false
 
@@ -461,11 +639,52 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             constant: -initialBarBottomInset
         )
         imageBarWidthConstraint = imageControlsContainer.widthAnchor.constraint(equalToConstant: min(420, initialBarWidth))
+        imageBarHeightConstraint = imageControlsContainer.heightAnchor.constraint(equalToConstant: 52)
+        // Sit just under the photo, above the studio meta bar / filmstrip.
         imageBarBottomConstraint = imageControlsContainer.bottomAnchor.constraint(
-            equalTo: view.bottomAnchor,
-            constant: -initialBarBottomInset
+            equalTo: imageStudioMetaBar.topAnchor,
+            constant: -10
         )
         settingsPanelWidthConstraint = rightSettingsSheet.widthAnchor.constraint(equalToConstant: baseSettingsPanelWidth)
+        settingsPanelTopConstraint = rightSettingsSheet.topAnchor.constraint(equalTo: view.topAnchor)
+        imageSettingsTabsTopConstraint = imageSettingsTabsRow.topAnchor.constraint(
+            equalTo: rightSettingsSheet.topAnchor,
+            constant: settingsTabsTopInset
+        )
+
+        imageSurfaceLeadingConstraint = imageSurfaceView.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageSurfaceTrailingConstraint = imageSurfaceView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        imageSurfaceTopConstraint = imageSurfaceView.topAnchor.constraint(equalTo: view.topAnchor)
+        imageSurfaceBottomConstraint = imageSurfaceView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        imageCarouselHeightConstraint = imageFolderCarousel.heightAnchor.constraint(equalToConstant: imageCarouselHeight)
+        imageCarouselLeadingConstraint = imageFolderCarousel.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageCarouselTrailingConstraint = imageFolderCarousel.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        imageCarouselTrailingToSidebarConstraint = imageFolderCarousel.trailingAnchor.constraint(
+            equalTo: rightSettingsSheet.leadingAnchor
+        )
+        imageMetaBarLeadingConstraint = imageStudioMetaBar.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageMetaBarTrailingConstraint = imageStudioMetaBar.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        imageMetaBarTrailingToSidebarConstraint = imageStudioMetaBar.trailingAnchor.constraint(
+            equalTo: rightSettingsSheet.leadingAnchor
+        )
+        imageSurfaceTrailingToSidebarConstraint = imageSurfaceView.trailingAnchor.constraint(
+            equalTo: rightSettingsSheet.leadingAnchor,
+            constant: -12
+        )
+        imageCarouselTrailingToSidebarConstraint?.isActive = false
+        imageMetaBarTrailingToSidebarConstraint?.isActive = false
+        imageSurfaceTrailingToSidebarConstraint?.isActive = false
+        rightEdgeHotZoneToWindowTrailingConstraint = rightEdgeHotZoneAffordance.trailingAnchor.constraint(
+            equalTo: view.trailingAnchor
+        )
+        rightEdgeHotZoneToSidebarLeadingConstraint = rightEdgeHotZoneAffordance.trailingAnchor.constraint(
+            equalTo: rightSettingsSheet.leadingAnchor
+        )
+        rightEdgeHotZoneToWindowTrailingConstraint?.isActive = true
+        rightEdgeHotZoneToSidebarLeadingConstraint?.isActive = false
+        imageMetaBarBottomConstraint = imageStudioMetaBar.bottomAnchor.constraint(
+            equalTo: imageFolderCarousel.topAnchor
+        )
 
         NSLayoutConstraint.activate([
             playerSurfaceView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -473,10 +692,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             playerSurfaceView.topAnchor.constraint(equalTo: view.topAnchor),
             playerSurfaceView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            imageSurfaceView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            imageSurfaceView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            imageSurfaceView.topAnchor.constraint(equalTo: view.topAnchor),
-            imageSurfaceView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            imageSurfaceLeadingConstraint!,
+            imageSurfaceTrailingConstraint!,
+            imageSurfaceTopConstraint!,
+            imageSurfaceBottomConstraint!,
+
+            imageFolderCarousel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            imageCarouselHeightConstraint!,
+            imageCarouselLeadingConstraint!,
+            imageCarouselTrailingConstraint!,
+
+            imageMetaBarLeadingConstraint!,
+            imageMetaBarTrailingConstraint!,
+            imageMetaBarBottomConstraint!,
+            imageStudioMetaBar.heightAnchor.constraint(equalToConstant: imageMetaBarHeight),
+
+            leftEdgeHotZoneAffordance.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftEdgeHotZoneAffordance.topAnchor.constraint(equalTo: view.topAnchor),
+            leftEdgeHotZoneAffordance.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            leftEdgeHotZoneAffordance.widthAnchor.constraint(equalToConstant: Self.edgeHotZoneWidth),
+
+            rightEdgeHotZoneAffordance.topAnchor.constraint(equalTo: view.topAnchor),
+            rightEdgeHotZoneAffordance.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            rightEdgeHotZoneAffordance.widthAnchor.constraint(equalToConstant: Self.edgeHotZoneWidth),
 
             queueDropZone.widthAnchor.constraint(equalToConstant: 180),
             queueDropZone.heightAnchor.constraint(equalToConstant: 96),
@@ -499,25 +737,35 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             controlsContainer.heightAnchor.constraint(equalToConstant: 76),
             playbackBarWidthConstraint!,
 
-            imageControlsContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            imageControlsContainer.centerXAnchor.constraint(equalTo: imageSurfaceView.centerXAnchor),
             imageBarBottomConstraint!,
-            imageControlsContainer.heightAnchor.constraint(equalToConstant: 52),
+            imageBarHeightConstraint!,
             imageBarWidthConstraint!,
 
-            imageControlsStack.leadingAnchor.constraint(equalTo: imageControlsContainer.leadingAnchor, constant: 10),
-            imageControlsStack.trailingAnchor.constraint(equalTo: imageControlsContainer.trailingAnchor, constant: -10),
-            imageControlsStack.topAnchor.constraint(equalTo: imageControlsContainer.topAnchor, constant: 8),
-            imageControlsStack.bottomAnchor.constraint(equalTo: imageControlsContainer.bottomAnchor, constant: -8),
+            imageToolsBarFillView.leadingAnchor.constraint(equalTo: imageControlsContainer.leadingAnchor),
+            imageToolsBarFillView.trailingAnchor.constraint(equalTo: imageControlsContainer.trailingAnchor),
+            imageToolsBarFillView.topAnchor.constraint(equalTo: imageControlsContainer.topAnchor),
+            imageToolsBarFillView.bottomAnchor.constraint(equalTo: imageControlsContainer.bottomAnchor),
+
+            imageTopRowView.leadingAnchor.constraint(equalTo: imageControlsContainer.leadingAnchor, constant: 10),
+            imageTopRowView.trailingAnchor.constraint(equalTo: imageControlsContainer.trailingAnchor, constant: -10),
+            imageTopRowView.topAnchor.constraint(equalTo: imageControlsContainer.topAnchor, constant: 8),
+            imageTopRowView.bottomAnchor.constraint(equalTo: imageControlsContainer.bottomAnchor, constant: -8),
 
             controlsStack.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 16),
             controlsStack.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -16),
             controlsStack.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 10),
             controlsStack.bottomAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: -10),
 
-            rightSettingsSheet.topAnchor.constraint(equalTo: view.topAnchor),
+            settingsPanelTopConstraint!,
             rightSettingsSheet.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             rightSettingsSheet.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             settingsPanelWidthConstraint!,
+
+            settingsColumnFillView.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor),
+            settingsColumnFillView.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor),
+            settingsColumnFillView.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor),
+            settingsColumnFillView.bottomAnchor.constraint(equalTo: rightSettingsSheet.bottomAnchor),
 
             videoSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsTabsTopInset),
             videoSettingsTabsRow.heightAnchor.constraint(equalToConstant: 34),
@@ -525,28 +773,61 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             videoSettingsTabsRow.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
             videoSettingsTabsRow.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
 
-            imageSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsTabsTopInset),
+            imageSettingsTabsTopConstraint!,
             imageSettingsTabsRow.heightAnchor.constraint(equalToConstant: 34),
             imageSettingsTabsRow.centerXAnchor.constraint(equalTo: rightSettingsSheet.centerXAnchor),
             imageSettingsTabsRow.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset + 2),
             imageSettingsTabsRow.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor, constant: -(settingsPanelInnerInset + 2)),
 
-            settingsScrollView.topAnchor.constraint(equalTo: videoSettingsTabsRow.bottomAnchor, constant: settingsPanelInnerInset + 14),
-            settingsScrollView.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset),
-            settingsScrollView.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor, constant: -settingsPanelInnerInset),
+            settingsScrollClipHost.topAnchor.constraint(equalTo: videoSettingsTabsRow.bottomAnchor, constant: 8),
+            settingsScrollClipHost.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor, constant: settingsPanelInnerInset),
+            settingsScrollClipHost.trailingAnchor.constraint(
+                equalTo: rightSettingsSheet.trailingAnchor,
+                constant: -settingsScrollTrailingInset
+            ),
 
+            settingsScrollView.topAnchor.constraint(equalTo: settingsScrollClipHost.topAnchor),
+            settingsScrollView.leadingAnchor.constraint(equalTo: settingsScrollClipHost.leadingAnchor),
+            settingsScrollView.trailingAnchor.constraint(equalTo: settingsScrollClipHost.trailingAnchor),
+            settingsScrollView.bottomAnchor.constraint(equalTo: settingsScrollClipHost.bottomAnchor),
+
+            imageStudioCommitFooter.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor),
+            imageStudioCommitFooter.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor),
+            imageStudioCommitFooter.bottomAnchor.constraint(equalTo: rightSettingsSheet.bottomAnchor),
+
+            settingsTopOverflowFade.leadingAnchor.constraint(equalTo: settingsScrollView.leadingAnchor),
+            settingsTopOverflowFade.trailingAnchor.constraint(
+                equalTo: settingsScrollView.trailingAnchor,
+                constant: -settingsScrollerGutter
+            ),
+            settingsTopOverflowFade.topAnchor.constraint(equalTo: settingsScrollView.topAnchor),
+            settingsTopOverflowFade.heightAnchor.constraint(equalToConstant: 40),
+
+            settingsBottomOverflowFade.leadingAnchor.constraint(equalTo: settingsScrollView.leadingAnchor),
+            settingsBottomOverflowFade.trailingAnchor.constraint(
+                equalTo: settingsScrollView.trailingAnchor,
+                constant: -settingsScrollerGutter
+            ),
+            settingsBottomOverflowFade.bottomAnchor.constraint(equalTo: settingsScrollView.bottomAnchor),
+            settingsBottomOverflowFade.heightAnchor.constraint(equalToConstant: 40),
+
+            // Pin document top/width only — height comes from the active tab so content can exceed the clip view.
+            // Leave a trailing gutter so the overlay scroller doesn’t sit on the section cards.
             settingsContentContainer.leadingAnchor.constraint(equalTo: settingsScrollView.contentView.leadingAnchor),
-            settingsContentContainer.trailingAnchor.constraint(equalTo: settingsScrollView.contentView.trailingAnchor),
             settingsContentContainer.topAnchor.constraint(equalTo: settingsScrollView.contentView.topAnchor),
-            settingsContentContainer.bottomAnchor.constraint(equalTo: settingsScrollView.contentView.bottomAnchor),
-            settingsContentContainer.widthAnchor.constraint(equalTo: settingsScrollView.widthAnchor)
+            settingsContentContainer.widthAnchor.constraint(
+                equalTo: settingsScrollView.contentView.widthAnchor,
+                constant: -settingsScrollerGutter
+            )
         ])
 
-        settingsContentBottomConstraint = settingsScrollView.bottomAnchor.constraint(
-            equalTo: rightSettingsSheet.bottomAnchor,
+        settingsContentBottomConstraint = settingsScrollClipHost.bottomAnchor.constraint(
+            equalTo: imageStudioCommitFooter.topAnchor,
             constant: -settingsPanelInnerInset
         )
         settingsContentBottomConstraint?.isActive = true
+        imageStudioCommitFooterHeightConstraint = imageStudioCommitFooter.heightAnchor.constraint(equalToConstant: 0)
+        imageStudioCommitFooterHeightConstraint?.isActive = true
         LaunchLog.emit("installPlayerInterfaceIfNeeded: constraints")
 
         raisePlaybackChromeToFront()
@@ -568,7 +849,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.dragSessionActive = active
             self.setQueueDropZoneVisibleForDrag(active)
             if active {
-                self.cancelEdgePanelHoverTimers()
                 self.hideSettingsSheet()
                 self.refreshImmersiveChromePinnedState()
             } else {
@@ -603,7 +883,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             guard let self else { return }
             guard let stalledItem = notification.object as? AVPlayerItem else { return }
             guard stalledItem == self.player.currentItem else { return }
-            print("[DEBUG-qos] playback stalled (possible audio/video pipeline starvation)")
+            PlaybackTrace.emit("[DEBUG-qos] playback stalled (possible audio/video pipeline starvation)")
             self.logPlaybackHealthSnapshot(reason: "stalled", item: stalledItem)
         }
 
@@ -633,8 +913,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             guard let self else { return }
             let seconds = CMTimeGetSeconds(time)
             if seconds >= 0 {
-                let rounded = String(format: "%.2f", seconds)
-                print("[DEBUG-playback] t=\(rounded)s rate=\(self.player.rate)")
+                self.tracePlaybackTick(seconds: seconds)
                 self.ensureLaughVolumeIfPlaying()
                 _ = self.extendProgressivePlaybackIfNeeded()
                 self.updateTimelineUI()
@@ -643,6 +922,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         updateSettingsContentBottomInset()
         installKeyboardShortcutMonitor()
+        installScrollShortcutMonitor()
         installVideoDoubleClickFullscreenMonitor()
 
         LaunchLog.emit("installPlayerInterfaceIfNeeded: end")
@@ -667,6 +947,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         libraryBrowse.onContextAction = { [weak self] action, entry in
             self?.handleLibraryBrowseContextAction(action, entry: entry)
         }
+        libraryBrowse.onBatchAction = { [weak self] action, entries in
+            self?.handleLibraryBrowseBatchAction(action, entries: entries)
+        }
         playbackMiniPreview.isHidden = true
         playbackMiniPreview.translatesAutoresizingMaskIntoConstraints = false
         playbackMiniPreview.onExpand = { [weak self] in
@@ -674,6 +957,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         playbackMiniPreview.onClose = { [weak self] in
             self?.closePlaybackFromMiniPreview()
+        }
+        playbackMiniPreview.onTogglePlayPause = { [weak self] in
+            self?.togglePlayPause()
         }
 
         view.addSubview(librarySidebar)
@@ -688,6 +974,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         librarySidebarWidthConstraint = librarySidebar.widthAnchor.constraint(equalToConstant: baseLibrarySidebarWidth)
+        libraryBrowseTrailingToEdgeConstraint = libraryBrowse.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        libraryBrowseWidthConstraint = libraryBrowse.widthAnchor.constraint(equalToConstant: imageLibraryBrowseWidth)
+        libraryBrowseWidthConstraint?.isActive = false
         NSLayoutConstraint.activate([
             librarySidebar.topAnchor.constraint(equalTo: view.topAnchor),
             librarySidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -696,8 +985,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
             libraryBrowse.topAnchor.constraint(equalTo: view.topAnchor),
             libraryBrowse.leadingAnchor.constraint(equalTo: librarySidebar.trailingAnchor),
-            libraryBrowse.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             libraryBrowse.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            libraryBrowseTrailingToEdgeConstraint!,
 
             playbackMiniPreview.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             playbackMiniPreview.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16)
@@ -718,7 +1007,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     func loadVideo(url: URL, replaceCurrent: Bool = true, startAt: CMTime? = nil, forceDirectMpv: Bool = false) {
         pendingVideoLoadWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
+        pendingVideoLoadWorkItem = nil
+        let run = { [weak self] in
             self?.performLoadVideo(
                 url: url,
                 replaceCurrent: replaceCurrent,
@@ -726,8 +1016,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 forceDirectMpv: forceDirectMpv
             )
         }
-        pendingVideoLoadWorkItem = work
-        DispatchQueue.main.async(execute: work)
+        if Thread.isMainThread {
+            run()
+        } else {
+            DispatchQueue.main.async {
+                run()
+            }
+        }
     }
 
     private func performLoadVideo(
@@ -771,15 +1066,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         setPrimarySubtitlesEnabled(false)
         secondarySubtitlesEnabled = false
+        cachedSubtitleTracks = []
         resetNativeSubtitlePresentationForSourceChange()
         if mpvBackendActive {
             stopMpvBackend()
         }
         lastLoadRequestURL = url.path
         lastLoadRequestAt = now
-        print("[DEBUG-playback] Loading video: \(url.path)")
+        PlaybackTrace.emit("[DEBUG-playback] Loading video: \(url.path)")
         videoLoadGeneration += 1
         seekGeneration += 1
+        lastPlaybackTraceSecond = -1
         let generation = videoLoadGeneration
         if let startAt {
             let sec = CMTimeGetSeconds(startAt)
@@ -825,35 +1122,54 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         preparePlayerForVideoSwitch()
 
+        if forceDirectMpv, MpvPlaybackController.isAvailable() {
+            if isVideoFileURL(url) {
+                enterInstantPlaybackPrepareUI(for: url, probeDuration: false)
+            }
+            PlaybackTrace.emit("[DEBUG-route] forced mpv path=\(url.path)")
+            startDirectMpvPlayback(sourceURL: url, generation: generation)
+            return
+        }
+
+        if !isGeneratedFallbackURL(url), PlaybackRoutePlanner.prefersFastRemux(for: url) {
+            let mpvAvailable = PlaybackRuntime.canUseBundledCodecStack && MpvPlaybackController.isAvailable()
+            let remuxAvailable = PlaybackRuntime.canUseBundledCodecStack && FFmpegVideoFallback.isAvailable()
+            let route = PlaybackRoutePlanner.route(from: .init(
+                pathExtension: url.pathExtension,
+                mpvAvailable: mpvAvailable,
+                remuxAvailable: remuxAvailable,
+                videoCodecTag: nil,
+                hasSidecars: false
+            ))
+            if isVideoFileURL(url) {
+                enterInstantPlaybackPrepareUI(
+                    for: url,
+                    probeDuration: PlaybackRoutePlanner.shouldProbeSourceDuration(for: route)
+                )
+            }
+            switch route {
+            case .directMpv(let reason):
+                PlaybackTrace.emit("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
+                startDirectMpvPlayback(sourceURL: url, generation: generation)
+            case .compatibilityRemux(let reason):
+                PlaybackTrace.emit("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
+                startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
+            case .nativeAVFoundation:
+                PlaybackTrace.emit("[DEBUG-route] planned native path=\(url.path)")
+                startNativePlayback(url: url, generation: generation)
+            }
+            return
+        }
+
         if isVideoFileURL(url) {
             enterInstantPlaybackPrepareUI(for: url)
-        }
-
-        if forceDirectMpv, MpvPlaybackController.isAvailable() {
-            print("[DEBUG-route] forced mpv path=\(url.path)")
-            startDirectMpvPlayback(sourceURL: url, generation: generation)
-            return
-        }
-
-        if likelyNeedsCompatibilityRemux(url) {
-            print("[DEBUG-route] fast remux path=\(url.path)")
-            startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
-            return
-        }
-
-        if !cachedDiscoveredCompanions.isEmpty,
-           MpvPlaybackController.isAvailable(),
-           ["mp4", "m4v", "mov"].contains(url.pathExtension.lowercased()) {
-            print("[DEBUG-route] sidecars present — direct mpv path=\(url.path)")
-            startDirectMpvPlayback(sourceURL: url, generation: generation)
-            return
         }
 
         Task {
             await MainActor.run {
                 guard generation == self.videoLoadGeneration else { return }
                 if forceDirectMpv, MpvPlaybackController.isAvailable() {
-                    print("[DEBUG-route] forced mpv path=\(url.path)")
+                    PlaybackTrace.emit("[DEBUG-route] forced mpv path=\(url.path)")
                     self.startDirectMpvPlayback(sourceURL: url, generation: generation)
                     return
                 }
@@ -863,13 +1179,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         guard generation == self.videoLoadGeneration else { return }
                         switch route {
                         case .directMpv(let reason):
-                            print("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
+                            PlaybackTrace.emit("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
                             self.startDirectMpvPlayback(sourceURL: url, generation: generation)
                         case .compatibilityRemux(let reason):
-                            print("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
+                            PlaybackTrace.emit("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
                             self.startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
                         case .nativeAVFoundation:
-                            print("[DEBUG-route] planned native path=\(url.path)")
+                            PlaybackTrace.emit("[DEBUG-route] planned native path=\(url.path)")
                             self.startNativePlayback(url: url, generation: generation)
                         }
                     }
@@ -888,19 +1204,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return videoExtensions.contains(ext)
     }
 
-    private func likelyNeedsCompatibilityRemux(_ url: URL) -> Bool {
-        guard !isGeneratedFallbackURL(url) else { return false }
-        let ext = url.pathExtension.lowercased()
-        let remuxContainers: Set<String> = [
-            "mkv", "webm", "avi", "flv", "wmv", "ogv", "rm", "rmvb"
-        ]
-        return remuxContainers.contains(ext)
-    }
-
     /// Show playback chrome and animated seek bar immediately while remux/decode prepares.
-    private func enterInstantPlaybackPrepareUI(for url: URL) {
+    private func enterInstantPlaybackPrepareUI(for url: URL, probeDuration: Bool = true) {
         playbackPrepareActive = true
-        cancelEdgePanelHoverTimers()
         hideSettingsSheet()
         hideCompatibilityFailure()
         showVideoChrome()
@@ -913,6 +1219,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if !isGeneratedFallbackURL(url) {
             RecentlyViewedStore.shared.record(url: url, kind: .video)
         }
+
+        guard probeDuration else { return }
 
         let sourceURL = url.standardizedFileURL
         Task.detached(priority: .utility) { [weak self] in
@@ -953,7 +1261,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func startDirectMpvPlayback(sourceURL: URL, generation: Int) {
-        FFmpegVideoFallback.terminateRunningProcesses()
         beginSecurityScopedAccess(for: sourceURL)
         detachCurrentPlayerItemObserver()
         committedPlayerItemID = nil
@@ -969,24 +1276,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         RecentlyViewedStore.shared.record(url: sourceURL, kind: .video)
         disconnectPlayerFromVideoSurfaces()
         playerSurfaceView.setMpvEmbeddingActive(true)
+        scheduleMpvEmbed(sourceURL: sourceURL, generation: generation, attempt: 0)
+    }
 
-        DispatchQueue.main.async { [weak self] in
+    private func scheduleMpvEmbed(sourceURL: URL, generation: Int, attempt: Int) {
+        let attemptEmbed = { [weak self] in
             guard let self, generation == self.videoLoadGeneration else { return }
             self.view.layoutSubtreeIfNeeded()
-            guard self.playerSurfaceView.window != nil,
-                  self.playerSurfaceView.bounds.width > 1,
-                  self.playerSurfaceView.bounds.height > 1 else {
-                print("[DEBUG-mpv] embedding view not ready; falling back to remux")
-                self.mpvBackendActive = false
-                self.playerSurfaceView.setMpvEmbeddingActive(false)
-                self.autoExtendedPlaybackAttemptedForSourcePath = nil
-                self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
-                return
-            }
-
-            let wid = self.playerSurfaceView.mpvEmbeddingWindowID
-            guard wid > 0 else {
-                print("[DEBUG-mpv] embedding wid unavailable; falling back to remux")
+            let surfaceReady = self.playerSurfaceView.window != nil
+                && self.playerSurfaceView.bounds.width > 1
+                && self.playerSurfaceView.bounds.height > 1
+            let renderLayer = self.playerSurfaceView.mpvRenderLayer
+            if !surfaceReady || renderLayer == nil {
+                if attempt < 12 {
+                    PlaybackTrace.emit("[DEBUG-mpv] embedding not ready attempt=\(attempt); retrying")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                        self?.scheduleMpvEmbed(sourceURL: sourceURL, generation: generation, attempt: attempt + 1)
+                    }
+                    return
+                }
+                PlaybackTrace.emit("[DEBUG-mpv] embedding view not ready; falling back to remux")
                 self.mpvBackendActive = false
                 self.playerSurfaceView.setMpvEmbeddingActive(false)
                 self.autoExtendedPlaybackAttemptedForSourcePath = nil
@@ -996,18 +1305,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
             self.wireMpvCallbacks(generation: generation, sourceURL: sourceURL)
 
-            self.mpvController.load(url: sourceURL, wid: wid) { [weak self] result in
+            self.mpvController.load(url: sourceURL, renderLayer: renderLayer!) { [weak self] result in
                 guard let self, generation == self.videoLoadGeneration else { return }
                 switch result {
                 case .success:
                     self.leavePlaybackPrepareUI()
                     self.finishMpvPlaybackStart(sourceURL: sourceURL, generation: generation)
                 case .failed(let message):
-                    print("[DEBUG-mpv] load failed: \(message); falling back to remux")
+                    PlaybackTrace.emit("[DEBUG-mpv] load failed: \(message); falling back to remux")
                     self.stopMpvBackend()
                     self.autoExtendedPlaybackAttemptedForSourcePath = nil
                     self.startPlannedCompatibilityPlayback(sourceURL: sourceURL, generation: generation)
                 }
+            }
+        }
+        if Thread.isMainThread {
+            attemptEmbed()
+        } else {
+            DispatchQueue.main.async {
+                attemptEmbed()
             }
         }
     }
@@ -1081,7 +1397,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 await self.applyPendingCompanionSubtitleSelectionIfNeeded()
                 await self.applySubtitleAppearanceToPlayback()
             }
-            print("[DEBUG-mpv] playback started path=\(sourceURL.path)")
+            PlaybackTrace.emit("[DEBUG-mpv] playback started path=\(sourceURL.path)")
         }
         start()
     }
@@ -1134,7 +1450,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func startMpvTimelinePolling() {
         stopMpvTimelinePolling()
         mpvTimelineTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            self?.updateTimelineUI()
+            guard let self else { return }
+            self.updateTimelineUI()
+            let seconds = self.mpvController.currentTimeSec()
+            let tick = Int(seconds)
+            if tick != self.lastPlaybackTraceSecond {
+                self.lastPlaybackTraceSecond = tick
+                self.tracePlaybackTick(seconds: seconds)
+            }
         }
     }
 
@@ -1331,7 +1654,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         lastPlaybackStartedItemID = itemID
 
-        print("[DEBUG-playback] Ready to play")
+        PlaybackTrace.emit("[DEBUG-playback] Ready to play")
         showVideoChrome()
 
         let pending = pendingStartTimeAfterLoad ?? .zero
@@ -1342,8 +1665,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let startPlayback = { [weak self] in
             guard let self else { return }
             guard generation == self.videoLoadGeneration, self.isCurrentPlaybackItem(item) else { return }
-            print(String(
-                format: "[DEBUG-playback] start_play keepUp=%@ empty=%@ full=%@",
+            let health = PlaybackBufferHealth.classify(
+                keepUp: item.isPlaybackLikelyToKeepUp,
+                empty: item.isPlaybackBufferEmpty,
+                full: item.isPlaybackBufferFull
+            )
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-playback] start_play buffer=%@ keepUp=%@ empty=%@ full=%@",
+                health.logLabel,
                 item.isPlaybackLikelyToKeepUp.description,
                 item.isPlaybackBufferEmpty.description,
                 item.isPlaybackBufferFull.description
@@ -1514,12 +1843,44 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastAudioSummary = "Unknown"
         lastVideoTrackSummary = "Unknown"
         updateVideoInfoLabels()
+        cancelImageCropMode()
         imageSurfaceView.setImage(loaded.image, naturalSize: loaded.pixelSize)
+        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        // Already browsing photos in studio: swap the image without forcing the edit column open.
+        let stayingInImageStudio = activeMediaKind == .image
+            && playbackLibraryOverlay == .closed
         activeMediaKind = .image
         RecentlyViewedStore.shared.record(url: url, kind: .image)
-        showImageChrome()
+        refreshImageFolderCarousel(for: url)
+        if stayingInImageStudio {
+            // Preserve edit-column visibility; only refresh studio chrome for the new photo.
+            imageAdjustSession.setShowingBefore(false)
+            applyImageBeforeAfterPresentation()
+            syncImageStudioFilmstripVisibility()
+            updateImageZoomPercentLabel()
+            refreshImageStudioMetaBar()
+            syncPlayingWindowTitle()
+            updateImageStudioLayoutInsets()
+            imageFolderCarousel.layoutSubtreeIfNeeded()
+        } else {
+            showImageChrome()
+        }
 
         applyWindowAspectFromSettings()
+    }
+
+    private func refreshImageFolderCarousel(for url: URL) {
+        let folder = url.deletingLastPathComponent()
+        let sort = mediaLibraryController.browseSort
+        imageFolderSiblings = MediaLibraryScanner.imageFiles(in: folder, sort: sort)
+        imageFolderCarousel.setImages(imageFolderSiblings, selected: url)
+        updateImageStudioLayoutInsets()
+    }
+
+    private func clearImageFolderCarousel() {
+        imageFolderSiblings = []
+        imageFolderCarousel.clear()
+        updateImageStudioLayoutInsets()
     }
 
     func debugInfo(window: NSWindow?) -> String {
@@ -1614,6 +1975,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
+        }
+        if let edgeHotZoneClickMonitor {
+            NSEvent.removeMonitor(edgeHotZoneClickMonitor)
+        }
+        if let keyboardShortcutMonitor {
+            NSEvent.removeMonitor(keyboardShortcutMonitor)
+        }
+        if let scrollShortcutMonitor {
+            NSEvent.removeMonitor(scrollShortcutMonitor)
+        }
+        if let videoDoubleClickMonitor {
+            NSEvent.removeMonitor(videoDoubleClickMonitor)
         }
         removeImmersivePointerMonitor()
         renderMonitor.reset()
@@ -1726,6 +2099,74 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         case .remove:
             handleLibraryBrowseRemove(entry)
         }
+    }
+
+    private func handleLibraryBrowseBatchAction(_ action: LibraryBrowseBatchAction, entries: [LibraryBrowseEntry]) {
+        switch action {
+        case .play:
+            let files = flattenBrowseEntriesToMedia(entries)
+            guard !files.isEmpty else { return }
+            playAllMedia(files)
+        case .addToQueue:
+            let files = flattenBrowseEntriesToMedia(entries)
+            guard !files.isEmpty else { return }
+            appendPlaybackQueueItems(playbackQueueItems(for: files))
+        case .remove:
+            handleLibraryBrowseBatchRemove(entries)
+        }
+    }
+
+    private func flattenBrowseEntriesToMedia(_ entries: [LibraryBrowseEntry]) -> [LibraryMediaFile] {
+        var files: [LibraryMediaFile] = []
+        for entry in entries {
+            switch entry.kind {
+            case .media(let file):
+                files.append(file)
+            case .folder(let url):
+                files.append(contentsOf: mediaLibraryController.mediaFiles(in: url))
+            }
+        }
+        return files
+    }
+
+    private func handleLibraryBrowseBatchRemove(_ entries: [LibraryBrowseEntry]) {
+        let count = entries.count
+        guard count > 0 else { return }
+        let alert = NSAlert()
+        alert.messageText = count == 1 ? "Move to Trash?" : "Move \(count) Items to Trash?"
+        alert.informativeText = count == 1
+            ? "“\(entries[0].name)” will be moved to the Trash."
+            : "The selected items will be moved to the Trash."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var removedCurrent = false
+        for entry in entries {
+            guard let url = LibraryBrowseFileActions.itemURL(for: entry) else { continue }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+            do {
+                try LibraryBrowseFileActions.moveToTrash(url: url)
+                if isDirectory.boolValue {
+                    let files = mediaLibraryController.mediaFiles(in: url)
+                    removeURLsFromQueue(Set(files.map(\.url)))
+                } else {
+                    removeURLsFromQueue([url])
+                }
+                if currentMediaURL?.standardizedFileURL == url.standardizedFileURL {
+                    removedCurrent = true
+                }
+            } catch {
+                LibraryBrowseFileActions.presentError(error, title: "Could Not Remove")
+            }
+        }
+        if removedCurrent {
+            suspendPlayerOutputForStillOrEmpty()
+            showEmptySurface()
+        }
+        mediaLibraryController.reloadAfterFilesystemChange()
     }
 
     private func handleLibraryBrowsePlay(_ entry: LibraryBrowseEntry) {
@@ -1876,10 +2317,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateQueueTransportButtons() {
         let show = !queue.isEmpty || !playbackHistory.isEmpty
+        let canGoPrevious = !playbackHistory.isEmpty
+        let canGoNext = !queue.isEmpty
+
         queuePreviousButton.isHidden = !show
         queueNextButton.isHidden = !show
-        queuePreviousButton.isEnabled = !playbackHistory.isEmpty
-        queueNextButton.isEnabled = !queue.isEmpty
+        queuePreviousButton.isEnabled = canGoPrevious
+        queueNextButton.isEnabled = canGoNext
+
+        imageQueuePreviousButton.isHidden = !show
+        imageQueueNextButton.isHidden = !show
+        imageQueuePreviousButton.isEnabled = canGoPrevious
+        imageQueueNextButton.isEnabled = canGoNext
+
+        attachTransportSpeedIndicatorOverlays()
+        updatePlaybackSpeedTransportLabels()
     }
 
     private func openQueuedMedia(_ file: LibraryMediaFile, replaceVideo: Bool) {
@@ -1912,14 +2364,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func attachImageAccessoryClusterToImageControls() {
         moveQueueButtonToImageAccessoryCluster()
-        guard !imageControlsStack.arrangedSubviews.contains(imageAccessoryCluster) else { return }
-        imageControlsStack.addArrangedSubview(imageAccessoryCluster)
     }
 
     private func detachImageAccessoryClusterFromImageControls() {
-        guard imageControlsStack.arrangedSubviews.contains(imageAccessoryCluster) else { return }
-        imageControlsStack.removeArrangedSubview(imageAccessoryCluster)
-        imageAccessoryCluster.removeFromSuperview()
         moveQueueButtonToPlaybackAccessoryCluster()
     }
 
@@ -2054,6 +2501,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     func showEmptySurface() {
         activeMediaKind = .empty
+        playbackLibraryOverlay = .closed
+        hidePlaybackMiniPreview()
         hideCompatibilityFailure()
         renderMonitor.reset()
         endSecurityScopedAccess()
@@ -2062,6 +2511,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackSourceURL = nil
         activePlaybackFileURL = nil
         imageSurfaceView.clearImage()
+        clearImageFolderCarousel()
+        cancelImageCropMode()
         lastImageSize = nil
         lastVideoCodecFourCC = nil
         lastVideoSize = nil
@@ -2072,27 +2523,41 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playerSurfaceView.isHidden = false
         controlsContainer.isHidden = true
         imageControlsContainer.isHidden = true
+        imageFolderCarousel.isHidden = true
+        imageStudioMetaBar.isHidden = true
+        applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
         openButton.isHidden = true
         hintLabel.isHidden = true
         playerSurfaceView.isHidden = true
+        dragHostView.setImageStudioGradientActive(false)
         dragHostView.setPlaybackBackdropActive(false)
         hideSettingsSheet()
+        removeEdgeHotZoneClickMonitor()
         showFullMediaLibrary()
         applyContextualSettingsTabs()
         updateSettingsContentBottomInset()
+        updateImageStudioCommitFooter()
         raisePlaybackChromeToFront()
         syncPlayingWindowTitle()
         removeImmersivePointerMonitor()
         setImmersiveChromeVisible(true, animated: false)
         applyWindowAspectFromSettings()
+        installEdgeHotZoneClickMonitorIfNeeded()
+        syncEdgeHotZoneAffordances()
     }
 
     private func showVideoChrome() {
         activeMediaKind = .video
         dismissLibraryChromeForPlayback()
         hideMediaLibrary()
+        dragHostView.setImageStudioGradientActive(false)
         dragHostView.setPlaybackBackdropActive(true)
         imageSurfaceView.isHidden = true
+        imageFolderCarousel.isHidden = true
+        imageStudioMetaBar.isHidden = true
+        cancelImageCropMode()
+        clearImageFolderCarousel()
+        applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
         if !mpvBackendActive {
             connectPlayerToVideoSurfaces()
         }
@@ -2100,8 +2565,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageControlsContainer.isHidden = true
         openButton.isHidden = true
         hintLabel.isHidden = true
+        syncSettingsPanelGeometry()
+        styleRightSettingsPanel()
+        updateImageStudioLayoutInsets()
         applyContextualSettingsTabs()
         scheduleSettingsContentBottomInsetUpdate()
+        updateImageStudioCommitFooter()
         raisePlaybackChromeToFront()
         schedulePlaybackBarLayoutUpdate()
         scheduleResponsiveControlsLayout()
@@ -2112,6 +2581,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if !playbackPrepareActive && !fallbackInProgress {
             resetImmersiveChromeAfterMediaChange()
         }
+        installEdgeHotZoneClickMonitorIfNeeded()
+        syncEdgeHotZoneAffordances()
+        DispatchQueue.main.async { [weak self] in
+            self?.focusPlaybackSurfaceForTransportShortcuts()
+        }
     }
 
     private func dismissLibraryChromeForPlayback() {
@@ -2119,24 +2593,295 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackLibraryOverlay = .closed
         librarySidebar.isHidden = true
         libraryBrowse.isHidden = true
-        playbackMiniPreview.isHidden = true
+        hidePlaybackMiniPreview()
     }
 
     private func showImageChrome() {
         activeMediaKind = .image
-        hideMediaLibrary()
+        // Studio mode: folders / left library closed; photo padded in the main container.
+        dismissLibraryChromeForPlayback()
+        applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
         dragHostView.setPlaybackBackdropActive(false)
+        dragHostView.setImageStudioGradientActive(true)
         imageSurfaceView.isHidden = false
         playerSurfaceView.isHidden = true
+        controlsContainer.isHidden = true
         openButton.isHidden = true
         hintLabel.isHidden = true
+        imageAdjustSession.setShowingBefore(false)
+        applyImageBeforeAfterPresentation()
+        syncImageStudioFilmstripVisibility()
+        updateImageZoomPercentLabel()
+        refreshImageStudioMetaBar()
         applyContextualSettingsTabs()
         updateSettingsContentBottomInset()
+        updateImageStudioCommitFooter()
         raisePlaybackChromeToFront()
         updatePlaybackBarWidth()
         syncQueueChrome()
         syncPlayingWindowTitle()
-        resetImmersiveChromeAfterMediaChange()
+        // Always show the right adjust/settings panel for image studio.
+        if rightSettingsSheet.isHidden {
+            showSettingsSheet()
+        } else {
+            syncSettingsPanelGeometry()
+            updateImageStudioLayoutInsets()
+        }
+        view.layoutSubtreeIfNeeded()
+        updateImageStudioLayoutInsets()
+        syncPlaybackBarVisibilityForCurrentState()
+        // Keep title chrome available; do not treat this as immersive fullscreen video.
+        immersiveChromeHideWorkItem?.cancel()
+        immersiveChromeHideWorkItem = nil
+        setImmersiveChromeVisible(true, animated: false)
+        installEdgeHotZoneClickMonitorIfNeeded()
+        syncEdgeHotZoneAffordances()
+    }
+
+    private func updateImageStudioLayoutInsets() {
+        let isImage = activeMediaKind == .image
+        let showMetaBar = isImage && !imageStudioMetaBar.isHidden
+        let showCarousel = isImage && !imageFolderCarousel.isHidden && imageFolderSiblings.count >= 2 && !imageCarouselUserHidden
+
+        var leading: CGFloat = 0
+        var trailing: CGFloat = 0
+        var top: CGFloat = 0
+        var bottom: CGFloat = 0
+
+        if isImage {
+            // Integrated split: photo / meta / carousel pin to the edit column leading edge
+            // so opening the sidebar truly pushes the content column (not an overlay sheet).
+            leading = imageStudioMargin
+            top = imageStudioTopMargin
+
+            var bottomChrome: CGFloat = 0
+            if showMetaBar { bottomChrome += imageMetaBarHeight }
+            if showCarousel { bottomChrome += imageCarouselHeight }
+            let toolsBarHeight = imageBarHeightConstraint?.constant ?? 52
+            let toolsBarReserve: CGFloat = imageControlsContainer.isHidden ? 0 : (toolsBarHeight + 10 + 8)
+            bottom = -(bottomChrome + toolsBarReserve)
+
+            if playbackLibraryOverlay != .closed, !librarySidebar.isHidden {
+                let sidebarWidth = librarySidebar.bounds.width > 0
+                    ? librarySidebar.bounds.width
+                    : baseLibrarySidebarWidth
+                leading = sidebarWidth + imageStudioMargin
+                if playbackLibraryOverlay == .sidebarAndBrowse, !libraryBrowse.isHidden {
+                    leading += imageLibraryBrowseWidth
+                }
+            }
+
+            imageCarouselTrailingConstraint?.isActive = false
+            imageMetaBarTrailingConstraint?.isActive = false
+            imageSurfaceTrailingConstraint?.isActive = false
+            imageCarouselTrailingToSidebarConstraint?.isActive = true
+            imageMetaBarTrailingToSidebarConstraint?.isActive = true
+            imageSurfaceTrailingToSidebarConstraint?.isActive = true
+            imageSurfaceTrailingToSidebarConstraint?.constant = -12
+
+            // Full-bleed meta + filmstrip; edge open/close ignores clicks over this chrome.
+            imageCarouselLeadingConstraint?.constant = 0
+            imageMetaBarLeadingConstraint?.constant = 0
+            imageCarouselTrailingToSidebarConstraint?.constant = 0
+            imageMetaBarTrailingToSidebarConstraint?.constant = 0
+            imageCarouselHeightConstraint?.constant = showCarousel ? imageCarouselHeight : 0
+
+            syncImageStudioSettingsPanelGeometry()
+            syncImageStudioIntegratedChromeAppearance()
+            view.layoutSubtreeIfNeeded()
+            layoutImageStudioSidebarDivider()
+            imageFolderCarousel.refreshEdgeFades()
+            // Sidebar width changes the clip; keep the selected thumb visible (esp. first/last).
+            imageFolderCarousel.recenterSelected(animated: false)
+            DispatchQueue.main.async { [weak self] in
+                self?.imageFolderCarousel.recenterSelected(animated: false)
+            }
+            trailing = 0
+        } else {
+            imageCarouselTrailingToSidebarConstraint?.isActive = false
+            imageMetaBarTrailingToSidebarConstraint?.isActive = false
+            imageSurfaceTrailingToSidebarConstraint?.isActive = false
+            imageCarouselTrailingConstraint?.isActive = true
+            imageMetaBarTrailingConstraint?.isActive = true
+            imageSurfaceTrailingConstraint?.isActive = true
+
+            imageCarouselLeadingConstraint?.constant = 0
+            imageCarouselTrailingConstraint?.constant = 0
+            imageMetaBarLeadingConstraint?.constant = 0
+            imageMetaBarTrailingConstraint?.constant = 0
+            imageCarouselHeightConstraint?.constant = imageCarouselHeight
+            syncImageStudioSettingsPanelGeometry()
+            styleRightSettingsPanel()
+        }
+
+        imageSurfaceLeadingConstraint?.constant = leading
+        if !isImage {
+            imageSurfaceTrailingConstraint?.constant = trailing
+        }
+        imageSurfaceTopConstraint?.constant = top
+        imageSurfaceBottomConstraint?.constant = bottom
+        syncEdgeHotZoneStripInsets()
+    }
+
+    private func imageStudioSettingsTargetWidth(scale: CGFloat) -> CGFloat {
+        imageStudioSettingsPanelWidth * max(scale, 1)
+    }
+
+    private func videoSettingsTargetWidth(scale: CGFloat) -> CGFloat {
+        baseSettingsPanelWidth * max(scale, 1)
+    }
+
+    private func syncSettingsPanelGeometry() {
+        let scale = max(lastAppliedUIScale, 1)
+        let sheetVisible = !rightSettingsSheet.isHidden
+
+        switch activeMediaKind {
+        case .image:
+            settingsPanelTopConstraint?.constant = max(30, ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window))
+            imageSettingsTabsTopConstraint?.constant = 12
+            settingsPanelWidthConstraint?.constant = sheetVisible
+                ? imageStudioSettingsTargetWidth(scale: scale)
+                : 0
+            if sheetVisible {
+                layoutImageStudioSidebarDivider()
+            }
+        case .video:
+            settingsPanelTopConstraint?.constant = 0
+            imageSettingsTabsTopConstraint?.constant = settingsTabsTopInset
+            settingsPanelWidthConstraint?.constant = sheetVisible
+                ? videoSettingsTargetWidth(scale: scale)
+                : 0
+        case .empty:
+            settingsPanelTopConstraint?.constant = 0
+            settingsPanelWidthConstraint?.constant = 0
+        }
+    }
+
+    /// Image studio: sit the edit column under the translucent title chrome and use a narrower width.
+    private func syncImageStudioSettingsPanelGeometry() {
+        syncSettingsPanelGeometry()
+    }
+
+    /// Opaque shared chrome so the edit column reads as part of the studio floor, not a floating sheet.
+    private func syncImageStudioIntegratedChromeAppearance() {
+        styleRightSettingsPanel()
+        styleImageToolsBar()
+        imageStudioMetaBar.applyStudioChromeBackground()
+        imageFolderCarousel.applyStudioChromeBackground()
+    }
+
+    /// Opaque fill + separator border matching how the edit column reads over studio floor
+    /// (video bar stays frosted; translucent wash would brighten over the photo).
+    private func styleImageToolsBar() {
+        guard activeMediaKind == .image else {
+            imageToolsBarFillView.isHidden = true
+            MusicStylePlaybackBar.applyChrome(to: imageControlsContainer)
+            return
+        }
+        let appearance = view.effectiveAppearance
+        imageControlsContainer.material = .contentBackground
+        imageControlsContainer.blendingMode = .withinWindow
+        imageControlsContainer.state = .active
+        imageControlsContainer.isEmphasized = false
+        imageControlsContainer.wantsLayer = true
+        imageControlsContainer.layer?.cornerRadius = MusicStylePlaybackBar.barCornerRadius
+        imageControlsContainer.layer?.masksToBounds = true
+        imageControlsContainer.layer?.shadowOpacity = 0
+        imageControlsContainer.layer?.shadowPath = nil
+        // Clear VE tint — opaque fill view owns the color so the photo can’t lighten it.
+        imageControlsContainer.layer?.backgroundColor = nil
+        imageControlsContainer.layer?.borderWidth = 1
+        imageControlsContainer.layer?.borderColor = LaughTheme.imageStudioChromeBorder(appearance: appearance).cgColor
+        imageToolsBarFillView.isHidden = false
+        imageToolsBarFillView.layer?.backgroundColor =
+            LaughTheme.imageStudioPanelWashResolved(appearance: appearance).cgColor
+        MusicStylePlaybackBar.syncRoundedShape(for: imageControlsContainer)
+        imageControlsContainer.layer?.shadowOpacity = 0
+    }
+
+    private func syncImageStudioFilmstripVisibility() {
+        let hasSiblings = imageFolderSiblings.count >= 2
+        let showCarousel = activeMediaKind == .image && hasSiblings && !imageCarouselUserHidden
+        imageFolderCarousel.isHidden = !showCarousel
+        imageStudioMetaBar.isHidden = activeMediaKind != .image
+        imageCarouselHeightConstraint?.constant = showCarousel ? imageCarouselHeight : 0
+        syncEdgeHotZoneStripInsets()
+    }
+
+    private func refreshImageStudioMetaBar() {
+        guard activeMediaKind == .image, let url = currentMediaURL else { return }
+        let path = url.path
+        let percent = Int((imageSurfaceView.zoomScale * 100).rounded())
+        imageStudioMetaBar.configure(
+            fileName: url.lastPathComponent,
+            isFavorite: ImageLibraryMetaStore.isFavorite(path: path),
+            rating: ImageLibraryMetaStore.rating(path: path),
+            zoomPercent: percent,
+            isFitZoom: imageSurfaceView.isApproximatelyFitZoom,
+            carouselVisible: !imageCarouselUserHidden && imageFolderSiblings.count >= 2,
+            showingBefore: imageAdjustSession.isShowingBefore
+        )
+    }
+
+    private func applyImageStudioZoomMenuChoice(_ choice: ImageStudioZoomMenuChoice) {
+        guard activeMediaKind == .image else { return }
+        switch choice {
+        case .fitScreen:
+            imageSurfaceView.resetZoom()
+        case .percent(let percent):
+            let scale = max(0.2, min(24.0, CGFloat(percent) / 100.0))
+            imageSurfaceView.setZoomScale(scale)
+        }
+        updateImageZoomPercentLabel()
+    }
+
+    private func toggleImageFavorite() {
+        guard let url = currentMediaURL else { return }
+        let path = url.path
+        ImageLibraryMetaStore.setFavorite(!ImageLibraryMetaStore.isFavorite(path: path), path: path)
+        refreshImageStudioMetaBar()
+    }
+
+    private func setImageRating(_ rating: Int) {
+        guard let url = currentMediaURL else { return }
+        ImageLibraryMetaStore.setRating(rating, path: url.path)
+        refreshImageStudioMetaBar()
+    }
+
+    private func toggleImageCarouselVisibility() {
+        guard imageFolderSiblings.count >= 2 else { return }
+        imageCarouselUserHidden.toggle()
+        syncImageStudioFilmstripVisibility()
+        updateImageStudioLayoutInsets()
+        refreshImageStudioMetaBar()
+    }
+
+    private func setImageBeforeAfter(showingBefore: Bool) {
+        imageAdjustSession.setShowingBefore(showingBefore)
+        refreshImageStudioMetaBar()
+    }
+
+    private func applyImageBeforeAfterPresentation() {
+        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+    }
+
+    private func applyLibraryBrowseLayoutMode(dockedForImageStudio: Bool) {
+        guard libraryChromeInstalled else { return }
+        if dockedForImageStudio {
+            libraryBrowseTrailingToEdgeConstraint?.isActive = false
+            libraryBrowseWidthConstraint?.isActive = true
+        } else {
+            libraryBrowseWidthConstraint?.isActive = false
+            libraryBrowseTrailingToEdgeConstraint?.isActive = true
+        }
+    }
+
+    private func updateImageZoomPercentLabel() {
+        let percent = Int((imageSurfaceView.zoomScale * 100).rounded())
+        imageZoomPercentLabel.stringValue = "\(percent)%"
+        if activeMediaKind == .image {
+            refreshImageStudioMetaBar()
+        }
     }
 
     /// Queue drop target is shown only when something is already playing or queued.
@@ -2155,11 +2900,65 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func styleTitleBarChromeStrip() {
-        ImmersiveWindowChrome.applyFrostedPanelStyle(to: titleBarChromeStrip, leadingShadow: false)
+        titleBarChromeStrip.refreshPlate()
     }
 
     private func styleRightSettingsPanel() {
-        ImmersiveWindowChrome.applyFrostedPanelStyle(to: rightSettingsSheet, leadingShadow: true)
+        if activeMediaKind == .image {
+            let appearance = view.effectiveAppearance
+            // Stable within-window fill (slightly translucent so the studio wash still peeks through).
+            rightSettingsSheet.material = .contentBackground
+            rightSettingsSheet.blendingMode = .withinWindow
+            rightSettingsSheet.state = .active
+            rightSettingsSheet.wantsLayer = true
+            rightSettingsSheet.layer?.cornerRadius = 0
+            rightSettingsSheet.layer?.masksToBounds = true
+            rightSettingsSheet.layer?.shadowOpacity = 0
+            rightSettingsSheet.layer?.backgroundColor = nil
+            settingsColumnFillView.isHidden = false
+            let wash = LaughTheme.imageStudioPanelWash(appearance: appearance)
+            settingsColumnFillView.layer?.backgroundColor = wash.cgColor
+            // Opaque floor for fades — translucent wash made the dissolve nearly invisible.
+            let fadeFloor = LaughTheme.imageStudioFloorColor(appearance: appearance)
+            settingsTopOverflowFade.floorColor = fadeFloor
+            settingsBottomOverflowFade.floorColor = fadeFloor
+            if rightSettingsSheet.layer?.sublayers?.contains(where: { $0.name == "imageStudioLeadingDivider" }) != true {
+                let divider = CALayer()
+                divider.name = "imageStudioLeadingDivider"
+                rightSettingsSheet.layer?.addSublayer(divider)
+            }
+            layoutImageStudioSidebarDivider()
+            styleImageToolsBar()
+        } else {
+            settingsColumnFillView.isHidden = true
+            imageToolsBarFillView.isHidden = true
+            settingsTopOverflowFade.floorColor = NSColor.windowBackgroundColor
+            settingsBottomOverflowFade.floorColor = NSColor.windowBackgroundColor
+            rightSettingsSheet.layer?.sublayers?
+                .filter { $0.name == "imageStudioLeadingDivider" }
+                .forEach { $0.removeFromSuperlayer() }
+            rightSettingsSheet.layer?.masksToBounds = false
+            rightSettingsSheet.state = .active
+            ImmersiveWindowChrome.applyFrostedPanelStyle(to: rightSettingsSheet, leadingShadow: false)
+            MusicStylePlaybackBar.applyChrome(to: imageControlsContainer)
+        }
+        settingsTopOverflowFade.refreshOverflow(animated: false)
+        settingsBottomOverflowFade.refreshOverflow(animated: false)
+    }
+
+    private func layoutImageStudioSidebarDivider() {
+        guard let layer = rightSettingsSheet.layer,
+              let divider = layer.sublayers?.first(where: { $0.name == "imageStudioLeadingDivider" })
+        else { return }
+        let appearance = view.effectiveAppearance
+        let border = LaughTheme.imageStudioChromeBorder(appearance: appearance)
+        divider.frame = CGRect(x: 0, y: 0, width: 1, height: layer.bounds.height)
+        divider.backgroundColor = border.cgColor
+        if activeMediaKind == .image {
+            imageControlsContainer.layer?.borderColor = border.cgColor
+            imageToolsBarFillView.layer?.backgroundColor =
+                LaughTheme.imageStudioPanelWashResolved(appearance: appearance).cgColor
+        }
     }
 
     private func configureSettingsTabsAppearance() {
@@ -2180,7 +2979,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             action: #selector(videoSettingsTabPressed(_:))
         )
         buildSettingsTabButtons(
-            titlesAndSymbols: [("Image", "slider.horizontal.3"), ("Fit & Zoom", "arrow.up.left.and.arrow.down.right")],
+            titlesAndSymbols: [("Edits", "slider.horizontal.3"), ("Presets", "square.grid.2x2")],
             in: imageSettingsTabsRow,
             storage: &imageSettingsTabButtons,
             headerStorage: &imageSettingsTabHeaders,
@@ -2232,6 +3031,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 color = LaughTheme.settingsTabIdle
             }
             button.textColor = color
+            button.iconTintColor = LaughTheme.playbackAccent
             button.needsDisplay = true
             if index < videoSettingsTabHeaders.count {
                 videoSettingsTabHeaders[index].isActive = isActive
@@ -2249,6 +3049,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 color = LaughTheme.settingsTabIdle
             }
             button.textColor = color
+            button.usesRainbowIcon = false
+            button.iconTintColor = color
             button.needsDisplay = true
             if index < imageSettingsTabHeaders.count {
                 imageSettingsTabHeaders[index].isActive = isActive
@@ -2257,11 +3059,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func raisePlaybackChromeToFront() {
-        // Keep the playback bar above the settings sheet so queue/settings stay clickable while the panel is open.
+        // Filmstrip / meta above edge strips so thumbs & favorites receive clicks first.
+        view.addSubview(imageFolderCarousel, positioned: .above, relativeTo: imageSurfaceView)
+        view.addSubview(imageStudioMetaBar, positioned: .above, relativeTo: imageFolderCarousel)
+        // Image studio: edit sidebar is a full-height column above the left content strip.
+        if activeMediaKind == .image, !rightSettingsSheet.isHidden {
+            view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: imageStudioMetaBar)
+            ensureSettingsTabRowsAboveContent()
+        }
         view.addSubview(controlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
         view.addSubview(imageControlsContainer, positioned: .above, relativeTo: rightSettingsSheet)
         view.addSubview(queueDropZone, positioned: .above, relativeTo: rightSettingsSheet)
-        if !rightSettingsSheet.isHidden {
+        // Edge cues above content, but below filmstrip/meta so bottom chrome wins hits.
+        view.addSubview(leftEdgeHotZoneAffordance, positioned: .above, relativeTo: imageControlsContainer)
+        view.addSubview(rightEdgeHotZoneAffordance, positioned: .above, relativeTo: leftEdgeHotZoneAffordance)
+        view.addSubview(imageFolderCarousel, positioned: .above, relativeTo: rightEdgeHotZoneAffordance)
+        view.addSubview(imageStudioMetaBar, positioned: .above, relativeTo: imageFolderCarousel)
+        if activeMediaKind != .image, !rightSettingsSheet.isHidden {
             ensureSettingsTabRowsAboveContent()
         }
         if libraryChromeInstalled {
@@ -2271,9 +3085,55 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
             view.addSubview(librarySidebar, positioned: .above, relativeTo: playerSurfaceView)
             view.addSubview(libraryBrowse, positioned: .above, relativeTo: playerSurfaceView)
+            view.addSubview(librarySidebar, positioned: .above, relativeTo: imageSurfaceView)
+            view.addSubview(libraryBrowse, positioned: .above, relativeTo: imageFolderCarousel)
+            // Folder management must sit above the floating playback/image bars.
+            if playbackLibraryOverlay != .closed {
+                view.addSubview(librarySidebar, positioned: .above, relativeTo: controlsContainer)
+                view.addSubview(libraryBrowse, positioned: .above, relativeTo: controlsContainer)
+                view.addSubview(librarySidebar, positioned: .above, relativeTo: imageControlsContainer)
+                view.addSubview(libraryBrowse, positioned: .above, relativeTo: imageControlsContainer)
+            }
             view.addSubview(playbackMiniPreview, positioned: .above, relativeTo: libraryBrowse)
         }
         raiseTitleBarChromeToFront()
+        raiseEdgeHotZoneAffordancesToFront()
+    }
+
+    private func raiseEdgeHotZoneAffordancesToFront() {
+        // Above the video surface and title chrome so the hover wash stays visible.
+        view.addSubview(leftEdgeHotZoneAffordance, positioned: .above, relativeTo: playerSurfaceView)
+        view.addSubview(rightEdgeHotZoneAffordance, positioned: .above, relativeTo: leftEdgeHotZoneAffordance)
+        if !titleBarChromeStrip.isHidden {
+            view.addSubview(leftEdgeHotZoneAffordance, positioned: .above, relativeTo: titleBarChromeStrip)
+            view.addSubview(rightEdgeHotZoneAffordance, positioned: .above, relativeTo: leftEdgeHotZoneAffordance)
+        }
+        if !rightSettingsSheet.isHidden {
+            // Keep the close-zone strip visible beside the settings column.
+            view.addSubview(rightEdgeHotZoneAffordance, positioned: .above, relativeTo: rightSettingsSheet)
+        }
+        if activeMediaKind == .image {
+            if !imageFolderCarousel.isHidden {
+                view.addSubview(imageFolderCarousel, positioned: .above, relativeTo: rightEdgeHotZoneAffordance)
+            }
+            if !imageStudioMetaBar.isHidden {
+                view.addSubview(imageStudioMetaBar, positioned: .above, relativeTo: imageFolderCarousel)
+            }
+            if !imageControlsContainer.isHidden {
+                view.addSubview(imageControlsContainer, positioned: .above, relativeTo: imageStudioMetaBar)
+            }
+        }
+    }
+
+    private func setEdgeHotZonePointerCursor(_ active: Bool) {
+        if active {
+            guard !edgeHotZoneCursorPushed else { return }
+            edgeHotZoneCursorPushed = true
+            NSCursor.pointingHand.push()
+        } else if edgeHotZoneCursorPushed {
+            edgeHotZoneCursorPushed = false
+            NSCursor.pop()
+        }
     }
 
     private func raiseTitleBarChromeToFront() {
@@ -2296,10 +3156,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.settingsBottomInsetScheduled = false
-            let clearance = self.activeMediaKind == .empty
-                ? self.settingsPanelInnerInset
-                : self.settingsContentBottomClearance
+            let clearance: CGFloat
+            switch self.activeMediaKind {
+            case .image:
+                // Docked edit column — keep a small inset so the last section isn’t flush.
+                // Commit footer (when visible) already lifts the scroll bottom.
+                clearance = max(self.settingsPanelInnerInset, 16)
+            case .empty:
+                clearance = self.settingsPanelInnerInset
+            case .video:
+                // Side column — only a small inset; playback bar sits over the video, not this panel.
+                clearance = max(self.settingsPanelInnerInset, 16)
+            }
             self.settingsContentBottomConstraint?.constant = -clearance
+            self.settingsTopOverflowFade.refreshOverflow(animated: false)
+            self.settingsBottomOverflowFade.refreshOverflow(animated: false)
         }
     }
 
@@ -2348,7 +3219,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     let codec = CMFormatDescriptionGetMediaSubType(formatDesc)
                     let fourCC = fourCCString(codec)
                     await MainActor.run {
-                        print("[DEBUG-playback] video codec fourcc=\(fourCC)")
+                        PlaybackTrace.emit("[DEBUG-playback] video codec fourcc=\(fourCC)")
                         self.lastVideoCodecFourCC = fourCC
                         self.renderMonitor.videoCodecFourCC = fourCC
                         self.updateVideoInfoLabels()
@@ -2397,6 +3268,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         schedulePlaybackBarLayoutUpdate()
         scheduleMiniPreviewLayoutUpdate()
         scheduleResponsiveControlsLayout()
+        if activeMediaKind == .image {
+            layoutImageStudioSidebarDivider()
+        }
     }
 
     private func schedulePlaybackBarLayoutUpdate() {
@@ -2466,7 +3340,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastAppliedUIScale = scale
 
         librarySidebarWidthConstraint?.constant = baseLibrarySidebarWidth * scale
-        settingsPanelWidthConstraint?.constant = baseSettingsPanelWidth * scale
+        syncSettingsPanelGeometry()
 
         let tabButtons = videoSettingsTabButtons + imageSettingsTabButtons
         tabButtons.forEach { $0.uiScale = scale }
@@ -2608,7 +3482,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if !plannedRoute, FFmpegVideoFallback.shouldPreferBlockingRemux(for: inputURL) {
                 await MainActor.run {
                     guard activeGeneration == self.videoLoadGeneration else { return }
-                    print("[DEBUG-fallback] blocking remux preferred (audio transcode)")
+                    PlaybackTrace.emit("[DEBUG-fallback] blocking remux preferred (audio transcode)")
                     self.runBlockingRemuxFallback(
                         inputURL: inputURL,
                         activeGeneration: activeGeneration,
@@ -2645,7 +3519,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     ) {
         switch remuxStart {
         case .cacheHit(let cachedURL):
-            print("[DEBUG-fallback] cache hit path=\(cachedURL.path)")
+            PlaybackTrace.emit("[DEBUG-fallback] cache hit path=\(cachedURL.path)")
             fallbackInProgress = true
             updateSeekBarPreparingState()
             if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
@@ -2685,7 +3559,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlayPauseButtonIcon()
         updateSeekBarPreparingState()
 
-        print("[DEBUG-fallback] preview poll preview=\(previewURL.path) full=\(fullTargetURL.path)")
+        PlaybackTrace.emit("[DEBUG-fallback] preview poll preview=\(previewURL.path) full=\(fullTargetURL.path)")
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
@@ -2721,7 +3595,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
                             self.pendingStartTimeAfterLoad = resumeTime
                         }
-                        print("[DEBUG-fallback] full remux ready — attaching")
+                        PlaybackTrace.emit("[DEBUG-fallback] full remux ready — attaching")
                         self.fallbackConvertedOutputPaths.insert(fullTargetURL.path)
                         self.resolveAndAttach(
                             playableURL: fullTargetURL,
@@ -2746,7 +3620,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
                             self.pendingStartTimeAfterLoad = resumeTime
                         }
-                        print("[DEBUG-fallback] chunked preview start waitedMs=\(waitedMs) sourceDur=\(sourceDuration ?? 0)s")
+                        PlaybackTrace.emit("[DEBUG-fallback] chunked preview start waitedMs=\(waitedMs) sourceDur=\(sourceDuration ?? 0)s")
                         self.activePreviewFullTargetURL = fullTargetURL
                         self.activePreviewSourceDurationSec = sourceDuration
                         self.activePlayableDurationSec = 0
@@ -3006,30 +3880,141 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func configureImageControls() {
+        styleIconButton(imageQueuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: 13)
         styleIconButton(imageZoomOutButton, symbol: "minus.magnifyingglass", label: "Zoom out")
+        styleIconButton(imageActualSizeButton, symbol: "1.magnifyingglass", label: "Actual size")
         styleIconButton(imageZoomInButton, symbol: "plus.magnifyingglass", label: "Zoom in")
         styleIconButton(imageFitButton, symbol: "arrow.up.left.and.arrow.down.right", label: "Fit")
+        styleIconButton(imageCropButton, symbol: "crop", label: "Crop")
+        styleIconButton(imageRotateLeftButton, symbol: "rotate.left", label: "Rotate left")
+        styleIconButton(imageRotateRightButton, symbol: "rotate.right", label: "Rotate right")
+        styleIconButton(imageQueueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: 13)
+        pinTransportIconButtonSize(imageQueuePreviousButton)
+        pinTransportIconButtonSize(imageQueueNextButton)
+
+        imageQueuePreviousButton.target = self
         imageZoomOutButton.target = self
+        imageActualSizeButton.target = self
         imageZoomInButton.target = self
         imageFitButton.target = self
+        imageCropButton.target = self
+        imageRotateLeftButton.target = self
+        imageRotateRightButton.target = self
+        imageQueueNextButton.target = self
         imageSettingsButton.target = self
+        imageLibraryButton.target = self
+
+        imageQueuePreviousButton.action = #selector(queuePreviousPressed)
         imageZoomOutButton.action = #selector(imageZoomOut)
+        imageActualSizeButton.action = #selector(imageActualSize)
         imageZoomInButton.action = #selector(imageZoomIn)
         imageFitButton.action = #selector(imageFit)
+        imageCropButton.action = #selector(imageCropPressed)
+        imageRotateLeftButton.action = #selector(imageRotateLeft)
+        imageRotateRightButton.action = #selector(imageRotateRight)
+        imageQueueNextButton.action = #selector(queueNextPressed)
         imageSettingsButton.action = #selector(settingsPressed)
+        imageLibraryButton.action = #selector(libraryPressed)
 
-        imageControlsStack.alignment = .centerY
-        imageControlsStack.distribution = .equalCentering
-        imageControlsStack.spacing = 16
-        imageControlsStack.addArrangedSubview(imageZoomOutButton)
-        imageControlsStack.addArrangedSubview(imageZoomInButton)
-        imageControlsStack.addArrangedSubview(imageFitButton)
+        imageCropBar.onAspectChange = { [weak self] in
+            self?.imageCropAspectChanged()
+        }
+        imageCropBar.cancelButton.target = self
+        imageCropBar.cancelButton.action = #selector(imageCropCancelPressed)
+        imageCropBar.applyButton.target = self
+        imageCropBar.applyButton.action = #selector(imageCropApplyPressed)
+        imageCropBar.rotateLeftButton.target = self
+        imageCropBar.rotateLeftButton.action = #selector(imageRotateLeft)
+        imageCropBar.rotateRightButton.target = self
+        imageCropBar.rotateRightButton.action = #selector(imageRotateRight)
+        imageCropBar.flipHorizontalButton.target = self
+        imageCropBar.flipHorizontalButton.action = #selector(imageCropFlipHorizontal)
+        imageCropBar.flipVerticalButton.target = self
+        imageCropBar.flipVerticalButton.action = #selector(imageCropFlipVertical)
+        imageCropBar.isHidden = true
+        imageCropBar.translatesAutoresizingMaskIntoConstraints = false
+
+        imageQueuePreviousButton.isHidden = true
+        imageQueueNextButton.isHidden = true
+
+        imageLeadingAccessoryCluster.orientation = .horizontal
+        imageLeadingAccessoryCluster.alignment = .centerY
+        imageLeadingAccessoryCluster.spacing = 0
+        imageLeadingAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
+        imageLeadingAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
+        imageLeadingAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        if !imageLeadingAccessoryCluster.arrangedSubviews.contains(imageLibraryButton) {
+            imageLeadingAccessoryCluster.addArrangedSubview(imageLibraryButton)
+        }
+
+        imageTransportCluster.orientation = .horizontal
+        imageTransportCluster.alignment = .centerY
+        imageTransportCluster.distribution = .fill
+        imageTransportCluster.spacing = 8
+        imageTransportCluster.translatesAutoresizingMaskIntoConstraints = false
+        imageTransportCluster.setContentHuggingPriority(.required, for: .horizontal)
+        imageTransportCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        imageTransportCluster.arrangedSubviews.forEach {
+            imageTransportCluster.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        [
+            imageQueuePreviousButton,
+            imageZoomOutButton,
+            imageActualSizeButton,
+            imageZoomInButton,
+            imageFitButton,
+            imageCropButton,
+            imageRotateLeftButton,
+            imageRotateRightButton,
+            imageQueueNextButton
+        ].forEach { imageTransportCluster.addArrangedSubview($0) }
 
         imageAccessoryCluster.orientation = .horizontal
         imageAccessoryCluster.alignment = .centerY
         imageAccessoryCluster.spacing = 0
         imageAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
-        imageAccessoryCluster.addArrangedSubview(imageSettingsButton)
+        imageAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
+        imageAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        if !imageAccessoryCluster.arrangedSubviews.contains(imageSettingsButton) {
+            imageAccessoryCluster.addArrangedSubview(imageSettingsButton)
+        }
+    }
+
+    private func setupImageTopRowLayout() {
+        guard !imageTopRowLayoutConfigured else { return }
+        imageTopRowLayoutConfigured = true
+
+        imageTopRowView.addSubview(imageLeadingAccessoryCluster)
+        imageTopRowView.addSubview(imageTransportCluster)
+        imageTopRowView.addSubview(imageAccessoryCluster)
+        imageTopRowView.addSubview(imageCropBar)
+
+        NSLayoutConstraint.activate([
+            imageLeadingAccessoryCluster.leadingAnchor.constraint(
+                greaterThanOrEqualTo: imageTopRowView.leadingAnchor
+            ),
+            imageLeadingAccessoryCluster.trailingAnchor.constraint(
+                equalTo: imageTransportCluster.leadingAnchor,
+                constant: -playbackControlClusterSpacing
+            ),
+            imageLeadingAccessoryCluster.centerYAnchor.constraint(equalTo: imageTopRowView.centerYAnchor),
+
+            imageTransportCluster.centerXAnchor.constraint(equalTo: imageTopRowView.centerXAnchor),
+            imageTransportCluster.centerYAnchor.constraint(equalTo: imageTopRowView.centerYAnchor),
+            imageTransportCluster.trailingAnchor.constraint(
+                lessThanOrEqualTo: imageAccessoryCluster.leadingAnchor,
+                constant: -8
+            ),
+
+            imageAccessoryCluster.trailingAnchor.constraint(equalTo: imageTopRowView.trailingAnchor),
+            imageAccessoryCluster.centerYAnchor.constraint(equalTo: imageTopRowView.centerYAnchor),
+
+            imageCropBar.leadingAnchor.constraint(equalTo: imageTopRowView.leadingAnchor),
+            imageCropBar.trailingAnchor.constraint(equalTo: imageTopRowView.trailingAnchor),
+            imageCropBar.topAnchor.constraint(equalTo: imageTopRowView.topAnchor),
+            imageCropBar.bottomAnchor.constraint(equalTo: imageTopRowView.bottomAnchor)
+        ])
     }
 
     private func configurePlaybackAccessoryClusters() {
@@ -3072,9 +4057,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         styleIconButton(speedStepDownButton, symbol: "backward.fill", label: "Slower", pointSize: 13)
         styleIconButton(speedStepUpButton, symbol: "forward.fill", label: "Faster", pointSize: 13)
         styleIconButton(queueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: 13)
-        configureTransportSpeedLabel(playbackSpeedSlowLabel, alignment: .right)
-        configureTransportSpeedLabel(playbackSpeedFastLabel, alignment: .left)
+        configureTransportSpeedLabel(playbackSpeedSlowLabel, alignment: .left)
+        configureTransportSpeedLabel(playbackSpeedFastLabel, alignment: .right)
         configurePlaybackBarAccessoryButton(libraryButton, symbol: "folder", label: "Library")
+        configurePlaybackBarAccessoryButton(imageLibraryButton, symbol: "folder", label: "Library")
         configurePlaybackBarAccessoryButton(queueButton, symbol: "list.bullet", label: "Queue")
         configurePlaybackBarAccessoryButton(settingsButton, symbol: "gearshape", label: "Settings")
         configurePlaybackBarAccessoryButton(imageSettingsButton, symbol: "gearshape", label: "Settings")
@@ -3167,14 +4153,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             stack.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         }
 
-        addSettingsSection(to: videoTabView, title: "Decode", isFirst: true) { card in
+        addPlaybackSettingsSection(to: videoTabView, title: "Decode", symbolName: "cpu", isFirst: true) { card in
             card.addFinalRow(SettingsRowFactory.valueRow(title: "Path", control: playbackSourcePopUp))
         }
-        addSettingsSection(to: videoTabView, title: "Playback") { card in
+        addPlaybackSettingsSection(to: videoTabView, title: "Playback", symbolName: "play.circle") { card in
             card.addRow(makePlaybackSpeedSectionRow())
             card.addFinalRow(SettingsRowFactory.toggleRow(title: "Loop playback", control: loopPlaybackCheckbox))
         }
-        addSettingsSection(to: videoTabView, title: "Display") { card in
+        addPlaybackSettingsSection(to: videoTabView, title: "Display", symbolName: "rectangle.inset.filled") { card in
             card.addRow(SettingsRowFactory.stackedRow(title: "Scale", control: videoFitModeControl))
             card.addRow(SettingsRowFactory.stackedRow(title: "Aspect", control: windowAspectControl))
             card.addFinalRow(
@@ -3185,21 +4171,115 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         configureAudioSettingsTab()
         configureSubtitlesSettingsTab()
 
-        let imageTitle = NSTextField(labelWithString: "Image Settings")
-        imageTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        let imageHint = NSTextField(labelWithString: "Display and export options will appear here.")
-        imageHint.textColor = .secondaryLabelColor
-        imageHint.maximumNumberOfLines = 0
-        imageTabView.addArrangedSubview(imageTitle)
-        imageTabView.addArrangedSubview(imageHint)
+        imageTabView.arrangedSubviews.forEach {
+            imageTabView.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        imageFitTabView.arrangedSubviews.forEach {
+            imageFitTabView.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
 
-        let fitTitle = NSTextField(labelWithString: "Fit & Zoom")
-        fitTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        let fitHint = NSTextField(labelWithString: "Use Fit and zoom controls in the playback bar.")
-        fitHint.textColor = .secondaryLabelColor
-        fitHint.maximumNumberOfLines = 0
-        imageFitTabView.addArrangedSubview(fitTitle)
-        imageFitTabView.addArrangedSubview(fitHint)
+        imageSectionHeaders.removeAll()
+
+        // Outline owns its own vertical rhythm (title → tools → next group → bottom pad).
+        imageTabView.spacing = 0
+
+        for (groupIndex, (group, tools)) in ImageDevelopOutline.groups.enumerated() {
+            if groupIndex > 0 {
+                let groupGap = NSView()
+                groupGap.translatesAutoresizingMaskIntoConstraints = false
+                groupGap.heightAnchor.constraint(equalToConstant: ImageDevelopOutlineStyle.groupSpacing).isActive = true
+                imageTabView.addArrangedSubview(groupGap)
+            }
+
+            let groupColumn = NSStackView()
+            groupColumn.orientation = .vertical
+            groupColumn.alignment = .leading
+            groupColumn.spacing = ImageDevelopOutlineStyle.titleToTools
+            groupColumn.translatesAutoresizingMaskIntoConstraints = false
+
+            let groupHeader = ImageDevelopGroupHeaderView(title: group.title)
+            groupColumn.addArrangedSubview(groupHeader)
+            groupHeader.widthAnchor.constraint(equalTo: groupColumn.widthAnchor).isActive = true
+
+            let toolsColumn = NSStackView()
+            toolsColumn.orientation = .vertical
+            toolsColumn.alignment = .leading
+            toolsColumn.spacing = ImageDevelopOutlineStyle.toolRowSpacing
+            toolsColumn.translatesAutoresizingMaskIntoConstraints = false
+            groupColumn.addArrangedSubview(toolsColumn)
+            toolsColumn.widthAnchor.constraint(equalTo: groupColumn.widthAnchor).isActive = true
+
+            for tool in tools {
+                if let section = tool.adjustSection {
+                    addImageAdjustSection(
+                        section,
+                        to: toolsColumn,
+                        symbolName: tool.symbolName,
+                        isFirst: true,
+                        leadingGap: 0
+                    ) { card in
+                        self.configureImageAdjustCard(card, for: section)
+                    }
+                } else {
+                    addImageDevelopComingSoonRow(
+                        title: tool.title,
+                        symbolName: tool.symbolName,
+                        to: toolsColumn,
+                        leadingGap: 0
+                    )
+                }
+            }
+
+            imageTabView.addArrangedSubview(groupColumn)
+            groupColumn.widthAnchor.constraint(equalTo: imageTabView.widthAnchor).isActive = true
+        }
+
+        let outlineBottomPad = NSView()
+        outlineBottomPad.translatesAutoresizingMaskIntoConstraints = false
+        outlineBottomPad.heightAnchor.constraint(equalToConstant: ImageDevelopOutlineStyle.bottomPadding).isActive = true
+        imageTabView.addArrangedSubview(outlineBottomPad)
+        outlineBottomPad.widthAnchor.constraint(equalTo: imageTabView.widthAnchor).isActive = true
+
+        addSettingsSection(
+            to: imageFitTabView,
+            title: "Looks",
+            symbolName: "sparkles",
+            isFirst: true
+        ) { card in
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(makeImagePresetGrid(
+                presets: [.original, .vivid, .soft, .warm, .cool]
+            )))
+        }
+
+        addSettingsSection(
+            to: imageFitTabView,
+            title: "Mood",
+            symbolName: "paintbrush.pointed"
+        ) { card in
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(makeImagePresetGrid(
+                presets: [.contrast, .dramatic, .fade, .mono, .highKey, .superContrast]
+            )))
+        }
+
+        addSettingsSection(
+            to: imageFitTabView,
+            title: "Film",
+            symbolName: "film"
+        ) { card in
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(makeImagePresetGrid(
+                presets: [.portra, .fuji, .noir]
+            )))
+        }
+
+        imageSavedPresetsHost.orientation = .vertical
+        imageSavedPresetsHost.alignment = .leading
+        imageSavedPresetsHost.spacing = settingsStackSpacing
+        imageSavedPresetsHost.translatesAutoresizingMaskIntoConstraints = false
+        imageFitTabView.addArrangedSubview(imageSavedPresetsHost)
+        imageSavedPresetsHost.widthAnchor.constraint(equalTo: imageFitTabView.widthAnchor).isActive = true
+        refreshImageSavedPresetsSection()
 
         [imageTabView, imageFitTabView].forEach { stack in
             stack.orientation = .vertical
@@ -3207,6 +4287,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             stack.spacing = settingsStackSpacing
             stack.translatesAutoresizingMaskIntoConstraints = false
         }
+        // Edits outline uses explicit spacers; keep stack spacing at 0 so gaps don’t double.
+        imageTabView.spacing = 0
 
         settingsContentContainer.addSubview(videoTabView)
         settingsContentContainer.addSubview(audioTabView)
@@ -3218,8 +4300,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             NSLayoutConstraint.activate([
                 tab.leadingAnchor.constraint(equalTo: settingsContentContainer.leadingAnchor),
                 tab.trailingAnchor.constraint(equalTo: settingsContentContainer.trailingAnchor),
-                tab.topAnchor.constraint(equalTo: settingsContentContainer.topAnchor),
-                tab.bottomAnchor.constraint(lessThanOrEqualTo: settingsContentContainer.bottomAnchor)
+                tab.topAnchor.constraint(equalTo: settingsContentContainer.topAnchor)
             ])
         }
 
@@ -3240,25 +4321,51 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             tab.alphaValue = 0
         }
 
+        let activeTab: NSView?
         switch activeMediaKind {
         case .video:
             let index = max(0, min(selectedVideoSettingsTabIndex, videoTabs.count - 1))
             selectedVideoSettingsTabIndex = index
-            let activeTab = videoTabs[index]
-            activeTab.isHidden = false
-            activeTab.alphaValue = 1
-            settingsContentContainer.addSubview(activeTab, positioned: .above, relativeTo: nil)
+            activeTab = videoTabs[index]
         case .image:
             let index = max(0, min(selectedImageSettingsTabIndex, imageTabs.count - 1))
             selectedImageSettingsTabIndex = index
-            let activeTab = imageTabs[index]
+            activeTab = imageTabs[index]
+        case .empty:
+            activeTab = nil
+        }
+
+        if let activeTab {
             activeTab.isHidden = false
             activeTab.alphaValue = 1
-            settingsContentContainer.addSubview(activeTab, positioned: .above, relativeTo: nil)
-        case .empty:
-            break
+            settingsContentContainer.addSubview(activeTab)
+            pinSettingsScrollDocument(to: activeTab)
+        } else {
+            settingsActiveTabBottomConstraint?.isActive = false
+            settingsActiveTabBottomConstraint = nil
         }
         settingsContentContainer.layoutSubtreeIfNeeded()
+        resetSettingsScrollPosition()
+    }
+
+    private func pinSettingsScrollDocument(to tab: NSView) {
+        settingsActiveTabBottomConstraint?.isActive = false
+        let bottom = tab.bottomAnchor.constraint(
+            equalTo: settingsContentContainer.bottomAnchor,
+            constant: -8
+        )
+        bottom.priority = NSLayoutConstraint.Priority.required
+        settingsActiveTabBottomConstraint = bottom
+        bottom.isActive = true
+    }
+
+    private func resetSettingsScrollPosition() {
+        settingsContentContainer.layoutSubtreeIfNeeded()
+        let clip = settingsScrollView.contentView
+        clip.scroll(to: NSPoint(x: 0, y: 0))
+        settingsScrollView.reflectScrolledClipView(clip)
+        settingsTopOverflowFade.refreshOverflow(animated: false)
+        settingsBottomOverflowFade.refreshOverflow(animated: false)
     }
 
     private func updateVideoInfoLabels() {
@@ -3471,24 +4578,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             setTransportSpeedLabelText(
                 formattedPlaybackSpeed(preferredPlaybackRate),
                 on: playbackSpeedSlowLabel,
-                alignment: .right
+                alignment: .left
             )
-            playbackSpeedSlowLabel.alphaValue = 1
+            playbackSpeedSlowLabel.isHidden = false
         } else {
             clearTransportSpeedLabel(playbackSpeedSlowLabel)
-            playbackSpeedSlowLabel.alphaValue = 0
+            playbackSpeedSlowLabel.isHidden = true
         }
 
         if isFastSpeed {
             setTransportSpeedLabelText(
                 formattedPlaybackSpeed(preferredPlaybackRate),
                 on: playbackSpeedFastLabel,
-                alignment: .left
+                alignment: .right
             )
-            playbackSpeedFastLabel.alphaValue = 1
+            playbackSpeedFastLabel.isHidden = false
         } else {
             clearTransportSpeedLabel(playbackSpeedFastLabel)
-            playbackSpeedFastLabel.alphaValue = 0
+            playbackSpeedFastLabel.isHidden = true
         }
 
         speedStepDownButton.isEnabled = index > 0
@@ -3503,7 +4610,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func configureAudioSettingsTab() {
         audioSettings.trackPopUp.target = self
         audioSettings.trackPopUp.action = #selector(audioTrackPopUpChanged)
-        addSettingsSection(to: audioTabView, title: "Track", isFirst: true) { card in
+        addPlaybackSettingsSection(to: audioTabView, title: "Track", symbolName: "waveform", isFirst: true) { card in
             card.addFinalRow(SettingsRowFactory.valueRow(title: "Audio", control: audioSettings.trackPopUp))
         }
 
@@ -3513,7 +4620,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             slider.target = self
             slider.action = #selector(audioEQBandChanged)
         }
-        addSettingsSection(to: audioTabView, title: "Equalizer") { card in
+        addPlaybackSettingsSection(to: audioTabView, title: "Equalizer", symbolName: "slider.vertical.3") { card in
             card.addRow(SettingsRowFactory.valueRow(title: "Preset", control: audioSettings.eqPresetPopUp))
             card.addRow(SettingsRowFactory.fullWidthRow(audioSettings.eqUnavailableLabel))
             card.addFinalRow(SettingsRowFactory.fullWidthRow(audioSettings.eqBandsRow))
@@ -3537,7 +4644,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         externalRow.addArrangedSubview(s.loadExternalButton)
         externalRow.addArrangedSubview(s.externalFileLabel)
 
-        addSettingsSection(to: subtitlesTabView, title: "Tracks", isFirst: true) { card in
+        addPlaybackSettingsSection(to: subtitlesTabView, title: "Tracks", symbolName: "captions.bubble", isFirst: true) { card in
             card.addRow(makeSettingsSubtitleTrackBlock(
                 title: "Primary",
                 toggle: s.primaryEnabledSwitch,
@@ -3554,7 +4661,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             card.addFinalRow(SettingsRowFactory.fullWidthRow(s.extendedOnlyLabel))
         }
 
-        addSettingsSection(to: subtitlesTabView, title: "Timing") { card in
+        addPlaybackSettingsSection(to: subtitlesTabView, title: "Timing", symbolName: "clock") { card in
             card.addFinalRow(SettingsRowFactory.sliderRow(
                 title: "Delay",
                 slider: s.delaySlider,
@@ -3562,7 +4669,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ))
         }
 
-        addSettingsSection(to: subtitlesTabView, title: "Placement") { card in
+        addPlaybackSettingsSection(to: subtitlesTabView, title: "Placement", symbolName: "arrow.up.and.down.text.horizontal") { card in
             card.addRow(SettingsRowFactory.sliderRow(
                 title: "Position",
                 slider: s.positionSlider,
@@ -3575,7 +4682,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ))
         }
 
-        addSettingsSection(to: subtitlesTabView, title: "Text style") { card in
+        addPlaybackSettingsSection(to: subtitlesTabView, title: "Text style", symbolName: "textformat") { card in
             card.addRow(SettingsRowFactory.valueRow(title: "Font", control: s.fontFamilyLabel))
             card.addRow(SettingsRowFactory.sliderRow(
                 title: "Size",
@@ -3674,15 +4781,694 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return SettingsRowFactory.fullWidthRow(column)
     }
 
-    private func addSettingsSection(
+    /// Video / Audio / Subtitles inspector sections — expanded by default (image studio stays collapsed).
+    private func addPlaybackSettingsSection(
         to stack: NSStackView,
         title: String,
+        symbolName: String,
         isFirst: Bool = false,
         configure: (SettingsSectionCard) -> Void
     ) {
-        let block = SettingsSectionBuilder.sectionBlock(title: title, isFirst: isFirst, configure: configure)
+        addSettingsSection(
+            to: stack,
+            title: title,
+            symbolName: symbolName,
+            isFirst: isFirst,
+            initiallyExpanded: true,
+            configure: configure
+        )
+    }
+
+    private func addSettingsSection(
+        to stack: NSStackView,
+        title: String,
+        symbolName: String,
+        isFirst: Bool = false,
+        initiallyExpanded: Bool = false,
+        configure: (SettingsSectionCard) -> Void
+    ) {
+        let accentIndex = stack.arrangedSubviews.count
+        let (block, _) = SettingsSectionBuilder.sectionBlock(
+            title: title,
+            symbolName: symbolName,
+            accentIndex: accentIndex,
+            isFirst: isFirst,
+            initiallyExpanded: initiallyExpanded,
+            configure: configure
+        )
         stack.addArrangedSubview(block)
         block.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func addImageAdjustSection(
+        _ section: ImageAdjustSection,
+        to stack: NSStackView,
+        symbolName: String,
+        isFirst: Bool = false,
+        leadingGap: CGFloat? = nil,
+        configure: (SettingsSectionCard) -> Void
+    ) {
+        let accentIndex = max(0, imageSectionHeaders.count)
+        let (block, header) = SettingsSectionBuilder.sectionBlock(
+            title: section.title,
+            symbolName: symbolName,
+            accentIndex: accentIndex,
+            isFirst: isFirst,
+            showsSectionEditActions: true,
+            leadingGap: leadingGap,
+            configure: configure
+        )
+        header.onToggleBypass = { [weak self] in
+            self?.imageAdjustSession.toggleSectionBypass(section)
+        }
+        header.onRestoreSection = { [weak self] in
+            self?.imageAdjustSession.resetSection(section)
+        }
+        header.onExpandedChange = { [weak self] expanded in
+            guard expanded else { return }
+            self?.collapseOtherImageAdjustSections(except: section)
+        }
+        imageSectionHeaders[section] = header
+        stack.addArrangedSubview(block)
+        block.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func addImageDevelopComingSoonRow(
+        title: String,
+        symbolName: String,
+        to stack: NSStackView,
+        leadingGap: CGFloat = 0
+    ) {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 0
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        if leadingGap > 0 {
+            let gap = NSView()
+            gap.translatesAutoresizingMaskIntoConstraints = false
+            gap.heightAnchor.constraint(equalToConstant: leadingGap).isActive = true
+            container.addArrangedSubview(gap)
+        }
+
+        let row = ImageDevelopComingSoonRowView(title: title, symbolName: symbolName)
+        container.addArrangedSubview(row)
+        row.leadingAnchor.constraint(equalTo: container.leadingAnchor).isActive = true
+        row.trailingAnchor.constraint(equalTo: container.trailingAnchor).isActive = true
+
+        stack.addArrangedSubview(container)
+        container.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func collapseOtherImageAdjustSections(except open: ImageAdjustSection) {
+        for (section, header) in imageSectionHeaders where section != open {
+            header.setExpanded(false, animated: true)
+        }
+    }
+
+    private func configureImageAdjustCard(_ card: SettingsSectionCard, for section: ImageAdjustSection) {
+        switch section {
+        case .develop:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Exposure",
+                slider: imageAdjustControls.exposureSlider,
+                valueLabel: imageAdjustControls.exposureValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Brightness",
+                slider: imageAdjustControls.brightnessSlider,
+                valueLabel: imageAdjustControls.brightnessValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Contrast",
+                slider: imageAdjustControls.contrastSlider,
+                valueLabel: imageAdjustControls.contrastValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Highlights",
+                slider: imageAdjustControls.highlightsSlider,
+                valueLabel: imageAdjustControls.highlightsValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Shadows",
+                slider: imageAdjustControls.shadowsSlider,
+                valueLabel: imageAdjustControls.shadowsValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Whites",
+                slider: imageAdjustControls.whitesSlider,
+                valueLabel: imageAdjustControls.whitesValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Blacks",
+                slider: imageAdjustControls.blacksSlider,
+                valueLabel: imageAdjustControls.blacksValueLabel
+            ))
+        case .color:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Saturation",
+                slider: imageAdjustControls.saturationSlider,
+                valueLabel: imageAdjustControls.saturationValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Vibrance",
+                slider: imageAdjustControls.vibranceSlider,
+                valueLabel: imageAdjustControls.vibranceValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Hue",
+                slider: imageAdjustControls.hueSlider,
+                valueLabel: imageAdjustControls.hueValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Temperature",
+                slider: imageAdjustControls.temperatureSlider,
+                valueLabel: imageAdjustControls.temperatureValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Tint",
+                slider: imageAdjustControls.tintSlider,
+                valueLabel: imageAdjustControls.tintValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Color balance",
+                slider: imageAdjustControls.colorBalanceSlider,
+                valueLabel: imageAdjustControls.colorBalanceValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Split highlights",
+                slider: imageAdjustControls.splitHighlightSlider,
+                valueLabel: imageAdjustControls.splitHighlightValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Split shadows",
+                slider: imageAdjustControls.splitShadowSlider,
+                valueLabel: imageAdjustControls.splitShadowValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Split amount",
+                slider: imageAdjustControls.splitAmountSlider,
+                valueLabel: imageAdjustControls.splitAmountValueLabel
+            ))
+        case .dramatic:
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.dramaticSlider,
+                valueLabel: imageAdjustControls.dramaticValueLabel
+            ))
+        case .mood:
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.moodSlider,
+                valueLabel: imageAdjustControls.moodValueLabel
+            ))
+        case .toning:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.toningAmountSlider,
+                valueLabel: imageAdjustControls.toningAmountValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Highlights",
+                slider: imageAdjustControls.toningHighlightsSlider,
+                valueLabel: imageAdjustControls.toningHighlightsValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Shadows",
+                slider: imageAdjustControls.toningShadowsSlider,
+                valueLabel: imageAdjustControls.toningShadowsValueLabel
+            ))
+        case .matte:
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.matteSlider,
+                valueLabel: imageAdjustControls.matteValueLabel
+            ))
+        case .glow:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.glowSlider,
+                valueLabel: imageAdjustControls.glowValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Radius",
+                slider: imageAdjustControls.glowRadiusSlider,
+                valueLabel: imageAdjustControls.glowRadiusValueLabel
+            ))
+        case .blur:
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Soft focus",
+                slider: imageAdjustControls.blurSlider,
+                valueLabel: imageAdjustControls.blurValueLabel
+            ))
+        case .filmGrain:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.filmGrainSlider,
+                valueLabel: imageAdjustControls.filmGrainValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Size",
+                slider: imageAdjustControls.filmGrainSizeSlider,
+                valueLabel: imageAdjustControls.filmGrainSizeValueLabel
+            ))
+        case .mystical:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.mysticalSlider,
+                valueLabel: imageAdjustControls.mysticalValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Haze",
+                slider: imageAdjustControls.mysticalHazeSlider,
+                valueLabel: imageAdjustControls.mysticalHazeValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Hue",
+                slider: imageAdjustControls.mysticalHueSlider,
+                valueLabel: imageAdjustControls.mysticalHueValueLabel
+            ))
+        case .highKey:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.highKeySlider,
+                valueLabel: imageAdjustControls.highKeyValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Softness",
+                slider: imageAdjustControls.highKeySoftnessSlider,
+                valueLabel: imageAdjustControls.highKeySoftnessValueLabel
+            ))
+        case .supercontrast:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.supercontrastSlider,
+                valueLabel: imageAdjustControls.supercontrastValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Midtones",
+                slider: imageAdjustControls.supercontrastMidtonesSlider,
+                valueLabel: imageAdjustControls.supercontrastMidtonesValueLabel
+            ))
+        case .colorHarmony:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.colorHarmonySlider,
+                valueLabel: imageAdjustControls.colorHarmonyValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Balance",
+                slider: imageAdjustControls.colorHarmonyBalanceSlider,
+                valueLabel: imageAdjustControls.colorHarmonyBalanceValueLabel
+            ))
+        case .sunrays:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.sunraysSlider,
+                valueLabel: imageAdjustControls.sunraysValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Length",
+                slider: imageAdjustControls.sunraysLengthSlider,
+                valueLabel: imageAdjustControls.sunraysLengthValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Warmth",
+                slider: imageAdjustControls.sunraysWarmthSlider,
+                valueLabel: imageAdjustControls.sunraysWarmthValueLabel
+            ))
+        case .landscape:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.landscapeSlider,
+                valueLabel: imageAdjustControls.landscapeValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Foliage",
+                slider: imageAdjustControls.landscapeFoliageSlider,
+                valueLabel: imageAdjustControls.landscapeFoliageValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Sky",
+                slider: imageAdjustControls.landscapeSkySlider,
+                valueLabel: imageAdjustControls.landscapeSkyValueLabel
+            ))
+        case .blackAndWhite:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.blackAndWhiteSlider,
+                valueLabel: imageAdjustControls.blackAndWhiteValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Contrast",
+                slider: imageAdjustControls.bwContrastSlider,
+                valueLabel: imageAdjustControls.bwContrastValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Warmth",
+                slider: imageAdjustControls.bwWarmthSlider,
+                valueLabel: imageAdjustControls.bwWarmthValueLabel
+            ))
+        case .details:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Sharpness",
+                slider: imageAdjustControls.sharpnessSlider,
+                valueLabel: imageAdjustControls.sharpnessValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Definition",
+                slider: imageAdjustControls.definitionSlider,
+                valueLabel: imageAdjustControls.definitionValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Structure",
+                slider: imageAdjustControls.structureSlider,
+                valueLabel: imageAdjustControls.structureValueLabel
+            ))
+        case .denoise:
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Denoise",
+                slider: imageAdjustControls.denoiseSlider,
+                valueLabel: imageAdjustControls.denoiseValueLabel
+            ))
+        case .vignette:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.vignetteSlider,
+                valueLabel: imageAdjustControls.vignetteValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Midpoint",
+                slider: imageAdjustControls.vignetteMidpointSlider,
+                valueLabel: imageAdjustControls.vignetteMidpointValueLabel
+            ))
+        case .dodgeBurn:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Amount",
+                slider: imageAdjustControls.dodgeBurnSlider,
+                valueLabel: imageAdjustControls.dodgeBurnValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Range",
+                slider: imageAdjustControls.dodgeBurnRangeSlider,
+                valueLabel: imageAdjustControls.dodgeBurnRangeValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Softness",
+                slider: imageAdjustControls.dodgeBurnSoftnessSlider,
+                valueLabel: imageAdjustControls.dodgeBurnSoftnessValueLabel
+            ))
+        }
+    }
+
+    private func refreshImageSectionEditChrome() {
+        for section in ImageAdjustSection.allCases {
+            imageSectionHeaders[section]?.setSectionEditState(
+                edited: imageAdjustSession.isSectionEdited(section),
+                bypassed: imageAdjustSession.isSectionBypassed(section),
+                animated: true
+            )
+        }
+        updateImageStudioCommitFooter()
+    }
+
+    private func updateImageStudioCommitFooter() {
+        let geometryDirty = imageSurfaceView.hasNonIdentityCrop
+            || imageSurfaceView.rotationQuarterTurns != 0
+        let developDirty = imageAdjustSession.isDirty
+        let show = activeMediaKind == .image
+            && (developDirty || geometryDirty)
+            && playbackLibraryOverlay == .closed
+            && !isImageCropMode
+        imageStudioCommitFooter.isHidden = !show
+        imageStudioCommitFooter.setShowsResetAll(developDirty)
+        imageStudioCommitFooterHeightConstraint?.constant = show
+            ? (developDirty
+                ? ImageStudioCommitFooter.preferredHeight
+                : ImageStudioCommitFooter.preferredHeightActionsOnly)
+            : 0
+        if show {
+            LaughTheme.applySettingsAccentChrome(in: imageStudioCommitFooter)
+        }
+        updateSettingsContentBottomInset()
+    }
+
+    @objc private func imageStudioResetAllPressed() {
+        // Develop adjusts only — crop / straighten / rotate / flip are framing tools
+        // with their own Cancel; Reset All must not wipe an applied crop.
+        imageAdjustSession.resetAll()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    @objc private func imageStudioExportPressed() {
+        guard activeMediaKind == .image, let source = currentMediaURL else { return }
+        let parameters = imageAdjustSession.effectiveParameters
+        let turns = imageSurfaceView.rotationQuarterTurns
+        let crop = imageSurfaceView.appliedCropNormalized
+        let straighten = imageSurfaceView.appliedStraightenRadians
+        let flipH = imageSurfaceView.flipHorizontal
+        let flipV = imageSurfaceView.flipVertical
+        let hasGeometry = turns != 0
+            || flipH
+            || flipV
+            || !ImageCropGeometry.isIdentity(crop)
+            || !ImageCropGeometry.isIdentityStraighten(straighten)
+        guard !parameters.isIdentity || hasGeometry else { return }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [.jpeg, .png]
+        panel.nameFieldStringValue = ImageExportWriter.suggestedFileName(for: source)
+        panel.title = "Export Image"
+        panel.message = "Writes a new file. The original stays unchanged."
+        panel.prompt = "Export"
+        guard let window = view.window else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let dest = panel.url else { return }
+            self?.performImageExport(
+                source: source,
+                destination: dest,
+                parameters: parameters,
+                quarterTurns: turns,
+                cropNormalized: crop,
+                straightenRadians: straighten,
+                flipHorizontal: flipH,
+                flipVertical: flipV
+            )
+        }
+    }
+
+    private func performImageExport(
+        source: URL,
+        destination: URL,
+        parameters: ImageAdjustParameters,
+        quarterTurns: Int,
+        cropNormalized: CGRect?,
+        straightenRadians: CGFloat,
+        flipHorizontal: Bool,
+        flipVertical: Bool
+    ) {
+        if destination.standardizedFileURL == source.standardizedFileURL {
+            presentImageExportAlert(title: "Choose a new file", message: "Export never overwrites the original.")
+            return
+        }
+        imageStudioCommitFooter.exportButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let image = ImageExportWriter.renderCGImage(
+                sourceURL: source,
+                parameters: parameters,
+                quarterTurns: quarterTurns,
+                cropNormalized: cropNormalized,
+                straightenRadians: straightenRadians,
+                flipHorizontal: flipHorizontal,
+                flipVertical: flipVertical
+            )
+            let format = ImageExportWriter.Format.from(url: destination)
+            var writeError: Error?
+            if let image {
+                do {
+                    try ImageExportWriter.write(image, to: destination, format: format)
+                } catch {
+                    writeError = error
+                }
+            }
+            DispatchQueue.main.async {
+                self?.imageStudioCommitFooter.exportButton.isEnabled = true
+                if image == nil {
+                    self?.presentImageExportAlert(title: "Export failed", message: "Could not render the edited image.")
+                } else if let writeError {
+                    self?.presentImageExportAlert(title: "Export failed", message: writeError.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func presentImageExportAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        if let window = view.window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    @objc private func imageStudioSavePresetPressed() {
+        let parameters = imageAdjustSession.effectiveParameters
+        guard !parameters.isIdentity else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Save Preset"
+        alert.informativeText = "Name this look. It will appear on the Presets tab."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(string: "My Look")
+        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        field.placeholderString = "Preset name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        let present: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            ImageUserPresetStore.save(name: field.stringValue, parameters: parameters)
+            self?.refreshImageSavedPresetsSection()
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: present)
+        } else {
+            present(alert.runModal())
+        }
+    }
+
+    private func refreshImageSavedPresetsSection() {
+        imageSavedPresetsHost.arrangedSubviews.forEach {
+            imageSavedPresetsHost.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        let saved = ImageUserPresetStore.all()
+        imageSavedPresetsHost.isHidden = saved.isEmpty
+        guard !saved.isEmpty else { return }
+
+        let (block, _) = SettingsSectionBuilder.sectionBlock(
+            title: "Saved",
+            symbolName: "bookmark.fill",
+            accentIndex: imageFitTabView.arrangedSubviews.count,
+            isFirst: false,
+            configure: { card in
+                card.addFinalRow(SettingsRowFactory.fullWidthRow(self.makeImageUserPresetGrid(presets: saved)))
+            }
+        )
+        imageSavedPresetsHost.addArrangedSubview(block)
+        block.widthAnchor.constraint(equalTo: imageSavedPresetsHost.widthAnchor).isActive = true
+        LaughTheme.applySettingsAccentChrome(in: imageSavedPresetsHost)
+    }
+
+    private func makeImageUserPresetGrid(presets: [ImageUserPreset]) -> NSView {
+        let grid = NSStackView()
+        grid.orientation = .vertical
+        grid.alignment = .leading
+        grid.spacing = 6
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let columns = 2
+        var row: NSStackView?
+        for (index, preset) in presets.enumerated() {
+            if index % columns == 0 {
+                row = NSStackView()
+                row?.orientation = .horizontal
+                row?.alignment = .centerY
+                row?.spacing = 6
+                row?.distribution = .fillEqually
+                row?.translatesAutoresizingMaskIntoConstraints = false
+                if let row {
+                    grid.addArrangedSubview(row)
+                    row.leadingAnchor.constraint(equalTo: grid.leadingAnchor).isActive = true
+                    row.trailingAnchor.constraint(equalTo: grid.trailingAnchor).isActive = true
+                }
+            }
+            let button = NSButton(title: preset.name, target: self, action: #selector(imageUserPresetPressed(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.identifier = NSUserInterfaceItemIdentifier(preset.id.uuidString)
+            button.toolTip = "Apply \(preset.name)"
+            row?.addArrangedSubview(button)
+        }
+        if let row, presets.count % columns == 1 {
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            row.addArrangedSubview(spacer)
+        }
+        return grid
+    }
+
+    @objc private func imageUserPresetPressed(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue,
+              let id = UUID(uuidString: raw),
+              let preset = ImageUserPresetStore.all().first(where: { $0.id == id }) else { return }
+        imageAdjustSession.apply(preset.parameters)
+    }
+
+    private func makeImagePresetGrid(presets: [ImageAdjustPreset]) -> NSView {
+        let grid = NSStackView()
+        grid.orientation = .vertical
+        grid.alignment = .leading
+        grid.spacing = 6
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let columns = 2
+        var row: NSStackView?
+        for (index, preset) in presets.enumerated() {
+            if index % columns == 0 {
+                row = NSStackView()
+                row?.orientation = .horizontal
+                row?.alignment = .centerY
+                row?.spacing = 6
+                row?.distribution = .fillEqually
+                row?.translatesAutoresizingMaskIntoConstraints = false
+                if let row {
+                    grid.addArrangedSubview(row)
+                    row.leadingAnchor.constraint(equalTo: grid.leadingAnchor).isActive = true
+                    row.trailingAnchor.constraint(equalTo: grid.trailingAnchor).isActive = true
+                }
+            }
+            let button = makeImagePresetButton(preset)
+            row?.addArrangedSubview(button)
+        }
+        // Pad last row so a single button doesn't stretch full width oddly.
+        if let row, presets.count % columns == 1 {
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            row.addArrangedSubview(spacer)
+        }
+        return grid
+    }
+
+    private func makeImagePresetButton(_ preset: ImageAdjustPreset) -> NSButton {
+        let button = NSButton(title: preset.title, target: self, action: #selector(imagePresetPressed(_:)))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.imagePosition = .imageLeading
+        button.identifier = NSUserInterfaceItemIdentifier(preset.title)
+        if #available(macOS 11.0, *) {
+            button.image = NSImage(systemSymbolName: preset.symbolName, accessibilityDescription: preset.title)
+            button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        }
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.toolTip = "Apply \(preset.title) look"
+        return button
+    }
+
+    @objc private func imagePresetPressed(_ sender: NSButton) {
+        let title = sender.identifier?.rawValue ?? sender.title
+        guard let preset = ImageAdjustPreset.allCases.first(where: { $0.title == title }) else { return }
+        imageAdjustSession.apply(preset.parameters)
     }
 
     private func makeSettingsSubtitleTrackBlock(
@@ -4412,6 +6198,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard let track, primarySubtitlesEnabled else {
             nativeSubtitleOverlay.clearSidecar()
             syncNativeSubtitleOverlay()
+            if let item = nativeSubtitlePlayerItem() {
+                _ = await NativeSubtitleSelection.disableSubtitles(on: item)
+            }
             if let resumeRate {
                 player.playImmediately(atRate: resumeRate)
             }
@@ -5075,9 +6864,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         delegate?.playerViewController(self, didRequestWindowAspectRatio: resolvedWindowAspectRatio())
     }
 
-    /// Aspect ratio to enforce on the main window, or nil when the library/empty UI should resize freely.
+    /// Aspect ratio to enforce on the main window, or nil when the library/empty/image studio should resize freely.
     func resolvedWindowAspectRatio() -> CGFloat? {
-        guard activeMediaKind == .video || activeMediaKind == .image else { return nil }
+        // Image studio is a padded layout — never lock the window to the photo aspect
+        // (that snaps the frame back after live resize).
+        guard activeMediaKind == .video else { return nil }
 
         let store = SettingsStore.shared
         switch store.windowAspectPreset {
@@ -5127,12 +6918,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if mpvBackendActive {
             activeSession?.setRate(preferredPlaybackRate)
             activeSession?.play()
-            return
+        } else {
+            player.play()
+            if preferredPlaybackRate != 1.0 {
+                player.rate = preferredPlaybackRate
+            }
         }
-        player.play()
-        if preferredPlaybackRate != 1.0 {
-            player.rate = preferredPlaybackRate
-        }
+        updatePlayPauseButtonIcon()
     }
 
     private func installPlayToEndObserver() {
@@ -5236,15 +7028,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func ensureSettingsTabRowsAboveContent() {
-        rightSettingsSheet.addSubview(videoSettingsTabsRow, positioned: .above, relativeTo: settingsScrollView)
-        rightSettingsSheet.addSubview(imageSettingsTabsRow, positioned: .above, relativeTo: settingsScrollView)
+        rightSettingsSheet.addSubview(settingsColumnFillView, positioned: .below, relativeTo: settingsScrollClipHost)
+        rightSettingsSheet.addSubview(videoSettingsTabsRow, positioned: .above, relativeTo: settingsScrollClipHost)
+        rightSettingsSheet.addSubview(imageSettingsTabsRow, positioned: .above, relativeTo: settingsScrollClipHost)
+        settingsScrollClipHost.addSubview(settingsTopOverflowFade, positioned: .above, relativeTo: settingsScrollView)
+        settingsScrollClipHost.addSubview(settingsBottomOverflowFade, positioned: .above, relativeTo: settingsScrollView)
+        rightSettingsSheet.addSubview(imageStudioCommitFooter, positioned: .above, relativeTo: settingsScrollClipHost)
     }
 
     func showSettingsSheet() {
         guard activeMediaKind != .empty else { return }
         guard playbackLibraryOverlay == .closed else { return }
-        guard rightSettingsSheet.isHidden else { return }
         rightSettingsSheet.isHidden = false
+        syncSettingsPanelGeometry()
+        styleRightSettingsPanel()
         refreshImmersiveChromePinnedState()
         ensureSettingsTabRowsAboveContent()
         updateSettingsTabVisibility()
@@ -5257,8 +7054,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 syncSubtitleTrackPopUpsToCache()
             }
         }
+        if activeMediaKind == .image {
+            updateImageZoomPercentLabel()
+            updateImageStudioLayoutInsets()
+            updateImageStudioCommitFooter()
+        }
+        view.layoutSubtreeIfNeeded()
         raisePlaybackChromeToFront()
         installOutsideClickMonitor()
+        syncEdgeHotZoneAffordances()
+        scheduleSettingsContentBottomInsetUpdate()
         if activeMediaKind == .video, selectedVideoSettingsTabIndex == 2, !isSubtitlePlaybackReady() {
             Task { await refreshSubtitleSettings(syncPlayback: false, applyAppearance: false) }
         }
@@ -5276,12 +7081,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     func hideSettingsSheet() {
         guard !rightSettingsSheet.isHidden else { return }
+        // Mark hidden first so geometry sync keeps width collapsed (does not re-expand).
         rightSettingsSheet.isHidden = true
-        if usesImmersiveChrome {
+        syncSettingsPanelGeometry()
+        if activeMediaKind == .image {
+            updateImageStudioLayoutInsets()
+        }
+        if usesImmersiveChrome, playbackLibraryOverlay == .closed {
             noteImmersiveChromePointerActivity()
         }
+        view.layoutSubtreeIfNeeded()
         raisePlaybackChromeToFront()
         removeOutsideClickMonitorIfNoSheetsVisible()
+        syncEdgeHotZoneAffordances()
     }
 
     func showFullMediaLibrary() {
@@ -5289,12 +7101,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackLibraryOverlay = .closed
         librarySidebar.isHidden = false
         libraryBrowse.isHidden = false
-        playbackMiniPreview.isHidden = true
+        hidePlaybackMiniPreview()
         librarySidebar.reloadRoots()
         // Grid scan can be slow for large folders — keep UI responsive at launch.
         switch mediaLibraryController.sidebarMode {
         case .root where mediaLibraryController.currentDirectoryURL != nil,
-             .recentHeader:
+             .recentHeader,
+             .favoritesHeader:
             libraryBrowse.reloadContent()
         case .none, .root:
             libraryBrowse.refresh()
@@ -5311,34 +7124,142 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             showFullMediaLibrary()
             return
         }
+        // Image + video both use full folder management with media in the mini preview.
+        showPlaybackLibraryPanel()
+    }
+
+    /// Full folder-management library during playback: sidebar + browse, current media in bottom-right mini preview.
+    private func showPlaybackLibraryPanel() {
+        if activeMediaKind == .image {
+            showImageStudioLibraryPanel()
+            return
+        }
+        guard activeMediaKind == .video else {
+            showFullMediaLibrary()
+            return
+        }
+
+        presentPlaybackLibraryOverlay()
+    }
+
+    /// Full folder-management library (like video), with the open photo in the bottom-right mini preview.
+    private func showImageStudioLibraryPanel() {
+        presentPlaybackLibraryOverlay()
+    }
+
+    /// Shared open path for video/image folder management during playback.
+    private func presentPlaybackLibraryOverlay() {
+        installLibraryChromeIfNeeded()
+        // Mark overlay open before dismissing settings so immersive chrome does not
+        // animate the playback bar back in (hideSettingsSheet notes pointer activity).
+        playbackLibraryOverlay = .sidebarAndBrowse
+        immersiveChromeHideWorkItem?.cancel()
+        immersiveChromeHideWorkItem = nil
+        immersiveChromeVisible = false
+
         hideSettingsSheet()
-        playbackLibraryOverlay = .sidebarOnly
+        applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
         librarySidebar.isHidden = false
-        libraryBrowse.isHidden = true
+        libraryBrowse.isHidden = false
         librarySidebar.reloadRoots()
-        showPlaybackMiniPreview()
+        revealCurrentMediaFolderInLibrary()
+        if mediaLibraryController.sidebarMode == .none {
+            selectFallbackLibrarySidebarDestination()
+        }
+        librarySidebar.refresh()
+        libraryBrowse.reloadContent()
+
         playerSurfaceView.isHidden = true
         imageSurfaceView.isHidden = true
-        controlsContainer.isHidden = true
+        imageFolderCarousel.isHidden = true
+        imageStudioMetaBar.isHidden = true
         imageControlsContainer.isHidden = true
+        controlsContainer.isHidden = true
+        applyPlaybackBarVisible(false, animated: false)
+        showPlaybackMiniPreview()
+        if activeMediaKind == .image {
+            updateImageStudioLayoutInsets()
+        }
         installOutsideClickMonitor()
         raisePlaybackChromeToFront()
-        refreshImmersiveChromePinnedState()
+        relayoutLibraryChromeForTitleBar()
+        syncPlaybackBarVisibilityForCurrentState()
+        setImmersiveChromeVisible(false, animated: false)
+        syncEdgeHotZoneAffordances()
+        view.layoutSubtreeIfNeeded()
+    }
+
+    /// Select the library root + browse directory that contains the playing file (e.g. after Recents).
+    private func revealCurrentMediaFolderInLibrary() {
+        libraryBrowse.isHidden = false
+        guard let mediaURL = currentMediaURL ?? activePlaybackFileURL else {
+            selectFallbackLibrarySidebarDestination()
+            return
+        }
+        let folder = mediaURL.resolvingSymlinksInPath().standardizedFileURL.deletingLastPathComponent()
+        let folderPath = folder.path
+
+        let match = mediaLibraryController.roots
+            .map { root -> (MediaLibraryRoot, URL) in
+                (root, root.directoryURL.resolvingSymlinksInPath().standardizedFileURL)
+            }
+            .filter { _, rootURL in
+                folderPath == rootURL.path
+                    || folderPath.hasPrefix(rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/")
+            }
+            .max(by: { $0.1.path.count < $1.1.path.count })
+
+        if let (root, _) = match,
+           let index = mediaLibraryController.roots.firstIndex(where: { $0.id == root.id }) {
+            let row = mediaLibraryController.firstRootRowIndex() + index
+            mediaLibraryController.selectSidebarRow(row)
+            let current = mediaLibraryController.currentDirectoryURL?
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            if current != folder {
+                mediaLibraryController.openFolder(folder)
+            } else {
+                mediaLibraryController.reloadGrid()
+                mediaLibraryController.onChange?()
+            }
+            return
+        }
+
+        selectFallbackLibrarySidebarDestination()
+    }
+
+    private func selectFallbackLibrarySidebarDestination() {
+        if !mediaLibraryController.roots.isEmpty {
+            mediaLibraryController.selectSidebarRow(mediaLibraryController.firstRootRowIndex())
+            return
+        }
+        // Recents header is always row 0.
+        mediaLibraryController.selectSidebarRow(0)
+    }
+
+    private func syncPlaybackLibraryBrowseExpansion() {
+        guard activeMediaKind != .empty else { return }
+
+        switch mediaLibraryController.sidebarMode {
+        case .root, .recentHeader, .favoritesHeader:
+            if playbackLibraryOverlay == .sidebarOnly {
+                expandPlaybackLibraryBrowse()
+            }
+        case .none:
+            // Keep browse visible during folder management. Hiding on `.none` raced with
+            // `reloadRoots()` clearing selection and left an empty black content area.
+            break
+        }
     }
 
     private func expandPlaybackLibraryBrowse() {
         guard activeMediaKind != .empty else { return }
-        hideSettingsSheet()
-        playbackLibraryOverlay = .sidebarAndBrowse
-        libraryBrowse.isHidden = false
-        libraryBrowse.reloadContent()
-        raisePlaybackChromeToFront()
+        presentPlaybackLibraryOverlay()
     }
 
     private func collapsePlaybackLibraryBrowseOnly() {
+        // Playback library always keeps sidebar + browse together.
         guard playbackLibraryOverlay == .sidebarAndBrowse else { return }
-        playbackLibraryOverlay = .sidebarOnly
-        libraryBrowse.isHidden = true
     }
 
     func collapsePlaybackLibraryOverlay() {
@@ -5346,8 +7267,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackLibraryOverlay = .closed
         librarySidebar.isHidden = true
         libraryBrowse.isHidden = true
-        playbackMiniPreview.isHidden = true
+        hidePlaybackMiniPreview()
         restoreMainPlaybackSurface()
+        if activeMediaKind == .image {
+            syncImageStudioFilmstripVisibility()
+            refreshImageStudioMetaBar()
+            // Return to image-studio default: right adjust panel visible, padded photo.
+            if rightSettingsSheet.isHidden {
+                showSettingsSheet()
+            }
+            updateImageStudioLayoutInsets()
+        }
         removeOutsideClickMonitorIfNoSheetsVisible()
         raisePlaybackChromeToFront()
         if usesImmersiveChrome {
@@ -5355,6 +7285,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         } else {
             refreshImmersiveChromePinnedState()
         }
+        syncEdgeHotZoneAffordances()
+        resyncPlaybackSurfaceGeometry()
     }
 
     func hideMediaLibrary() {
@@ -5380,6 +7312,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         switch activeMediaKind {
         case .video:
             playbackMiniPreview.showVideo(player: player)
+            updatePlayPauseButtonIcon()
         case .image:
             playbackMiniPreview.showImage(imageSurfaceView.image)
         case .empty:
@@ -5397,25 +7330,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackMiniPreview.applyLayoutScale(forWidth: size.width)
     }
 
-    private func closePlaybackFromMiniPreview() {
+    private func hidePlaybackMiniPreview() {
         playbackMiniPreview.isHidden = true
-        playbackMiniPreview.detachVideoPlayer()
-        showEmptySurface()
+        playbackMiniPreview.clearContent()
     }
 
-    private func syncPlaybackLibraryBrowseExpansion() {
-        guard activeMediaKind != .empty else { return }
-
-        switch mediaLibraryController.sidebarMode {
-        case .root, .recentHeader:
-            if playbackLibraryOverlay == .sidebarOnly {
-                expandPlaybackLibraryBrowse()
-            }
-        case .none:
-            if playbackLibraryOverlay == .sidebarAndBrowse {
-                collapsePlaybackLibraryBrowseOnly()
-            }
-        }
+    private func closePlaybackFromMiniPreview() {
+        commandStopAndClose()
     }
 
     private func dismissSidePanelsForFocusedPlayback() {
@@ -5463,12 +7384,137 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func shouldKeepSettingsSheetOpen(for event: NSEvent) -> Bool {
         if suppressSettingsDismissForColorPicker { return true }
-        if isClickOnPlaybackBar(for: event) { return false }
         let pointInView = view.convert(event.locationInWindow, from: nil)
+        // Filmstrip / meta / tools always keep the column — even when they overlap the close strip.
+        if isPointOverImageStudioBottomChrome(pointInView) { return true }
+        if isPointInRightSettingsCloseZone(pointInView) { return false }
         if rightSettingsSheet.frame.contains(pointInView) { return true }
+        // Image studio: keep the edit column open when clicking photo / chrome,
+        // but allow the toolbar Settings gear to toggle it (handled separately).
+        if activeMediaKind == .image {
+            if !imageSurfaceView.isHidden, imageSurfaceView.frame.contains(pointInView) {
+                return true
+            }
+            if !imageControlsContainer.isHidden, imageControlsContainer.frame.contains(pointInView) {
+                // Let the Settings gear through so it can close the column.
+                if isSettingsToggleButtonClick(for: event) { return false }
+                return true
+            }
+            return true
+        }
+        if isClickOnPlaybackBar(for: event) { return false }
         if isTransientMenuWindow(event.window) { return true }
         if isColorPickerAuxiliaryWindow(event.window) { return true }
         return false
+    }
+
+    private func isSettingsPanelFullyOpen() -> Bool {
+        !rightSettingsSheet.isHidden && (settingsPanelWidthConstraint?.constant ?? 0) > 1
+    }
+
+    private func isPointInLeftLibraryOpenZone(_ point: NSPoint) -> Bool {
+        guard !isPointOverImageStudioBottomChrome(point) else { return false }
+        return EdgeHotZoneGeometry.isInLeftOpenZone(point: point, bounds: view.bounds)
+    }
+
+    private func isPointInRightSettingsOpenZone(_ point: NSPoint) -> Bool {
+        guard !isPointOverImageStudioBottomChrome(point) else { return false }
+        guard !isSettingsPanelFullyOpen() else { return false }
+        return EdgeHotZoneGeometry.isInRightOpenZone(point: point, bounds: view.bounds)
+    }
+
+    private func isPointInRightSettingsCloseZone(_ point: NSPoint) -> Bool {
+        guard isSettingsPanelFullyOpen() else { return false }
+        guard !isPointOverImageStudioBottomChrome(point) else { return false }
+        return EdgeHotZoneGeometry.isInRightCloseZone(
+            point: point,
+            bounds: view.bounds,
+            sheetLeadingX: rightSettingsSheet.frame.minX
+        )
+    }
+
+    /// Resolve which panel action a point would trigger (does not perform it).
+    private func edgeHotZoneAction(at point: NSPoint) -> (() -> Void)? {
+        guard activeMediaKind != .empty, playbackLibraryOverlay == .closed else { return nil }
+        // Outer rim is for window resize — never arm a panel toggle there.
+        if EdgeHotZoneGeometry.isInWindowResizeRim(point: point, bounds: view.bounds) {
+            return nil
+        }
+        if isPointInLeftLibraryOpenZone(point) {
+            return { [weak self] in self?.showPlaybackLibrarySidebarOnly() }
+        }
+        if isPointInRightSettingsCloseZone(point) {
+            return { [weak self] in self?.hideSettingsSheet() }
+        }
+        if isPointInRightSettingsOpenZone(point) {
+            return { [weak self] in self?.showSettingsSheet() }
+        }
+        return nil
+    }
+
+    /// Track edge intent without consuming events — resize / window-drag always get the mouseDown.
+    private func noteEdgeHotZoneMouseEvent(_ event: NSEvent) {
+        let point = view.convert(event.locationInWindow, from: nil)
+        switch event.type {
+        case .leftMouseDown:
+            pendingEdgeHotZoneAction = edgeHotZoneAction(at: point)
+            edgeHotZoneMouseDownPoint = pendingEdgeHotZoneAction == nil ? nil : point
+        case .leftMouseDragged:
+            guard let start = edgeHotZoneMouseDownPoint else { return }
+            if !EdgeHotZoneGeometry.isClickNotDrag(from: start, to: point) {
+                pendingEdgeHotZoneAction = nil
+                edgeHotZoneMouseDownPoint = nil
+            }
+        case .leftMouseUp:
+            let action = pendingEdgeHotZoneAction
+            let start = edgeHotZoneMouseDownPoint
+            pendingEdgeHotZoneAction = nil
+            edgeHotZoneMouseDownPoint = nil
+            guard let action, let start else { return }
+            guard EdgeHotZoneGeometry.isClickNotDrag(from: start, to: point) else { return }
+            action()
+        default:
+            break
+        }
+    }
+
+    private func isPointOverImageStudioBottomChrome(_ point: NSPoint) -> Bool {
+        guard activeMediaKind == .image else { return false }
+        if !imageFolderCarousel.isHidden {
+            let rect = imageFolderCarousel.convert(imageFolderCarousel.bounds, to: view)
+            if rect.contains(point) { return true }
+        }
+        if !imageStudioMetaBar.isHidden {
+            let rect = imageStudioMetaBar.convert(imageStudioMetaBar.bounds, to: view)
+            if rect.contains(point) { return true }
+        }
+        if !imageControlsContainer.isHidden {
+            let rect = imageControlsContainer.convert(imageControlsContainer.bounds, to: view)
+            if rect.contains(point) { return true }
+        }
+        return false
+    }
+
+    private func installEdgeHotZoneClickMonitorIfNeeded() {
+        guard edgeHotZoneClickMonitor == nil else { return }
+        edgeHotZoneClickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]
+        ) { [weak self] event in
+            guard let self else { return event }
+            guard event.window === self.view.window else { return event }
+            // Always pass the event through so window resize / drag can start.
+            self.noteEdgeHotZoneMouseEvent(event)
+            return event
+        }
+    }
+
+    private func removeEdgeHotZoneClickMonitor() {
+        if let edgeHotZoneClickMonitor {
+            NSEvent.removeMonitor(edgeHotZoneClickMonitor)
+            self.edgeHotZoneClickMonitor = nil
+        }
+        pendingEdgeHotZoneAction = nil
+        edgeHotZoneMouseDownPoint = nil
     }
 
     private func isColorPickerAuxiliaryWindow(_ window: NSWindow?) -> Bool {
@@ -5483,6 +7529,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             guard let self else { return event }
             guard self.view.window != nil else { return event }
             let pointInView = self.view.convert(event.locationInWindow, from: nil)
+
+            // Edge open/close is handled by the non-consuming edge monitor (click vs drag).
+            // Do not steal mouseDown here — that breaks window resize.
 
             if !self.rightSettingsSheet.isHidden {
                 if self.isSettingsToggleButtonClick(for: event) {
@@ -5501,7 +7550,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     || self.playbackMiniPreview.frame.contains(pointInView) {
                     return event
                 }
-                if self.libraryButton.frame.contains(pointInView) {
+                if self.libraryButton.frame.contains(pointInView)
+                    || self.imageLibraryButton.frame.contains(pointInView) {
                     return event
                 }
                 self.collapsePlaybackLibraryOverlay()
@@ -5526,78 +7576,103 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func handleMouseMoved(_ point: NSPoint) {
         guard view.bounds.contains(point) else {
-            cancelEdgePanelHoverTimers()
             handlePointerLeftContentView()
             return
         }
         noteImmersiveChromePointerActivity()
         guard !dragSessionActive else {
-            cancelEdgePanelHoverTimers()
             return
         }
 
-        let hotZoneWidth: CGFloat = 42
-        let isInLeftHotZone = point.x <= hotZoneWidth
-        let isInRightHotZone = point.x >= (view.bounds.width - hotZoneWidth)
+        let isInLeftHotZone = isPointInLeftLibraryOpenZone(point)
+        let isInRightOpenZone = isPointInRightSettingsOpenZone(point)
+        let isInRightCloseZone = isPointInRightSettingsCloseZone(point)
+        let inAnyEdgeZone = isInLeftHotZone || isInRightOpenZone || isInRightCloseZone
 
-        if isInLeftHotZone, activeMediaKind != .empty, playbackLibraryOverlay == .closed {
-            scheduleLeftEdgePanelOpen()
+        // Soft hover strip + pointer cursor (click still handled by click-vs-drag monitor).
+        syncLeftEdgeHotZoneAffordance(pointerInZone: isInLeftHotZone)
+        syncRightEdgeHotZoneAffordance(pointerInZone: isInRightOpenZone || isInRightCloseZone)
+        setEdgeHotZonePointerCursor(inAnyEdgeZone)
+    }
+
+    private func syncEdgeHotZoneAffordances() {
+        syncEdgeHotZoneStripInsets()
+        syncLeftEdgeHotZoneAffordance()
+        syncRightEdgeHotZoneAffordance()
+    }
+
+    /// Lift the soft strip ends above the filmstrip / meta bar so rounding isn’t buried under chrome.
+    private func syncEdgeHotZoneStripInsets() {
+        let bottom = edgeHotZoneBottomChromeHeight()
+        leftEdgeHotZoneAffordance.bottomContentInset = bottom
+        rightEdgeHotZoneAffordance.bottomContentInset = bottom
+    }
+
+    private func edgeHotZoneBottomChromeHeight() -> CGFloat {
+        guard activeMediaKind == .image else { return 0 }
+        var height: CGFloat = 0
+        if !imageFolderCarousel.isHidden, (imageCarouselHeightConstraint?.constant ?? 0) > 1 {
+            height += imageCarouselHeight
+        }
+        if !imageStudioMetaBar.isHidden {
+            height += imageMetaBarHeight
+        }
+        return height
+    }
+
+    private func syncLeftEdgeHotZoneAffordance(pointerInZone: Bool? = nil) {
+        let canReveal = activeMediaKind != .empty && playbackLibraryOverlay == .closed
+        guard canReveal else {
+            leftEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: true)
+            if playbackLibraryOverlay != .closed || activeMediaKind == .empty {
+                setEdgeHotZonePointerCursor(false)
+            }
+            return
+        }
+        let inZone: Bool
+        if let pointerInZone {
+            inZone = pointerInZone
+        } else if let window = view.window {
+            let mouse = window.mouseLocationOutsideOfEventStream
+            let point = view.convert(mouse, from: nil)
+            inZone = isPointInLeftLibraryOpenZone(point)
         } else {
-            cancelLeftEdgePanelOpen()
+            inZone = false
+        }
+        leftEdgeHotZoneAffordance.setVisible(inZone, emphasized: true, animated: true)
+    }
+
+    private func syncRightEdgeHotZoneAffordance(pointerInZone: Bool? = nil) {
+        let canReveal = activeMediaKind != .empty && playbackLibraryOverlay == .closed
+        guard canReveal else {
+            rightEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: true)
+            return
         }
 
-        if activeMediaKind != .empty, isInRightHotZone, playbackLibraryOverlay == .closed, rightSettingsSheet.isHidden {
-            scheduleRightEdgePanelOpen()
+        let settingsOpen = isSettingsPanelFullyOpen()
+        // Closed: strip on the window trailing edge (open). Open: strip just left of the column (close).
+        rightEdgeHotZoneToWindowTrailingConstraint?.isActive = !settingsOpen
+        rightEdgeHotZoneToSidebarLeadingConstraint?.isActive = settingsOpen
+
+        let inZone: Bool
+        if let pointerInZone {
+            inZone = pointerInZone
+        } else if let window = view.window {
+            let mouse = window.mouseLocationOutsideOfEventStream
+            let point = view.convert(mouse, from: nil)
+            inZone = isPointInRightSettingsOpenZone(point) || isPointInRightSettingsCloseZone(point)
         } else {
-            cancelRightEdgePanelOpen()
+            inZone = false
         }
-    }
-
-    private func scheduleLeftEdgePanelOpen() {
-        guard pendingLeftEdgePanelOpen == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingLeftEdgePanelOpen = nil
-            guard self.activeMediaKind != .empty, self.playbackLibraryOverlay == .closed else { return }
-            self.showPlaybackLibrarySidebarOnly()
-        }
-        pendingLeftEdgePanelOpen = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.edgePanelOpenDelay, execute: work)
-    }
-
-    private func cancelLeftEdgePanelOpen() {
-        pendingLeftEdgePanelOpen?.cancel()
-        pendingLeftEdgePanelOpen = nil
-    }
-
-    private func scheduleRightEdgePanelOpen() {
-        guard pendingRightEdgePanelOpen == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingRightEdgePanelOpen = nil
-            guard self.activeMediaKind != .empty,
-                  self.playbackLibraryOverlay == .closed,
-                  self.rightSettingsSheet.isHidden else { return }
-            self.showSettingsSheet()
-        }
-        pendingRightEdgePanelOpen = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.edgePanelOpenDelay, execute: work)
-    }
-
-    private func cancelRightEdgePanelOpen() {
-        pendingRightEdgePanelOpen?.cancel()
-        pendingRightEdgePanelOpen = nil
-    }
-
-    private func cancelEdgePanelHoverTimers() {
-        cancelLeftEdgePanelOpen()
-        cancelRightEdgePanelOpen()
+        rightEdgeHotZoneAffordance.setVisible(inZone, emphasized: true, animated: true)
     }
 
     private func handlePointerLeftContentView() {
-        cancelEdgePanelHoverTimers()
         scheduleImmersiveChromeHide()
         restoreImmersivePlaybackCursor()
+        setEdgeHotZonePointerCursor(false)
+        syncLeftEdgeHotZoneAffordance(pointerInZone: false)
+        syncRightEdgeHotZoneAffordance(pointerInZone: false)
         // Settings stays open for in-panel interaction; outside-click monitor dismisses it.
         guard rightSettingsSheet.isHidden else { return }
         hideSettingsSheet()
@@ -5615,14 +7690,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private var isTitleBarChromeShowing: Bool {
-        titleBarChromeAlwaysVisible || immersiveChromeVisible || immersiveChromePinnedVisible
+        titleBarChromeAlwaysVisible
+            || immersiveChromeVisible
+            || immersiveChromePinnedVisible
+            || playbackLibraryOverlay != .closed
     }
 
     private var immersiveChromePinnedVisible: Bool {
         dragSessionActive
-            || playbackLibraryOverlay != .closed
-            || !rightSettingsSheet.isHidden
             || queuePopover?.isShown == true
+            || (!rightSettingsSheet.isHidden && playbackLibraryOverlay == .closed)
     }
 
     private func currentPlayingDisplayTitle() -> String? {
@@ -5643,6 +7720,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func syncPlaybackBarVisibilityForCurrentState() {
         guard activeMediaKind == .video || activeMediaKind == .image else { return }
+        if playbackLibraryOverlay != .closed {
+            applyPlaybackBarVisible(false, animated: false)
+            return
+        }
         let keepBarVisible = playbackPrepareActive || (fallbackInProgress && committedPlayerItemID == nil)
         if keepBarVisible {
             applyPlaybackBarVisible(true, animated: false)
@@ -5719,8 +7800,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func setImmersiveChromeVisible(_ visible: Bool, animated: Bool) {
-        let shouldShowTitleBar = titleBarChromeAlwaysVisible || visible || immersiveChromePinnedVisible
-        let shouldShowPlaybackBar = usesImmersiveChrome && (visible || immersiveChromePinnedVisible)
+        let libraryOpen = playbackLibraryOverlay != .closed
+        let shouldShowTitleBar = titleBarChromeAlwaysVisible || visible || immersiveChromePinnedVisible || libraryOpen
+        let shouldShowPlaybackBar = usesImmersiveChrome
+            && !libraryOpen
+            && (visible || immersiveChromePinnedVisible)
         guard shouldShowTitleBar != isTitleBarChromeShowing else {
             if shouldShowTitleBar {
                 delegate?.playerViewController(self, setImmersiveChromeVisible: true, animated: animated)
@@ -5730,6 +7814,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if usesImmersiveChrome, shouldShowPlaybackBar != immersiveChromeVisible {
                 immersiveChromeVisible = shouldShowPlaybackBar
                 applyPlaybackBarVisible(shouldShowPlaybackBar, animated: animated)
+            } else if libraryOpen {
+                immersiveChromeVisible = false
+                applyPlaybackBarVisible(false, animated: animated)
             }
             syncImmersivePlaybackCursor()
             return
@@ -5755,7 +7842,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             restoreImmersivePlaybackCursor()
         } else {
             hideImmersivePlaybackCursorUntilMouseMoves()
+            // Cursor is gone — edge hover strip must go with it.
+            hideEdgeHotZoneAffordancesForIdle()
         }
+    }
+
+    private func hideEdgeHotZoneAffordancesForIdle() {
+        setEdgeHotZonePointerCursor(false)
+        leftEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: true)
+        rightEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: true)
     }
 
     private func hideImmersivePlaybackCursorUntilMouseMoves() {
@@ -5801,10 +7896,44 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func revealImmersiveChromeAfterDisplayChange() {
-        guard usesImmersiveChrome else { return }
+        guard usesImmersiveChrome else {
+            resyncPlaybackSurfaceGeometry()
+            return
+        }
         updatePlaybackBarWidth()
         updateMiniPreviewLayout()
+        resyncPlaybackSurfaceGeometry()
         noteImmersiveChromePointerActivity()
+    }
+
+    /// Re-center chrome and re-bind mpv after fullscreen / display geometry changes.
+    private func resyncPlaybackSurfaceGeometry() {
+        guard playerInterfaceInstalled, activeMediaKind == .video else { return }
+        view.layoutSubtreeIfNeeded()
+        updatePlaybackBarWidth()
+        // Left library overlay should not leave video chrome offset when closed.
+        if playbackLibraryOverlay == .closed {
+            librarySidebar.isHidden = true
+            libraryBrowse.isHidden = true
+        }
+        controlsContainer.needsLayout = true
+        playerSurfaceView.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        if mpvBackendActive {
+            playerSurfaceView.forceMpvLayoutResync()
+        }
+        nativeSubtitleOverlay.install(in: playerSurfaceView)
+    }
+
+    private func installScreenParameterObserverIfNeeded() {
+        guard screenParameterObserver == nil else { return }
+        screenParameterObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.revealImmersiveChromeAfterDisplayChange()
+        }
     }
 
     private func removeImmersiveCursorWindowObservers() {
@@ -5813,10 +7942,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             center.removeObserver(token)
         }
         immersiveCursorWindowObservers.removeAll()
+        if let screenParameterObserver {
+            center.removeObserver(screenParameterObserver)
+            self.screenParameterObserver = nil
+        }
     }
 
     private func updateTitleBarChromeLayout() {
         titleBarChromeHeightConstraint?.constant = ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window)
+        if activeMediaKind == .image {
+            syncImageStudioSettingsPanelGeometry()
+        }
         if isTitleBarChromeShowing {
             relayoutLibraryChromeForTitleBar()
         }
@@ -5858,26 +7994,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func applyPlaybackBarVisible(_ visible: Bool, animated: Bool = false) {
+        // Folder management never shows the floating transport / image tools bar.
+        let allowVisible = visible && playbackLibraryOverlay == .closed
         let bar = activeMediaKind == .image ? imageControlsContainer : controlsContainer
         guard activeMediaKind == .video || activeMediaKind == .image else { return }
-        let apply = {
-            bar.alphaValue = visible ? 1 : 0
-            bar.isHidden = !visible
-        }
-        guard animated else {
-            apply()
+        // Drop any in-flight animator() alpha so a prior immersive show cannot win.
+        bar.layer?.removeAllAnimations()
+
+        if !animated || !allowVisible {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            bar.alphaValue = allowVisible ? 1 : 0
+            bar.isHidden = !allowVisible
+            NSAnimationContext.endGrouping()
             return
         }
-        if visible {
-            bar.isHidden = false
-        }
+
+        bar.isHidden = false
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ImmersiveWindowChrome.animationDuration
-            bar.animator().alphaValue = visible ? 1 : 0
-        } completionHandler: {
-            if !visible {
-                bar.isHidden = true
-            }
+            bar.animator().alphaValue = 1
         }
     }
 
@@ -5938,35 +8074,63 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlaybackVolumeChromeVisibility()
     }
 
-    private func configureTransportSpeedClusterSpacer(_ spacer: NSView) {
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    private enum SpeedBadgePin {
+        case leading
+        case trailing
     }
 
-    private static let transportControlRowHeight: CGFloat = 28
+    /// Tiny speed badges on the step buttons — slow hugs bottom-left, fast hugs bottom-right.
+    private func attachTransportSpeedIndicatorOverlays() {
+        transportSpeedLeftCluster.clipsToBounds = false
+        transportSpeedRightCluster.clipsToBounds = false
+        attachTransportSpeedBadge(playbackSpeedSlowLabel, to: speedStepDownButton, pin: .leading)
+        attachTransportSpeedBadge(playbackSpeedFastLabel, to: speedStepUpButton, pin: .trailing)
+    }
+
+    private func attachTransportSpeedBadge(_ label: NSTextField, to button: NSButton, pin: SpeedBadgePin) {
+        guard button.superview != nil else { return }
+        label.removeFromSuperview()
+        button.clipsToBounds = false
+        button.addSubview(label, positioned: .above, relativeTo: nil)
+        let outward = Self.transportSpeedBadgeOutwardOffset
+        let horizontal: NSLayoutConstraint
+        switch pin {
+        case .leading:
+            horizontal = label.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: -outward)
+        case .trailing:
+            horizontal = label.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: outward)
+        }
+        NSLayoutConstraint.activate([
+            horizontal,
+            label.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -1),
+        ])
+    }
+
+    private static let transportSpeedBadgeHeight: CGFloat = 10
+    private static let transportSpeedBadgeOutwardOffset: CGFloat = 24
 
     private func configureTransportSpeedLabel(_ label: NSTextField, alignment: NSTextAlignment) {
         label.isBezeled = false
         label.drawsBackground = false
         label.isEditable = false
         label.isSelectable = false
-        label.font = .monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        label.font = .monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         label.textColor = .secondaryLabelColor
         label.alignment = alignment
-        label.alphaValue = 0
+        label.isHidden = true
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.widthAnchor.constraint(equalToConstant: Self.transportSpeedLabelReservedWidth).isActive = true
-        label.heightAnchor.constraint(equalToConstant: Self.transportControlRowHeight).isActive = true
+        label.heightAnchor.constraint(equalToConstant: Self.transportSpeedBadgeHeight).isActive = true
     }
 
     private func setTransportSpeedLabelText(_ text: String, on label: NSTextField, alignment: NSTextAlignment) {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         let style = NSMutableParagraphStyle()
         style.alignment = alignment
-        style.minimumLineHeight = Self.transportControlRowHeight
-        style.maximumLineHeight = Self.transportControlRowHeight
+        style.minimumLineHeight = Self.transportSpeedBadgeHeight
+        style.maximumLineHeight = Self.transportSpeedBadgeHeight
         label.attributedStringValue = NSAttributedString(
             string: text,
             attributes: [
@@ -5984,7 +8148,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     /// Fixed slot so transport controls do not shift when a speed label appears.
     private static let transportSpeedLabelReservedWidth: CGFloat = {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .semibold)
         let samples = PlaybackSpeedSteps.rates.map { rate -> String in
             let rounded = (rate * 100).rounded() / 100
             if rounded == rounded.rounded() {
@@ -6038,7 +8202,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
         let bottomInset = MusicStylePlaybackBar.preferredBarBottomInset(forContentWidthPoints: contentWidth)
         playbackBarBottomConstraint?.constant = -bottomInset
-        imageBarBottomConstraint?.constant = -bottomInset
+        // Image tools stay pinned above the meta bar (not the window bottom).
+        imageBarBottomConstraint?.constant = -10
     }
 
     private func applyResponsiveControlsLayout() {
@@ -6112,7 +8277,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         transportClusterStack.addArrangedSubview(playPauseButton)
         transportClusterStack.addArrangedSubview(transportSpeedRightCluster)
         transportClusterStack.addArrangedSubview(queueNextButton)
-        updatePlaybackSpeedTransportLabels()
         updateQueueTransportButtons()
 
         playbackLeadingAccessoryCluster.addArrangedSubview(libraryButton)
@@ -6127,6 +8291,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             playbackTopRowView.widthAnchor.constraint(equalTo: topControlsStack.widthAnchor).isActive = true
         }
         playbackTopRowView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        attachTransportSpeedIndicatorOverlays()
+        updatePlaybackSpeedTransportLabels()
 
         bottomLeftControlsStack.addArrangedSubview(currentTimeLabel)
         bottomRightControlsStack.addArrangedSubview(totalTimeLabel)
@@ -6167,6 +8333,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             playPauseButton.image?.isTemplate = true
         }
         playPauseButton.title = ""
+        playbackMiniPreview.setPlaying(playing)
+        syncIdleSleepGuard(isPlaying: playing)
+    }
+
+    private func syncIdleSleepGuard(isPlaying: Bool) {
+        let shouldHold = PlaybackIdleSleepPolicy.shouldPreventIdleSleep(
+            isPlaying: isPlaying,
+            mediaKind: activeMediaKind
+        )
+        idleSleepGuard.update(shouldHold: shouldHold)
     }
 
     private func updateTimelineUI() {
@@ -6279,6 +8455,28 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return String(format: "%02d:%02d", mins, secs)
     }
 
+    private func tracePlaybackTick(seconds: Double) {
+        let rounded = String(format: "%.2f", seconds)
+        if mpvBackendActive {
+            let playing = activeSession?.isPlaying == true
+            PlaybackTrace.emit("[DEBUG-playback] t=\(rounded)s backend=mpv playing=\(playing)")
+            return
+        }
+        let rate = player.rate
+        guard let item = player.currentItem else {
+            PlaybackTrace.emit("[DEBUG-playback] t=\(rounded)s rate=\(String(format: "%.2f", rate)) buffer=none")
+            return
+        }
+        let health = PlaybackBufferHealth.classify(
+            keepUp: item.isPlaybackLikelyToKeepUp,
+            empty: item.isPlaybackBufferEmpty,
+            full: item.isPlaybackBufferFull
+        )
+        PlaybackTrace.emit(
+            "[DEBUG-playback] t=\(rounded)s rate=\(String(format: "%.2f", rate)) buffer=\(health.logLabel) keepUp=\(item.isPlaybackLikelyToKeepUp) empty=\(item.isPlaybackBufferEmpty) full=\(item.isPlaybackBufferFull)"
+        )
+    }
+
     private func logBufferStateChanges(item: AVPlayerItem) {
         let likely = item.isPlaybackLikelyToKeepUp
         let empty = item.isPlaybackBufferEmpty
@@ -6288,7 +8486,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             lastLikelyToKeepUp = likely
             lastBufferEmpty = empty
             lastBufferFull = full
-            print("[DEBUG-qos] buffer_state keepUp=\(likely) empty=\(empty) full=\(full)")
+            let health = PlaybackBufferHealth.classify(keepUp: likely, empty: empty, full: full)
+            PlaybackTrace.emit("[DEBUG-qos] buffer_state \(health.logLabel) keepUp=\(likely) empty=\(empty) full=\(full)")
         }
     }
 
@@ -6296,11 +8495,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let keepUp = item.isPlaybackLikelyToKeepUp
         let empty = item.isPlaybackBufferEmpty
         let full = item.isPlaybackBufferFull
+        let health = PlaybackBufferHealth.classify(keepUp: keepUp, empty: empty, full: full)
 
         if let event = item.accessLog()?.events.last {
-            print(String(
-                format: "[DEBUG-qos] %@ keepUp=%@ empty=%@ full=%@ bitrate=%.0f indicated=%.0f droppedFrames=%ld stalls=%ld transfer=%.3fs",
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-qos] %@ buffer=%@ keepUp=%@ empty=%@ full=%@ bitrate=%.0f indicated=%.0f droppedFrames=%ld stalls=%ld transfer=%.3fs",
                 reason,
+                health.logLabel,
                 keepUp.description,
                 empty.description,
                 full.description,
@@ -6311,16 +8512,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 event.transferDuration
             ))
         } else {
-            print("[DEBUG-qos] \(reason) keepUp=\(keepUp) empty=\(empty) full=\(full) (no access log events yet)")
+            PlaybackTrace.emit("[DEBUG-qos] \(reason) buffer=\(health.logLabel) keepUp=\(keepUp) empty=\(empty) full=\(full) (no access log events yet)")
         }
     }
 
     private func logErrorLogSnapshot(reason: String, item: AVPlayerItem) {
         guard let event = item.errorLog()?.events.last else {
-            print("[DEBUG-qos] \(reason) no error log events")
+            PlaybackTrace.emit("[DEBUG-qos] \(reason) no error log events")
             return
         }
-        print(
+        PlaybackTrace.emit(
             "[DEBUG-qos] \(reason) domain=\(event.errorDomain) code=\(event.errorStatusCode) comment=\(event.errorComment ?? "none") uri=\(event.uri ?? "none") server=\(event.serverAddress ?? "none")"
         )
     }
@@ -6357,6 +8558,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         performCooperativeSeek(to: target) { _ in
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
             print(String(format: "[DEBUG-ui] seek=%.2fms", elapsedMs))
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.focusPlaybackSurfaceForTransportShortcuts()
         }
     }
 
@@ -6435,6 +8639,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateVolumeMuteButtonIcon()
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
         print(String(format: "[DEBUG-ui] volume=%.2fms", elapsedMs))
+        DispatchQueue.main.async { [weak self] in
+            self?.focusPlaybackSurfaceForTransportShortcuts()
+        }
     }
 
     /// Pause and mute Laugh only (not system output) before swapping items.
@@ -6446,6 +8653,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         player.pause()
         player.isMuted = true
+        updatePlayPauseButtonIcon()
         print("[DEBUG-playback] paused Laugh for video switch (player muted, volume unchanged)")
     }
 
@@ -6461,6 +8669,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         player.isMuted = true
         player.volume = 0
         disconnectPlayerFromVideoSurfaces()
+        updatePlayPauseButtonIcon()
         print("[DEBUG-playback] suspended AVPlayer output (still image / empty — no item teardown)")
     }
 
@@ -6534,10 +8743,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc private func settingsPressed() {
         guard activeMediaKind != .empty, playbackLibraryOverlay == .closed else { return }
-        if rightSettingsSheet.isHidden {
-            showSettingsSheet()
-        } else {
+        if isSettingsPanelFullyOpen() {
             hideSettingsSheet()
+        } else {
+            showSettingsSheet()
         }
     }
 
@@ -6550,7 +8759,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if playbackLibraryOverlay != .closed {
             collapsePlaybackLibraryOverlay()
         } else {
-            showPlaybackLibrarySidebarOnly()
+            showPlaybackLibraryPanel()
         }
     }
 
@@ -6582,15 +8791,139 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc func imageZoomIn() {
-        imageSurfaceView.setZoomScale(min(imageSurfaceView.zoomScale * 1.15, 8.0))
+        imageSurfaceView.setZoomScale(min(imageSurfaceView.zoomScale * 1.15, 24.0))
+        updateImageZoomPercentLabel()
     }
 
     @objc func imageZoomOut() {
         imageSurfaceView.setZoomScale(max(imageSurfaceView.zoomScale / 1.15, 0.2))
+        updateImageZoomPercentLabel()
     }
 
     @objc func imageFit() {
         imageSurfaceView.resetZoom()
+        updateImageZoomPercentLabel()
+    }
+
+    @objc func imageCropPressed() {
+        guard activeMediaKind == .image else { return }
+        if isImageCropMode {
+            cancelImageCropMode()
+        } else {
+            beginImageCropMode()
+        }
+    }
+
+    @objc private func imageCropAspectChanged() {
+        guard isImageCropMode else { return }
+        imageSurfaceView.setCropAspect(imageCropBar.selectedAspect)
+    }
+
+    @objc private func imageCropCancelPressed() {
+        cancelImageCropMode()
+    }
+
+    @objc private func imageCropApplyPressed() {
+        guard isImageCropMode else { return }
+        imageSurfaceView.applyCropDraft()
+        isImageCropMode = false
+        updateImageCropChrome()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    private func beginImageCropMode() {
+        guard imageSurfaceView.enterCropMode(aspect: imageCropBar.selectedAspect) else { return }
+        isImageCropMode = true
+        updateImageCropChrome()
+        updateImageZoomPercentLabel()
+    }
+
+    private func cancelImageCropMode() {
+        guard isImageCropMode || imageSurfaceView.isCropMode else { return }
+        // Cancel abandons the session: clear crop/straighten and undo mid-session
+        // rotate/flip (restored to orientation at crop entry).
+        imageSurfaceView.cancelCropMode(restoreOriginal: true)
+        isImageCropMode = false
+        updateImageCropChrome()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    private func updateImageCropChrome() {
+        let cropping = isImageCropMode
+        imageCropBar.isHidden = !cropping
+        imageLeadingAccessoryCluster.isHidden = cropping
+        imageTransportCluster.isHidden = cropping
+        imageAccessoryCluster.isHidden = cropping
+        imageRotateLeftButton.isEnabled = !cropping
+        imageRotateRightButton.isEnabled = !cropping
+        imageBarHeightConstraint?.constant = cropping
+            ? ImageCropBarView.preferredChromeHeight
+            : 52
+        if cropping {
+            // Crop chrome uses a compact aspect popup + transform actions.
+            imageBarWidthConstraint?.constant = max(
+                imageBarWidthConstraint?.constant ?? 420,
+                420
+            )
+        } else {
+            let contentWidth = view.bounds.width > 1 ? view.bounds.width : 1100
+            imageBarWidthConstraint?.constant = MusicStylePlaybackBar.preferredBarWidth(
+                forContentWidthPoints: contentWidth
+            )
+        }
+        // Recrop the photo against the updated tools bar.
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        updateImageStudioLayoutInsets()
+    }
+
+    @objc func imageActualSize() {
+        let scale = view.window?.backingScaleFactor
+            ?? view.window?.screen?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
+        imageSurfaceView.setActualSizeZoom(backingScaleFactor: scale)
+        updateImageZoomPercentLabel()
+    }
+
+    @objc func imageRotateLeft() {
+        imageSurfaceView.rotateLeft()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    @objc func imageRotateRight() {
+        imageSurfaceView.rotateRight()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    @objc private func imageCropFlipHorizontal() {
+        imageSurfaceView.flipHorizontalAxis()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    @objc private func imageCropFlipVertical() {
+        imageSurfaceView.flipVerticalAxis()
+        updateImageStudioCommitFooter()
+        updateImageZoomPercentLabel()
+    }
+
+    private func toggleImageFitActualSize() {
+        guard activeMediaKind == .image else { return }
+        let scale = view.window?.backingScaleFactor
+            ?? view.window?.screen?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
+        if imageSurfaceView.isApproximatelyFitZoom {
+            imageSurfaceView.setActualSizeZoom(backingScaleFactor: scale)
+        } else {
+            imageSurfaceView.resetZoom()
+        }
+        updateImageZoomPercentLabel()
     }
 }
 
@@ -6609,16 +8942,26 @@ extension PlayerViewController: SettingsColorWellInteractionDelegate {
 // MARK: - Shortcut command funnel
 
 extension PlayerViewController {
-    private static let standardSeekSeconds: Double = 10
-    private static let fineSeekSeconds: Double = 1
-    private static let volumeStep: Float = 0.05
+    private static let standardSeekSeconds = PlaybackTransportShortcuts.standardSeekSeconds
+    private static let fineSeekSeconds = PlaybackTransportShortcuts.fineSeekSeconds
+    private static let volumeStep = PlaybackTransportShortcuts.volumeStep
 
     func installVideoDoubleClickFullscreenMonitor() {
         guard videoDoubleClickMonitor == nil else { return }
         videoDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self else { return event }
-            guard event.clickCount == 2, self.activeMediaKind == .video else { return event }
-            guard self.shouldToggleFullscreenForVideoDoubleClick(at: event.locationInWindow) else { return event }
+            guard event.clickCount == 2 else { return event }
+
+            if self.activeMediaKind == .image,
+               self.shouldZoomWindowForImageTitleBarDoubleClick(at: event.locationInWindow) {
+                self.zoomMainWindowToFillVisibleDesktop()
+                return event
+            }
+
+            guard self.activeMediaKind == .video,
+                  self.shouldToggleFullscreenForVideoDoubleClick(at: event.locationInWindow) else {
+                return event
+            }
             self.revealImmersiveChromeAfterDisplayChange()
             self.view.window?.toggleFullScreen(nil)
             return event
@@ -6632,9 +8975,37 @@ extension PlayerViewController {
         return !isPointOverVideoChrome(windowLocation)
     }
 
+    /// Image studio: double-click the title-bar band to zoom the window into the
+    /// visible desktop (menu bar + Dock stay — same idea as macOS title-bar zoom).
+    private func shouldZoomWindowForImageTitleBarDoubleClick(at windowLocation: NSPoint) -> Bool {
+        guard activeMediaKind == .image else { return false }
+        let point = view.convert(windowLocation, from: nil)
+        guard view.bounds.contains(point) else { return false }
+        if isPointOverVideoChrome(windowLocation) { return false }
+        let titleHeight = max(
+            ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window),
+            titleBarChromeStrip.isHidden ? 28 : titleBarChromeStrip.bounds.height
+        )
+        // NSView: y=0 at bottom — title bar occupies the top strip.
+        return point.y >= (view.bounds.maxY - titleHeight - 2)
+    }
+
+    /// Fill the screen’s visible frame (excludes menu bar / Dock). Toggles back via `zoom`.
+    private func zoomMainWindowToFillVisibleDesktop() {
+        guard let window = view.window else { return }
+        revealImmersiveChromeAfterDisplayChange()
+        // Standard macOS zoom — fills visible desktop, does not enter Spaces fullscreen.
+        if window.styleMask.contains(.resizable) {
+            window.zoom(nil)
+        }
+    }
+
     private func isPointOverVideoChrome(_ windowLocation: NSPoint) -> Bool {
         let chrome: [NSView] = [
             controlsContainer,
+            imageControlsContainer,
+            imageFolderCarousel,
+            imageStudioMetaBar,
             rightSettingsSheet,
             librarySidebar,
             libraryBrowse,
@@ -6665,6 +9036,89 @@ extension PlayerViewController {
         }
     }
 
+    func installScrollShortcutMonitor() {
+        guard scrollShortcutMonitor == nil else { return }
+        scrollShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self else { return event }
+            guard event.window === self.view.window || self.view.window?.isKeyWindow == true else {
+                return event
+            }
+            guard self.handlePlaybackScrollEvent(event) else { return event }
+            return nil
+        }
+    }
+
+    /// Vertical wheel → volume; horizontal / ⇧+vertical → seek.
+    @discardableResult
+    func handlePlaybackScrollEvent(_ event: NSEvent) -> Bool {
+        guard activeMediaKind == .video else { return false }
+        guard !keyboardFocusBlocksTransportShortcuts else { return false }
+        guard shouldHandlePlaybackScroll(at: event.locationInWindow) else { return false }
+
+        let flags = PlaybackTransportShortcuts.chordModifiers(from: event)
+        guard !flags.contains(.command), !flags.contains(.option), !flags.contains(.control) else {
+            return false
+        }
+
+        var deltaX = event.scrollingDeltaX
+        var deltaY = event.scrollingDeltaY
+        if abs(deltaX) < 0.01, abs(deltaY) < 0.01 {
+            deltaX = event.deltaX
+            deltaY = event.deltaY
+        }
+        // Ignore pure momentum crumbs with no delta.
+        guard abs(deltaX) > 0.01 || abs(deltaY) > 0.01 else { return false }
+
+        let action = PlaybackTransportShortcuts.consumeScroll(
+            deltaX: deltaX,
+            deltaY: deltaY,
+            shiftPressed: flags.contains(.shift),
+            hasPreciseDeltas: event.hasPreciseScrollingDeltas,
+            volumeAccumulator: &scrollVolumeAccumulator,
+            seekAccumulator: &scrollSeekAccumulator
+        )
+        guard let action else { return false }
+
+        switch action {
+        case .volume(let delta):
+            commandAdjustVolume(by: delta)
+        case .seek(let seconds):
+            commandSeek(bySeconds: seconds)
+        }
+        return true
+    }
+
+    private func shouldHandlePlaybackScroll(at windowLocation: NSPoint) -> Bool {
+        guard !playerSurfaceView.isHidden else { return false }
+        let pointInView = view.convert(windowLocation, from: nil)
+        guard view.bounds.contains(pointInView) else { return false }
+
+        // Let settings / library keep their own scrolling.
+        if !rightSettingsSheet.isHidden {
+            let local = rightSettingsSheet.convert(windowLocation, from: nil)
+            if rightSettingsSheet.bounds.contains(local) { return false }
+        }
+        if playbackLibraryOverlay != .closed {
+            if librarySidebar.frame.contains(pointInView) || libraryBrowse.frame.contains(pointInView) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Keep the playback bar visible while seek / volume is being adjusted.
+    private func noteTransportChromeActivity() {
+        noteImmersiveChromePointerActivity()
+    }
+
+    /// Prefer keyboard focus on the video surface so chrome controls do not keep key focus.
+    func focusPlaybackSurfaceForTransportShortcuts() {
+        guard activeMediaKind == .video else { return }
+        guard let window = view.window else { return }
+        if keyboardFocusBlocksTransportShortcuts { return }
+        window.makeFirstResponder(playerSurfaceView)
+    }
+
     func commandToggleLibraryPanel() {
         if activeMediaKind == .empty {
             librarySidebar.reloadRoots()
@@ -6679,16 +9133,16 @@ extension PlayerViewController {
         if playbackLibraryOverlay != .closed {
             collapsePlaybackLibraryOverlay()
         } else {
-            showPlaybackLibrarySidebarOnly()
+            showPlaybackLibraryPanel()
         }
     }
 
     func commandToggleSettingsInspector() {
         guard activeMediaKind != .empty, playbackLibraryOverlay == .closed else { return }
-        if rightSettingsSheet.isHidden {
-            showSettingsSheet()
-        } else {
+        if isSettingsPanelFullyOpen() {
             hideSettingsSheet()
+        } else {
+            showSettingsSheet()
         }
     }
 
@@ -6701,8 +9155,21 @@ extension PlayerViewController {
     }
 
     func commandStopAndClose() {
+        hidePlaybackMiniPreview()
         guard activeMediaKind != .empty else { return }
         showEmptySurface()
+    }
+
+    /// Stop all audio backends before the process exits. Window close does not reliably run `deinit`.
+    func prepareForTermination() {
+        stopMpvBackend()
+        MpvPlaybackController.terminateRunningProcesses()
+        volumeRampToken += 1
+        activeSession?.pause()
+        player.pause()
+        player.isMuted = true
+        player.volume = 0
+        FFmpegVideoFallback.terminateRunningProcesses()
     }
 
     func commandHandleEscapeKey() {
@@ -6728,6 +9195,7 @@ extension PlayerViewController {
 
     func commandSeek(bySeconds seconds: Double) {
         guard activeMediaKind == .video else { return }
+        noteTransportChromeActivity()
         let current: Double
         if mpvBackendActive, let session = activeSession {
             current = session.currentTimeSec
@@ -6742,11 +9210,13 @@ extension PlayerViewController {
 
     func commandSeekToStart() {
         guard activeMediaKind == .video else { return }
+        noteTransportChromeActivity()
         performCooperativeSeek(to: .zero)
     }
 
     func commandSeekToEnd() {
         guard activeMediaKind == .video else { return }
+        noteTransportChromeActivity()
         let end = seekSlider.maxValue
         guard end > 0 else { return }
         performCooperativeSeek(to: CMTime(seconds: end, preferredTimescale: 600))
@@ -6754,6 +9224,7 @@ extension PlayerViewController {
 
     func commandAdjustVolume(by delta: Float) {
         guard activeMediaKind == .video, audioOutputEnabled else { return }
+        noteTransportChromeActivity()
         isUserVolumeMuted = false
         desiredPlaybackVolume = min(1, max(0, desiredPlaybackVolume + delta))
         volumeSlider.doubleValue = Double(desiredPlaybackVolume)
@@ -6896,7 +9367,8 @@ extension PlayerViewController {
 
     @discardableResult
     func handleKeyboardEvent(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Ignore .numericPad / .function — arrow keys always carry them on macOS.
+        let flags = PlaybackTransportShortcuts.chordModifiers(from: event)
 
         if event.keyCode == 53 {
             if keyboardFocusBlocksTransportShortcuts { return false }
@@ -7086,11 +9558,7 @@ extension PlayerViewController {
     }
 
     var keyboardFocusBlocksTransportShortcuts: Bool {
-        guard let responder = view.window?.firstResponder else { return false }
-        if responder is NSSlider || responder is NSTextField || responder is NSPopUpButton || responder is NSTextView {
-            return true
-        }
-        return false
+        PlaybackTransportShortcuts.blocksTransportShortcuts(firstResponder: view.window?.firstResponder)
     }
 
     var isVideoPlaying: Bool {
@@ -7103,53 +9571,500 @@ extension PlayerViewController {
 }
 
 final class ImageSurfaceView: NSView {
+    var onDoubleClick: (() -> Void)?
+    /// Fired whenever zoom changes (buttons, scroll, pinch).
+    var onZoomScaleChanged: (() -> Void)?
+    /// Fired when applied crop changes (apply / clear).
+    var onCropChanged: (() -> Void)?
+
     private let imageView = NSImageView()
+    private let cropOverlay = ImageCropOverlayView()
+    private var baseImage: NSImage?
+    private var baseCIImage: CIImage?
+    private var previewCIImage: CIImage?
+    private var cachedSourceToken: ObjectIdentifier?
     private(set) var naturalPixelSize: CGSize = .zero
     private(set) var zoomScale: CGFloat = 1.0
+    private(set) var rotationQuarterTurns: Int = 0
+    private(set) var flipHorizontal = false
+    private(set) var flipVertical = false
+    /// Normalized crop in post-rotation + straighten space (bottom-leading). `nil` = full frame.
+    private(set) var appliedCropNormalized: CGRect?
+    /// Fine straighten angle after quarter-turns (radians). Applied with crop.
+    private(set) var appliedStraightenRadians: CGFloat = 0
+    private var draftStraightenRadians: CGFloat = 0
+    private(set) var isCropMode = false
+    private var cropAspect: ImageCropAspect = .free
+    /// Orientation at crop-mode entry — restored on Cancel so mid-session rotate/flip are abandoned.
+    private var cropSessionRotationQuarterTurns = 0
+    private var cropSessionFlipHorizontal = false
+    private var cropSessionFlipVertical = false
+    private var adjustParameters = ImageAdjustParameters.identity
+    /// Offset from centered fit frame while zoomed in (points).
+    private var panOffset: CGPoint = .zero
+    private var isPanning = false
+    private var panGestureStartMouse: CGPoint = .zero
+    private var panGestureStartOffset: CGPoint = .zero
+    private static let minZoom: CGFloat = 0.2
+    private static let maxZoom: CGFloat = 24.0
+    /// Metal-backed when available — better quality/perf for interactive preview.
+    private let ciContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [
+                .cacheIntermediates: false
+            ])
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
+    private var fullRenderGeneration = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
         imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.wantsLayer = true
+        imageView.layer?.backgroundColor = NSColor.clear.cgColor
+        if #available(macOS 10.14, *) {
+            imageView.layer?.contentsGravity = .resizeAspect
+        }
         addSubview(imageView)
+
+        cropOverlay.translatesAutoresizingMaskIntoConstraints = false
+        cropOverlay.isHidden = true
+        cropOverlay.onDraftChanged = { [weak self] _ in
+            self?.needsDisplay = true
+        }
+        cropOverlay.onStraightenChanged = { [weak self] radians in
+            guard let self, self.isCropMode else { return }
+            self.draftStraightenRadians = radians
+            self.refreshDisplayedImage(quality: .preview)
+            self.needsLayout = true
+        }
+        cropOverlay.onStraightenDragEnded = { [weak self] in
+            guard let self, self.isCropMode else { return }
+            self.refreshDisplayedImage(quality: .full)
+            self.needsLayout = true
+        }
+        cropOverlay.onApplyRequested = { [weak self] in
+            self?.applyCropDraft()
+        }
+        addSubview(cropOverlay)
+        NSLayoutConstraint.activate([
+            cropOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cropOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            cropOverlay.topAnchor.constraint(equalTo: topAnchor),
+            cropOverlay.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override var acceptsFirstResponder: Bool { true }
+
+    /// Keep pan / crop drags from becoming a window move under full-size content chrome.
+    override var mouseDownCanMoveWindow: Bool { false }
+
     var image: NSImage? {
         imageView.image
     }
 
+    var isApproximatelyFitZoom: Bool {
+        abs(zoomScale - 1.0) < 0.02
+    }
+
+    var hasNonIdentityCrop: Bool {
+        !ImageCropGeometry.isIdentity(appliedCropNormalized)
+            || !ImageCropGeometry.isIdentityStraighten(appliedStraightenRadians)
+            || flipHorizontal
+            || flipVertical
+    }
+
+    var draftCropNormalized: CGRect {
+        cropOverlay.draftNormalized
+    }
+
+    /// Oriented full-frame pixel size (before applied crop), including live straighten in crop mode.
+    private var orientedPixelSize: CGSize {
+        let base: CGSize
+        if rotationQuarterTurns % 2 != 0 {
+            base = CGSize(width: naturalPixelSize.height, height: naturalPixelSize.width)
+        } else {
+            base = naturalPixelSize
+        }
+        let straighten = isCropMode ? draftStraightenRadians : appliedStraightenRadians
+        guard !ImageCropGeometry.isIdentityStraighten(straighten) else { return base }
+        // Bounding box of a rect rotated about center.
+        let cosA = abs(cos(straighten))
+        let sinA = abs(sin(straighten))
+        return CGSize(
+            width: base.width * cosA + base.height * sinA,
+            height: base.width * sinA + base.height * cosA
+        )
+    }
+
+    private var displayPixelSize: CGSize {
+        let oriented = orientedPixelSize
+        guard !isCropMode, let crop = appliedCropNormalized, !ImageCropGeometry.isIdentity(crop) else {
+            return oriented
+        }
+        let pixel = ImageCropGeometry.pixelRect(normalized: crop, imageSize: oriented)
+        return CGSize(width: max(pixel.width, 1), height: max(pixel.height, 1))
+    }
+
     func setImage(_ image: NSImage, naturalSize: CGSize) {
+        baseImage = image
         naturalPixelSize = naturalSize
-        imageView.image = image
+        rotationQuarterTurns = 0
+        flipHorizontal = false
+        flipVertical = false
+        appliedCropNormalized = nil
+        appliedStraightenRadians = 0
+        draftStraightenRadians = 0
+        exitCropMode(apply: false)
         zoomScale = 1.0
+        panOffset = .zero
+        rebuildSourceCIImages(from: image)
+        refreshDisplayedImage(quality: .full)
         needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        onZoomScaleChanged?()
+        onCropChanged?()
     }
 
     func clearImage() {
+        baseImage = nil
+        baseCIImage = nil
+        previewCIImage = nil
+        cachedSourceToken = nil
         imageView.image = nil
         naturalPixelSize = .zero
         zoomScale = 1.0
+        panOffset = .zero
+        isPanning = false
+        rotationQuarterTurns = 0
+        flipHorizontal = false
+        flipVertical = false
+        appliedCropNormalized = nil
+        appliedStraightenRadians = 0
+        draftStraightenRadians = 0
+        exitCropMode(apply: false)
+        adjustParameters = .identity
         needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        onZoomScaleChanged?()
+        onCropChanged?()
     }
 
     func resetZoom() {
-        zoomScale = 1.0
-        needsLayout = true
+        panOffset = .zero
+        applyZoomScale(1.0)
     }
 
     func setZoomScale(_ scale: CGFloat) {
-        zoomScale = scale
+        applyZoomScale(scale)
+    }
+
+    func setActualSizeZoom(backingScaleFactor: CGFloat) {
+        applyZoomScale(actualSizeZoomScale(backingScaleFactor: backingScaleFactor))
+    }
+
+    func actualSizeZoomScale(backingScaleFactor: CGFloat) -> CGFloat {
+        let fit = fitSize(in: bounds)
+        guard fit.width > 0 else { return 1 }
+        let targetWidth = displayPixelSize.width / max(backingScaleFactor, 1)
+        return max(targetWidth / fit.width, Self.minZoom)
+    }
+
+    override func resetCursorRects() {
+        if canPanImage {
+            addCursorRect(bounds, cursor: isPanning ? .closedHand : .openHand)
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard baseImage != nil, !isCropMode else {
+            super.scrollWheel(with: event)
+            return
+        }
+        // Trackpad / mouse wheel over the photo zooms fit size.
+        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 12
+        guard abs(dy) > 0.05 else { return }
+        // Scroll up / pinch-out feel → zoom in.
+        let factor = exp(dy * 0.012)
+        applyZoomScale(zoomScale * factor)
+    }
+
+    override func magnify(with event: NSEvent) {
+        guard baseImage != nil, !isCropMode else {
+            super.magnify(with: event)
+            return
+        }
+        applyZoomScale(zoomScale * (1 + event.magnification))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        if isCropMode { return }
+        if event.clickCount == 2 {
+            isPanning = false
+            onDoubleClick?()
+            return
+        }
+        if canPanImage {
+            isPanning = true
+            panGestureStartMouse = event.locationInWindow
+            panGestureStartOffset = panOffset
+            NSCursor.closedHand.set()
+            window?.invalidateCursorRects(for: self)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isPanning else {
+            super.mouseDragged(with: event)
+            return
+        }
+        let loc = event.locationInWindow
+        let proposed = CGPoint(
+            x: panGestureStartOffset.x + (loc.x - panGestureStartMouse.x),
+            y: panGestureStartOffset.y + (loc.y - panGestureStartMouse.y)
+        )
+        let clamped = clampPanOffset(proposed)
+        guard abs(clamped.x - panOffset.x) > 0.05 || abs(clamped.y - panOffset.y) > 0.05 else { return }
+        panOffset = clamped
         needsLayout = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if isPanning {
+            isPanning = false
+            window?.invalidateCursorRects(for: self)
+            if canPanImage {
+                NSCursor.openHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    private func applyZoomScale(_ scale: CGFloat) {
+        let clamped = min(max(scale, Self.minZoom), Self.maxZoom)
+        let zoomChanged = abs(clamped - zoomScale) > 0.0005
+        zoomScale = clamped
+        if canPanImage {
+            panOffset = clampPanOffset(panOffset)
+        } else {
+            panOffset = .zero
+        }
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        if zoomChanged {
+            onZoomScaleChanged?()
+        }
+    }
+
+    func setAdjustParameters(_ parameters: ImageAdjustParameters, quality: ImageAdjustRenderQuality = .full) {
+        let paramsChanged = parameters != adjustParameters
+        adjustParameters = parameters
+        guard paramsChanged || quality == .full else { return }
+        refreshDisplayedImage(quality: quality)
+    }
+
+    func rotateLeft() {
+        rotationQuarterTurns = (rotationQuarterTurns + 3) % 4
+        applyOrientationChange()
+    }
+
+    func rotateRight() {
+        rotationQuarterTurns = (rotationQuarterTurns + 1) % 4
+        applyOrientationChange()
+    }
+
+    func flipHorizontalAxis() {
+        flipHorizontal.toggle()
+        applyOrientationChange()
+    }
+
+    func flipVerticalAxis() {
+        flipVertical.toggle()
+        applyOrientationChange()
+    }
+
+    /// Shared path for rotate / flip: clears crop+straighten draft and refreshes.
+    private func applyOrientationChange() {
+        appliedStraightenRadians = 0
+        draftStraightenRadians = 0
+        if !isCropMode {
+            appliedCropNormalized = nil
+        }
+        panOffset = .zero
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        if isCropMode {
+            let draft = ImageCropGeometry.defaultNormalizedRect(
+                aspect: cropAspect,
+                imageSize: orientedPixelSize
+            )
+            layoutCropOverlay(draft: draft)
+            window?.invalidateCursorRects(for: cropOverlay)
+        }
+        window?.invalidateCursorRects(for: self)
+        onCropChanged?()
+    }
+
+    @discardableResult
+    func enterCropMode(aspect: ImageCropAspect = .free) -> Bool {
+        guard baseImage != nil else { return false }
+        isCropMode = true
+        cropAspect = aspect
+        cropSessionRotationQuarterTurns = rotationQuarterTurns
+        cropSessionFlipHorizontal = flipHorizontal
+        cropSessionFlipVertical = flipVertical
+        draftStraightenRadians = appliedStraightenRadians
+        resetZoom()
+        isPanning = false
+        cropOverlay.isHidden = false
+        let draft = appliedCropNormalized ?? ImageCropGeometry.defaultNormalizedRect(
+            aspect: aspect,
+            imageSize: orientedPixelSize
+        )
+        layoutCropOverlay(draft: draft)
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        window?.invalidateCursorRects(for: cropOverlay)
+        return true
+    }
+
+    func setCropAspect(_ aspect: ImageCropAspect) {
+        guard isCropMode else { return }
+        cropAspect = aspect
+        cropOverlay.setAspect(aspect)
+        layoutCropOverlay(draft: cropOverlay.draftNormalized)
+    }
+
+    func applyCropDraft() {
+        guard isCropMode else { return }
+        let draft = ImageCropGeometry.sanitized(cropOverlay.draftNormalized)
+        appliedCropNormalized = ImageCropGeometry.isIdentity(draft) ? nil : draft
+        appliedStraightenRadians = ImageCropGeometry.clampStraightenRadians(draftStraightenRadians)
+        if ImageCropGeometry.isIdentityStraighten(appliedStraightenRadians) {
+            appliedStraightenRadians = 0
+        }
+        exitCropMode(apply: true)
+        onCropChanged?()
+    }
+
+    /// - Parameter restoreOriginal: when true (Cancel), clears applied crop/straighten and
+    ///   restores rotation/flips to the values from crop-mode entry.
+    func cancelCropMode(restoreOriginal: Bool = false) {
+        if restoreOriginal {
+            appliedCropNormalized = nil
+            appliedStraightenRadians = 0
+            draftStraightenRadians = 0
+            rotationQuarterTurns = cropSessionRotationQuarterTurns
+            flipHorizontal = cropSessionFlipHorizontal
+            flipVertical = cropSessionFlipVertical
+        }
+        exitCropMode(apply: false)
+        if restoreOriginal {
+            onCropChanged?()
+        }
+    }
+
+    /// Clears crop, straighten, flips, and quarter-turn rotation.
+    func resetDisplayGeometry() {
+        if isCropMode {
+            exitCropMode(apply: false)
+        }
+        appliedCropNormalized = nil
+        appliedStraightenRadians = 0
+        draftStraightenRadians = 0
+        rotationQuarterTurns = 0
+        flipHorizontal = false
+        flipVertical = false
+        panOffset = .zero
+        zoomScale = 1.0
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        onZoomScaleChanged?()
+        onCropChanged?()
+    }
+
+    private func exitCropMode(apply: Bool) {
+        guard isCropMode || !cropOverlay.isHidden else { return }
+        isCropMode = false
+        if !apply {
+            draftStraightenRadians = appliedStraightenRadians
+        }
+        cropOverlay.isHidden = true
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private func layoutCropOverlay(draft: CGRect? = nil) {
+        guard isCropMode else { return }
+        let draftRect = draft ?? cropOverlay.draftNormalized
+        let preSize = ImageCropGeometry.preStraightenSize(
+            natural: naturalPixelSize,
+            quarterTurns: rotationQuarterTurns
+        )
+        cropOverlay.configure(
+            draftNormalized: draftRect,
+            aspect: cropAspect,
+            imageSize: orientedPixelSize,
+            preStraightenSize: preSize,
+            imageFrameInOverlay: photoFrameInOverlay(),
+            straightenRadians: draftStraightenRadians
+        )
+    }
+
+    /// Visible photo rect inside the surface (accounts for aspect-fit letterboxing in the image view).
+    private func photoFrameInOverlay() -> CGRect {
+        let frame = imageView.frame
+        guard let image = imageView.image else { return frame }
+        let fitted = Self.aspectFitRect(imageSize: image.size, in: frame.size)
+        return fitted.offsetBy(dx: frame.minX, dy: frame.minY)
+    }
+
+    private static func aspectFitRect(imageSize: CGSize, in container: CGSize) -> CGRect {
+        guard imageSize.width > 0.5, imageSize.height > 0.5,
+              container.width > 0.5, container.height > 0.5 else {
+            return CGRect(origin: .zero, size: container)
+        }
+        let imageAspect = imageSize.width / imageSize.height
+        let containerAspect = container.width / container.height
+        if imageAspect > containerAspect {
+            let height = container.width / imageAspect
+            return CGRect(
+                x: 0,
+                y: (container.height - height) / 2,
+                width: container.width,
+                height: height
+            )
+        }
+        let width = container.height * imageAspect
+        return CGRect(
+            x: (container.width - width) / 2,
+            y: 0,
+            width: width,
+            height: container.height
+        )
     }
 
     override func layout() {
         super.layout()
-        guard naturalPixelSize.width > 0, naturalPixelSize.height > 0 else {
+        guard displayPixelSize.width > 0, displayPixelSize.height > 0 else {
             imageView.frame = bounds
             return
         }
@@ -7158,28 +10073,301 @@ final class ImageSurfaceView: NSView {
         let viewHeight = bounds.height
         guard viewWidth > 0, viewHeight > 0 else { return }
 
-        let imageAspect = naturalPixelSize.width / naturalPixelSize.height
-        let viewAspect = viewWidth / viewHeight
+        let displayed = displayedImageSize(in: bounds)
+        panOffset = isCropMode ? .zero : clampPanOffset(panOffset)
+        imageView.frame = NSRect(
+            x: (viewWidth - displayed.width) / 2 + panOffset.x,
+            y: (viewHeight - displayed.height) / 2 + panOffset.y,
+            width: displayed.width,
+            height: displayed.height
+        )
+        if isCropMode {
+            layoutCropOverlay()
+        }
+    }
 
-        var fitWidth: CGFloat
-        var fitHeight: CGFloat
-        if imageAspect > viewAspect {
-            fitWidth = viewWidth
-            fitHeight = viewWidth / imageAspect
-        } else {
-            fitHeight = viewHeight
-            fitWidth = viewHeight * imageAspect
+    private var canPanImage: Bool {
+        guard baseImage != nil, !isCropMode, bounds.width > 1, bounds.height > 1 else { return false }
+        let displayed = displayedImageSize(in: bounds)
+        return displayed.width > bounds.width + 0.5 || displayed.height > bounds.height + 0.5
+    }
+
+    private func displayedImageSize(in bounds: NSRect) -> CGSize {
+        let fit = fitSize(in: bounds)
+        let contentScale: CGFloat = 0.92
+        return CGSize(
+            width: fit.width * zoomScale * contentScale,
+            height: fit.height * zoomScale * contentScale
+        )
+    }
+
+    private func clampPanOffset(_ proposed: CGPoint) -> CGPoint {
+        guard bounds.width > 1, bounds.height > 1 else { return .zero }
+        let displayed = displayedImageSize(in: bounds)
+        let maxX = max(0, (displayed.width - bounds.width) / 2)
+        let maxY = max(0, (displayed.height - bounds.height) / 2)
+        return CGPoint(
+            x: min(max(proposed.x, -maxX), maxX),
+            y: min(max(proposed.y, -maxY), maxY)
+        )
+    }
+
+    private func fitSize(in bounds: NSRect) -> CGSize {
+        let viewWidth = bounds.width
+        let viewHeight = bounds.height
+        guard viewWidth > 0, viewHeight > 0,
+              displayPixelSize.width > 0, displayPixelSize.height > 0 else {
+            return .zero
         }
 
-        fitWidth *= zoomScale
-        fitHeight *= zoomScale
+        let imageAspect = displayPixelSize.width / displayPixelSize.height
+        let viewAspect = viewWidth / viewHeight
+        if imageAspect > viewAspect {
+            return CGSize(width: viewWidth, height: viewWidth / imageAspect)
+        }
+        return CGSize(width: viewHeight * imageAspect, height: viewHeight)
+    }
 
-        imageView.frame = NSRect(
-            x: (viewWidth - fitWidth) / 2,
-            y: (viewHeight - fitHeight) / 2,
-            width: fitWidth,
-            height: fitHeight
-        )
+    private func rebuildSourceCIImages(from image: NSImage) {
+        cachedSourceToken = ObjectIdentifier(image)
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            baseCIImage = nil
+            previewCIImage = nil
+            return
+        }
+        let full = CIImage(cgImage: cgImage)
+        baseCIImage = full
+        previewCIImage = Self.scaledCIImage(full, maxEdge: ImageAdjustRenderQuality.preview.maxPixelEdge)
+    }
+
+    private func refreshDisplayedImage(quality: ImageAdjustRenderQuality) {
+        guard let baseImage else {
+            imageView.image = nil
+            return
+        }
+        if cachedSourceToken != ObjectIdentifier(baseImage) {
+            rebuildSourceCIImages(from: baseImage)
+        }
+
+        let crop = effectiveCropForDisplay()
+        let straighten = effectiveStraightenForDisplay()
+        let needsPipeline = !adjustParameters.isIdentity
+            || crop != nil
+            || rotationQuarterTurns != 0
+            || flipHorizontal
+            || flipVertical
+            || !ImageCropGeometry.isIdentityStraighten(straighten)
+
+        if !needsPipeline {
+            imageView.image = baseImage
+            return
+        }
+
+        // Always render orientation via CI — the NSImage CGContext path silently
+        // no-ops for many still formats when no crop/adjusts are active yet.
+        let generation = fullRenderGeneration + 1
+        fullRenderGeneration = generation
+        let parameters = adjustParameters
+        let turns = rotationQuarterTurns
+        let flipH = flipHorizontal
+        let flipV = flipVertical
+        let cropRect = crop
+        let straightenRadians = straighten
+
+        if quality == .preview {
+            if let preview = renderAdjustedImage(
+                parameters: parameters,
+                quarterTurns: turns,
+                flipHorizontal: flipH,
+                flipVertical: flipV,
+                straightenRadians: straightenRadians,
+                cropNormalized: cropRect,
+                quality: .preview
+            ) {
+                imageView.image = preview
+            }
+            return
+        }
+
+        // Keep rotate/flip snappy: run sync when develop is identity (crop chrome / toolbar).
+        if parameters.isIdentity {
+            if let rendered = renderAdjustedImage(
+                parameters: parameters,
+                quarterTurns: turns,
+                flipHorizontal: flipH,
+                flipVertical: flipV,
+                straightenRadians: straightenRadians,
+                cropNormalized: cropRect,
+                quality: .full
+            ) {
+                imageView.image = rendered
+            }
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let rendered = self.renderAdjustedImage(
+                parameters: parameters,
+                quarterTurns: turns,
+                flipHorizontal: flipH,
+                flipVertical: flipV,
+                straightenRadians: straightenRadians,
+                cropNormalized: cropRect,
+                quality: .full
+            )
+            DispatchQueue.main.async {
+                guard self.fullRenderGeneration == generation else { return }
+                if let rendered {
+                    self.imageView.image = rendered
+                }
+            }
+        }
+    }
+
+    /// Crop applied to the on-screen bitmap. Skipped while editing crop so the full frame stays visible.
+    private func effectiveCropForDisplay() -> CGRect? {
+        if isCropMode { return nil }
+        guard let crop = appliedCropNormalized, !ImageCropGeometry.isIdentity(crop) else { return nil }
+        return crop
+    }
+
+    private func effectiveStraightenForDisplay() -> CGFloat {
+        if isCropMode { return draftStraightenRadians }
+        return appliedStraightenRadians
+    }
+
+    private func renderAdjustedImage(
+        parameters: ImageAdjustParameters,
+        quarterTurns: Int,
+        flipHorizontal: Bool,
+        flipVertical: Bool,
+        straightenRadians: CGFloat,
+        cropNormalized: CGRect?,
+        quality: ImageAdjustRenderQuality
+    ) -> NSImage? {
+        guard let baseCIImage else { return nil }
+        let source: CIImage
+        if quality == .preview, let previewCIImage {
+            source = previewCIImage
+        } else {
+            source = baseCIImage
+        }
+        var current = Self.rotatedCIImage(source, quarterTurns: quarterTurns)
+        current = Self.flippedCIImage(current, horizontal: flipHorizontal, vertical: flipVertical)
+        current = Self.straightenedCIImage(current, radians: straightenRadians)
+        // Empty AABB corners after straighten must not render as black — match the studio floor.
+        if cropNormalized == nil,
+           !ImageCropGeometry.isIdentityStraighten(straightenRadians) || isCropMode {
+            current = Self.compositeOverStudioFloor(current, appearance: effectiveAppearance)
+        }
+        if let cropNormalized, !ImageCropGeometry.isIdentity(cropNormalized) {
+            let size = CGSize(width: current.extent.width, height: current.extent.height)
+            let pixel = ImageCropGeometry.pixelRect(normalized: cropNormalized, imageSize: size)
+            let cropInExtent = pixel.offsetBy(dx: current.extent.minX, dy: current.extent.minY)
+            current = current.cropped(to: cropInExtent)
+            if current.extent.origin != .zero {
+                current = current.transformed(
+                    by: CGAffineTransform(translationX: -current.extent.minX, y: -current.extent.minY)
+                )
+            }
+        }
+        guard let output = parameters.applying(to: current) else {
+            return nsImage(from: current)
+        }
+        return nsImage(from: output)
+    }
+
+    private func nsImage(from ciImage: CIImage) -> NSImage? {
+        let extent = ciImage.extent.integral
+        guard extent.width > 1, extent.height > 1 else { return nil }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let cgImage = ciContext.createCGImage(
+            ciImage,
+            from: extent,
+            format: .RGBA8,
+            colorSpace: colorSpace,
+            deferred: false
+        ) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    /// Fill transparent straighten corners with the image-studio floor (never hard black).
+    private static func compositeOverStudioFloor(
+        _ image: CIImage,
+        appearance: NSAppearance
+    ) -> CIImage {
+        let floor = LaughTheme.imageStudioFloorColor(appearance: appearance)
+        guard let rgb = floor.usingColorSpace(.deviceRGB) else { return image }
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        rgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let backdrop = CIImage(color: CIColor(red: r, green: g, blue: b, alpha: 1))
+            .cropped(to: image.extent)
+        return image.composited(over: backdrop)
+    }
+
+    private static func scaledCIImage(_ image: CIImage, maxEdge: CGFloat) -> CIImage {
+        let extent = image.extent
+        let longest = max(extent.width, extent.height)
+        guard longest > maxEdge else { return image }
+        let scale = maxEdge / longest
+        return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    }
+
+    private static func rotatedCIImage(_ image: CIImage, quarterTurns: Int) -> CIImage {
+        let turns = ((quarterTurns % 4) + 4) % 4
+        guard turns != 0 else { return image }
+        let radians = CGFloat(turns) * (.pi / 2)
+        let extent = image.extent
+        var transform = CGAffineTransform.identity
+        transform = transform.translatedBy(x: extent.midX, y: extent.midY)
+        transform = transform.rotated(by: radians)
+        transform = transform.translatedBy(x: -extent.midX, y: -extent.midY)
+        let rotated = image.transformed(by: transform)
+        return normalizeExtent(rotated.cropped(to: rotated.extent.integral))
+    }
+
+    private static func flippedCIImage(
+        _ image: CIImage,
+        horizontal: Bool,
+        vertical: Bool
+    ) -> CIImage {
+        guard horizontal || vertical else { return image }
+        let extent = image.extent
+        var transform = CGAffineTransform.identity
+        transform = transform.translatedBy(x: extent.midX, y: extent.midY)
+        transform = transform.scaledBy(x: horizontal ? -1 : 1, y: vertical ? -1 : 1)
+        transform = transform.translatedBy(x: -extent.midX, y: -extent.midY)
+        let flipped = image.transformed(by: transform)
+        return normalizeExtent(flipped.cropped(to: flipped.extent.integral))
+    }
+
+    private static func straightenedCIImage(_ image: CIImage, radians: CGFloat) -> CIImage {
+        let angle = ImageCropGeometry.clampStraightenRadians(radians)
+        guard !ImageCropGeometry.isIdentityStraighten(angle) else { return image }
+        let extent = image.extent
+        var transform = CGAffineTransform.identity
+        transform = transform.translatedBy(x: extent.midX, y: extent.midY)
+        transform = transform.rotated(by: angle)
+        transform = transform.translatedBy(x: -extent.midX, y: -extent.midY)
+        let rotated = image.transformed(by: transform)
+        // Keep transparent corners (don’t bake black). Crop chrome dims the pad instead.
+        return normalizeExtent(rotated.cropped(to: rotated.extent.integral))
+    }
+
+    private static func normalizeExtent(_ image: CIImage) -> CIImage {
+        var out = image
+        if out.extent.origin != .zero {
+            out = out.transformed(
+                by: CGAffineTransform(translationX: -out.extent.minX, y: -out.extent.minY)
+            )
+        }
+        return out
     }
 }
 
@@ -7208,6 +10396,7 @@ private enum PlaybackMiniPreviewMetrics {
 final class PlaybackMiniPreviewView: NSView {
     var onExpand: (() -> Void)?
     var onClose: (() -> Void)?
+    var onTogglePlayPause: (() -> Void)?
 
     private let videoSurface = MiniPlayerSurfaceView()
     private let imageSurface = NSImageView()
@@ -7215,6 +10404,10 @@ final class PlaybackMiniPreviewView: NSView {
     private let expandButton = NSButton()
     private let closeBackdrop = NSView()
     private let closeButton = NSButton()
+    private let playPauseBackdrop = NSView()
+    private let playPauseButton = NSButton()
+    private var isPlaying = false
+    private var showsPlayPause = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -7232,6 +10425,7 @@ final class PlaybackMiniPreviewView: NSView {
 
         styleChromeBackdrop(expandBackdrop)
         styleChromeBackdrop(closeBackdrop)
+        styleChromeBackdrop(playPauseBackdrop)
 
         expandButton.translatesAutoresizingMaskIntoConstraints = false
         expandButton.bezelStyle = .accessoryBarAction
@@ -7259,12 +10453,22 @@ final class PlaybackMiniPreviewView: NSView {
             closeButton.contentTintColor = NSColor.white.withAlphaComponent(0.92)
         }
 
+        playPauseButton.translatesAutoresizingMaskIntoConstraints = false
+        playPauseButton.bezelStyle = .accessoryBarAction
+        playPauseButton.isBordered = false
+        playPauseButton.setButtonType(.momentaryPushIn)
+        playPauseButton.target = self
+        playPauseButton.action = #selector(playPauseClicked)
+        playPauseButton.title = ""
+
         addSubview(videoSurface)
         addSubview(imageSurface)
         addSubview(expandBackdrop)
         addSubview(expandButton)
         addSubview(closeBackdrop)
         addSubview(closeButton)
+        addSubview(playPauseBackdrop)
+        addSubview(playPauseButton)
 
         videoSurface.onDoubleClick = { [weak self] in
             self?.expandClicked()
@@ -7294,6 +10498,16 @@ final class PlaybackMiniPreviewView: NSView {
             expandButton.widthAnchor.constraint(equalToConstant: 26),
             expandButton.heightAnchor.constraint(equalToConstant: 26),
 
+            playPauseBackdrop.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            playPauseBackdrop.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            playPauseBackdrop.widthAnchor.constraint(equalToConstant: 26),
+            playPauseBackdrop.heightAnchor.constraint(equalToConstant: 26),
+
+            playPauseButton.centerXAnchor.constraint(equalTo: playPauseBackdrop.centerXAnchor),
+            playPauseButton.centerYAnchor.constraint(equalTo: playPauseBackdrop.centerYAnchor),
+            playPauseButton.widthAnchor.constraint(equalToConstant: 26),
+            playPauseButton.heightAnchor.constraint(equalToConstant: 26),
+
             closeBackdrop.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             closeBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             closeBackdrop.widthAnchor.constraint(equalToConstant: 26),
@@ -7307,6 +10521,8 @@ final class PlaybackMiniPreviewView: NSView {
 
         videoSurface.toolTip = "Double-click to return to full playback"
         imageSurface.toolTip = "Double-click to return to full playback"
+        setPlaying(false)
+        setPlayPauseVisible(false)
     }
 
     private func styleChromeBackdrop(_ backdrop: NSView) {
@@ -7326,6 +10542,9 @@ final class PlaybackMiniPreviewView: NSView {
         if hit === expandButton || hit === expandBackdrop {
             return expandButton
         }
+        if showsPlayPause, hit === playPauseButton || hit === playPauseBackdrop {
+            return playPauseButton
+        }
         return hit
     }
 
@@ -7337,10 +10556,19 @@ final class PlaybackMiniPreviewView: NSView {
         videoSurface.isHidden = false
         imageSurface.isHidden = true
         videoSurface.player = player
+        setPlayPauseVisible(true)
     }
 
     func detachVideoPlayer() {
+        clearContent()
+    }
+
+    func clearContent() {
         videoSurface.player = nil
+        imageSurface.image = nil
+        imageSurface.isHidden = true
+        videoSurface.isHidden = false
+        setPlayPauseVisible(false)
     }
 
     func showImage(_ image: NSImage?) {
@@ -7348,6 +10576,26 @@ final class PlaybackMiniPreviewView: NSView {
         videoSurface.player = nil
         imageSurface.isHidden = false
         imageSurface.image = image
+        setPlayPauseVisible(false)
+    }
+
+    func setPlaying(_ playing: Bool) {
+        isPlaying = playing
+        let symbol = playing ? "pause.fill" : "play.fill"
+        let label = playing ? "Pause" : "Play"
+        playPauseButton.toolTip = label
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            playPauseButton.image = image.withSymbolConfiguration(config)
+            playPauseButton.contentTintColor = .white
+        }
+        playPauseButton.title = ""
+    }
+
+    private func setPlayPauseVisible(_ visible: Bool) {
+        showsPlayPause = visible
+        playPauseBackdrop.isHidden = !visible
+        playPauseButton.isHidden = !visible
     }
 
     func applyLayoutScale(forWidth width: CGFloat) {
@@ -7363,6 +10611,41 @@ final class PlaybackMiniPreviewView: NSView {
         _ = sender
         onClose?()
     }
+
+    @objc private func playPauseClicked() {
+        onTogglePlayPause?()
+    }
+}
+
+/// Flat title-bar plate — matches the left library sidebar (`windowBackgroundColor`).
+/// Visual only: clicks pass through so the window can drag / zoom and fullscreen double-click works.
+private final class TitleBarChromeStripView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isOpaque: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    func refreshPlate() {
+        needsDisplay = true
+    }
+
+    override func updateLayer() {
+        layer?.backgroundColor = LaughTheme.librarySidebarBackground(appearance: effectiveAppearance).cgColor
+    }
 }
 
 private final class HoverTextButton: NSButton {
@@ -7377,6 +10660,13 @@ private final class HoverTextButton: NSButton {
         didSet { updateTabAppearance() }
     }
     var textColor: NSColor = .secondaryLabelColor {
+        didSet { updateTabAppearance() }
+    }
+    var iconTintColor: NSColor = .secondaryLabelColor {
+        didSet { updateTabAppearance() }
+    }
+    /// When true, icon is a rainbow gradient (selected image Edits/Presets tabs).
+    var usesRainbowIcon: Bool = false {
         didSet { updateTabAppearance() }
     }
     private(set) var isHovered = false {
@@ -7424,8 +10714,8 @@ private final class HoverTextButton: NSButton {
 
     private func updateTabAppearance() {
         let baseFont = NSFont.systemFont(ofSize: 12 * uiScale, weight: .medium)
-        // Thin space between SF Symbol and label when imageHugsTitle groups them.
-        let titleWithGap = "\u{2009}" + tabLabel
+        // Keep icon + label as one side-by-side group; a little air beyond a thin space.
+        let titleWithGap = "\u{2009}\u{2009}" + tabLabel
         title = titleWithGap
         attributedTitle = NSAttributedString(
             string: titleWithGap,
@@ -7435,14 +10725,24 @@ private final class HoverTextButton: NSButton {
             ]
         )
         setAccessibilityLabel(tabLabel)
-        contentTintColor = textColor
         imageHugsTitle = true
         imagePosition = .imageLeading
-        if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: tabLabel) {
-            let config = NSImage.SymbolConfiguration(pointSize: 11 * uiScale, weight: .medium)
+        let pointSize = 11 * uiScale
+        if usesRainbowIcon,
+           let rainbow = LaughTheme.rainbowGradientSymbolImage(
+            systemName: symbolName,
+            pointSize: pointSize,
+            weight: .medium
+           ) {
+            contentTintColor = nil
+            image = rainbow
+        } else if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: tabLabel) {
+            contentTintColor = iconTintColor
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             image = symbol.withSymbolConfiguration(config)
             image?.isTemplate = true
         } else {
+            contentTintColor = iconTintColor
             image = nil
         }
     }
@@ -7468,9 +10768,9 @@ private final class SettingsTabHeaderItemView: NSView {
 
         activeUnderline.translatesAutoresizingMaskIntoConstraints = false
         activeUnderline.wantsLayer = true
-        activeUnderline.layer?.backgroundColor = LaughTheme.accent.cgColor
         activeUnderline.isHidden = true
         addSubview(activeUnderline)
+        applyActiveUnderlineColor()
 
         NSLayoutConstraint.activate([
             button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
@@ -7495,6 +10795,15 @@ private final class SettingsTabHeaderItemView: NSView {
                 separator.heightAnchor.constraint(equalToConstant: 14)
             ])
         }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyActiveUnderlineColor()
+    }
+
+    private func applyActiveUnderlineColor() {
+        activeUnderline.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.55).cgColor
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -7560,6 +10869,8 @@ final class DragHostView: NSView {
     var onMouseExitedView: (() -> Void)?
     private var trackingAreaRef: NSTrackingArea?
     private var activeDragSessions = 0
+    private let studioGradientLayer = CAGradientLayer()
+    private var imageStudioGradientActive = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -7569,11 +10880,61 @@ final class DragHostView: NSView {
     }
 
     func setPlaybackBackdropActive(_ active: Bool) {
-        layer?.backgroundColor = active ? NSColor.black.cgColor : NSColor.windowBackgroundColor.cgColor
+        if active {
+            setImageStudioGradientActive(false)
+            layer?.backgroundColor = NSColor.black.cgColor
+        } else if !imageStudioGradientActive {
+            applyChromeBackdrop()
+        }
+    }
+
+    /// Soft diagonal wash for image studio (must stay very subtle).
+    func setImageStudioGradientActive(_ active: Bool) {
+        imageStudioGradientActive = active
+        studioGradientLayer.isHidden = true
+        if active {
+            layer?.backgroundColor = LaughTheme.imageStudioFloorColor(appearance: effectiveAppearance).cgColor
+        } else if layer?.backgroundColor == NSColor.black.cgColor {
+            // Keep playback letterbox black when leaving image mode.
+        } else {
+            applyChromeBackdrop()
+        }
+        needsLayout = true
+    }
+
+    private func installStudioGradientIfNeeded() {
+        guard studioGradientLayer.superlayer == nil else { return }
+        studioGradientLayer.name = "imageStudioBackdrop"
+        // True corner-to-corner diagonal (top-leading → bottom-trailing).
+        studioGradientLayer.startPoint = CGPoint(x: 0, y: 1)
+        studioGradientLayer.endPoint = CGPoint(x: 1, y: 0)
+        layer?.insertSublayer(studioGradientLayer, at: 0)
+    }
+
+    private func refreshStudioGradientColors() {
+        let colors = LaughTheme.imageStudioBackdropColors(appearance: effectiveAppearance)
+        studioGradientLayer.colors = [colors.leading.cgColor, colors.mid.cgColor, colors.trailing.cgColor]
+        studioGradientLayer.locations = [0, 0.55, 1]
     }
 
     private func applyChromeBackdrop() {
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
+
+    override func layout() {
+        super.layout()
+        if imageStudioGradientActive {
+            studioGradientLayer.frame = bounds
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if imageStudioGradientActive {
+            refreshStudioGradientColors()
+        } else if layer?.backgroundColor != NSColor.black.cgColor {
+            applyChromeBackdrop()
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -7648,12 +11009,40 @@ final class DragHostView: NSView {
 
 final class PlayerSurfaceView: NSView {
     var onMpvLayoutChanged: (() -> Void)?
+    /// Backup scroll handler when the local monitor does not consume the event.
+    var onScrollWheel: ((NSEvent) -> Bool)?
     private var mpvEmbeddingActive = false
+    private var lastReportedMpvBounds: CGRect = .null
+    private let avPlayerLayer = AVPlayerLayer()
+    private let mpvHostView = MpvRenderHostView()
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if onScrollWheel?(event) == true { return }
+        super.scrollWheel(with: event)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        applyLetterboxBackground()
+        avPlayerLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        avPlayerLayer.videoGravity = .resizeAspect
+        avPlayerLayer.backgroundColor = NSColor.black.cgColor
+        mpvHostView.isHidden = true
+        mpvHostView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(mpvHostView)
+        NSLayoutConstraint.activate([
+            mpvHostView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            mpvHostView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            mpvHostView.topAnchor.constraint(equalTo: topAnchor),
+            mpvHostView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
     }
 
     required init?(coder: NSCoder) {
@@ -7661,55 +11050,93 @@ final class PlayerSurfaceView: NSView {
     }
 
     override func makeBackingLayer() -> CALayer {
-        AVPlayerLayer()
+        let container = CALayer()
+        container.backgroundColor = NSColor.black.cgColor
+        avPlayerLayer.frame = bounds
+        container.addSublayer(avPlayerLayer)
+        return container
     }
 
     override func layout() {
         super.layout()
-        if mpvEmbeddingActive {
-            onMpvLayoutChanged?()
-        }
+        avPlayerLayer.frame = bounds
+        notifyMpvLayoutIfNeeded()
     }
 
-    /// Cocoa `--wid` expects an `NSView` pointer encoded as intptr_t.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        lastReportedMpvBounds = .null
+        notifyMpvLayoutIfNeeded()
+    }
+
+    /// In-process libmpv draws into this layer. `--wid` is not used on modern macOS mpv.
+    var mpvRenderLayer: MpvOpenGLLayer? {
+        guard mpvEmbeddingActive else { return nil }
+        return mpvHostView.renderLayer
+    }
+
     var mpvEmbeddingWindowID: Int {
         guard mpvEmbeddingActive else { return 0 }
-        return Int(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+        return mpvRenderLayer == nil ? 0 : 1
     }
 
     func setMpvEmbeddingActive(_ active: Bool) {
         mpvEmbeddingActive = active
+        lastReportedMpvBounds = .null
         if active {
-            playerLayer.player = nil
-            layer?.opacity = 0.001
+            avPlayerLayer.player = nil
+            avPlayerLayer.isHidden = true
+            mpvHostView.isHidden = false
+            mpvHostView.renderLayer.setNeedsDisplay()
         } else {
-            layer?.opacity = 1
+            mpvHostView.isHidden = true
+            avPlayerLayer.isHidden = false
         }
         applyLetterboxBackground()
+        notifyMpvLayoutIfNeeded()
+    }
+
+    /// Force mpv to re-bind after fullscreen / display changes (avoids drifted video + subs).
+    func forceMpvLayoutResync() {
+        lastReportedMpvBounds = .null
+        notifyMpvLayoutIfNeeded()
+        if mpvEmbeddingActive {
+            mpvHostView.renderLayer.setNeedsDisplay()
+        }
+    }
+
+    private func notifyMpvLayoutIfNeeded() {
+        guard mpvEmbeddingActive else { return }
+        let bounds = self.bounds
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        if !lastReportedMpvBounds.isNull,
+           abs(lastReportedMpvBounds.minX - bounds.minX) < 0.5,
+           abs(lastReportedMpvBounds.minY - bounds.minY) < 0.5,
+           abs(lastReportedMpvBounds.width - bounds.width) < 0.5,
+           abs(lastReportedMpvBounds.height - bounds.height) < 0.5 {
+            return
+        }
+        lastReportedMpvBounds = bounds
+        onMpvLayoutChanged?()
+        mpvHostView.renderLayer.setNeedsDisplay()
     }
 
     var player: AVPlayer? {
-        get { mpvEmbeddingActive ? nil : playerLayer.player }
+        get { mpvEmbeddingActive ? nil : avPlayerLayer.player }
         set {
             guard !mpvEmbeddingActive else { return }
-            playerLayer.player = newValue
+            avPlayerLayer.player = newValue
         }
     }
 
     var videoGravity: AVLayerVideoGravity {
-        get { playerLayer.videoGravity }
-        set { playerLayer.videoGravity = newValue }
-    }
-
-    private var playerLayer: AVPlayerLayer {
-        guard let layer = self.layer as? AVPlayerLayer else {
-            fatalError("Expected AVPlayerLayer backing layer.")
-        }
-        return layer
+        get { avPlayerLayer.videoGravity }
+        set { avPlayerLayer.videoGravity = newValue }
     }
 
     private func applyLetterboxBackground() {
-        playerLayer.backgroundColor = NSColor.black.cgColor
+        avPlayerLayer.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = NSColor.black.cgColor
     }
 }
 

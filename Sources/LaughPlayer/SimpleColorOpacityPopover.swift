@@ -210,7 +210,7 @@ private final class ColorSwatchView: NSView {
         let inset: CGFloat = 1.5
         let ring = bounds.insetBy(dx: inset, dy: inset)
         let path = NSBezierPath(roundedRect: ring, xRadius: 3, yRadius: 3)
-        NSColor.controlAccentColor.setStroke()
+        LaughTheme.interactiveAccent.setStroke()
         path.lineWidth = 2
         path.stroke()
     }

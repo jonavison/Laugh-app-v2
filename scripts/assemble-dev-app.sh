@@ -44,9 +44,8 @@ if [[ -d "${SPM_BUNDLE}" ]]; then
   cp -R "${SPM_BUNDLE}" "${RESOURCES}/LaughPlayer_LaughPlayer.bundle"
 fi
 
-if [[ -d "Sources/LaughPlayer/Resources/AccentColor.colorset" ]]; then
-  cp -R "Sources/LaughPlayer/Resources/AccentColor.colorset" "${RESOURCES}/AccentColor.colorset"
-fi
+# Named accent for NSAccentColorName (must be Assets.car — not a raw .colorset folder).
+./scripts/compile-accent-assets.sh "${RESOURCES}"
 
 cat > "${CONTENTS}/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>

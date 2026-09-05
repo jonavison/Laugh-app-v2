@@ -17,14 +17,24 @@ enum ImageDisplayLoader {
            let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
            width > 0, height > 0 {
             let pixelSize = CGSize(width: width, height: height)
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: cap,
-                kCGImageSourceCreateThumbnailWithTransform: true
+            // Prefer embedded preview when present (NEF/CR2/…); otherwise decode a capped thumb.
+            let attempts: [[CFString: Any]] = [
+                [
+                    kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                    kCGImageSourceThumbnailMaxPixelSize: cap,
+                    kCGImageSourceCreateThumbnailWithTransform: true
+                ],
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: cap,
+                    kCGImageSourceCreateThumbnailWithTransform: true
+                ]
             ]
-            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
-                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                return (image, pixelSize)
+            for options in attempts {
+                if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    return (image, pixelSize)
+                }
             }
         }
 

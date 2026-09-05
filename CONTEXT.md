@@ -37,7 +37,47 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## ImageMedia
 
-`ImageMedia` is an active still-image item. Image-oriented controls are shown instead of video playback controls.
+`ImageMedia` is an active still-image item. Image-oriented controls are shown instead of video playback controls. The image stays in the main container (not a separate fullscreen photo mode); the left **MediaLibraryPanel** remains toggleable.
+
+## ImageFolderCarousel
+
+`ImageFolderCarousel` is the bottom filmstrip shown during **ImageMedia** when the open file’s folder contains at least two images. It lists sibling images in that folder (sorted like **LibraryBrowseSort**). Clicking a thumbnail opens that image in the center surface.
+
+## ImageStudioMetaBar
+
+`ImageStudioMetaBar` sits above the filmstrip during **ImageMedia**: favorite + 5-star rating (persisted in `ImageLibraryMetaStore`), centered file name, and trailing Fit % / hide-show carousel / Before-After adjust compare.
+
+## ImageAdjustSettings
+
+`ImageAdjustSettings` is the **Edits** tab in the right **edit sidebar** for **ImageMedia**: display-only develop controls (Core Image graph on `ImageAdjustParameters`) that do not rewrite the file on disk. Tools are listed under outline groups (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**). Each **ImageDevelopTool** is a row that expands into controls when available; unfinished tools stay visible but grayed (“Coming soon”). Interactive drags render a capped **preview** proxy; after settle the surface re-renders at full resolution. The sibling **Presets** tab (Looks / Mood / Film / Saved) applies named looks over the same parameter model. When the current adjusts (or display crop/rotation) are not identity, an **ImageStudioCommitFooter** at the bottom of the sidebar offers **Reset All**, **ImageExport**, and **ImageUserPreset** save. Zoom/rotate/crop stay on the floating image bar; Before/After on **ImageStudioMetaBar** compares identity vs current adjusts via **ImageAdjustSession** presentation.
+
+Opening **ImageMedia** hides the left **MediaLibraryPanel** / folders and docks a full-height right edit column beside a content column of photo + meta bar + **ImageFolderCarousel** (carousel does not extend under the sidebar). Opening Library during **ImageMedia** mirrors video: full folder management fills the window and the current photo moves to the bottom-right mini preview until the panel is closed or expanded.
+
+Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`. Policy: ADR `0004-image-studio-develop-display-only.md`.
+
+## ImageAdjustSession
+
+`ImageAdjustSession` is the source of truth for the current **ImageMedia** develop state: raw `ImageAdjustParameters`, which **ImageAdjustSection**s are bypassed, preview→full settle timing, and Before/After presentation (Before exposes identity without clearing edits). Sliders, Presets, and the surface read/write this session; they do not own the parameter values.
+
+## ImageDevelopTool
+
+`ImageDevelopTool` is one display-only adjust capability in **ImageAdjustSettings** (for example Develop, Vignette, or Color). Each tool is a row under an outline group (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**), expands into controls when implemented, and extends the shared parameter/CI graph. Unfinished tools remain listed but not expandable (“Coming soon”).
+
+## ImageStudioCommitFooter
+
+`ImageStudioCommitFooter` is the bottom bar of the right **edit sidebar** during **ImageMedia**. It appears while **ImageAdjustParameters** differ from identity or display geometry (crop / straighten / rotation) is active, and holds **Reset All** above **ImageUserPreset** save and **ImageExport**. **Reset All** clears develop adjusts and display geometry (crop, straighten, rotation).
+
+## ImageCrop
+
+`ImageCrop` is a display-only geometry edit on **ImageMedia**, entered from the floating image bar (next to Fit / Rotate). Crop mode offers Free / Original / 1:1 / 4:5 / 16:9 aspects, a draggable rectangle on the photo, free straighten by dragging the dimmed area beside the crop (±45°), and Cancel / Apply. **Apply** commits crop + straighten; **Cancel** exits and restores the uncropped original (clears any previously applied crop/straighten). Applied geometry is included in **ImageExport**. It does not rewrite the source file. AI crop is not part of this tool yet.
+
+## ImageExport
+
+`ImageExport` writes a new still of the current **ImageMedia** with the active **ImageAdjustParameters**, display rotation, and **ImageCrop** applied. It never replaces the source file.
+
+## ImageUserPreset
+
+`ImageUserPreset` is a named snapshot of **ImageAdjustParameters** saved from **ImageStudioCommitFooter**. Saved looks appear on the Presets tab and can be reapplied to any image.
 
 ## ContextualSettingsTabs
 
@@ -49,7 +89,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## MediaLibrary
 
-`MediaLibrary` is a docked left-side explorer for browsing disk folders and opening videos or images without the system open panel. It has a narrow sidebar for roots and a wider content area for browsing.
+`MediaLibrary` is the explorer for browsing disk folders and opening videos or images without the system open panel. It has a narrow sidebar for destinations and a wider content area for browsing.
 
 ## LibraryRoot
 
@@ -61,7 +101,31 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## LibraryBrowseGrid
 
-`LibraryBrowseGrid` is the MediaLibrary content area to the right of the sidebar. It shows one directory level at a time: subfolders and media files that are direct children of the current browse location. Single-click opens a subfolder or selects a media tile; media tiles show a centered play affordance over the file preview. Back and forward controls sit at the top-left; the current path is shown as a breadcrumb at the bottom. Item order follows `LibraryBrowseSort`, Finder-style (folders grouped before files when applicable).
+`LibraryBrowseGrid` is the MediaLibrary content area to the right of the sidebar. It shows one directory level at a time: subfolders and media files that are direct children of the current browse location. Presentation follows **LibraryBrowseViewMode** (Gallery by default — larger thumbs and more spacing). Single-click opens a subfolder or selects a media tile; media tiles show a centered play affordance over the file preview. Back and forward controls sit at the top-left; the current path is shown as a breadcrumb at the bottom. Item order follows `LibraryBrowseSort`, Finder-style (folders grouped before files when applicable).
+
+## LibraryBrowseViewMode
+
+`LibraryBrowseViewMode` is how the current browse listing is presented: **Gallery** (large photo tiles), **Grid** (medium tiles), or **List** (name / kind / date rows). The mode is a persisted user preference. **RecentlyViewed** stays list-only.
+
+## LibraryBrowseGalleryScale
+
+`LibraryBrowseGalleryScale` is the discrete tile size for **Gallery** only: small, medium, or large. It is adjusted with a stepped slider and does not apply to Grid or List.
+
+## LibraryBrowseSearch
+
+`LibraryBrowseSearch` is a name filter over the direct children of the current browse location (case-insensitive). Results replace the browse listing until the query is cleared. It does not search nested folders or other roots.
+
+## LibraryKindFilter
+
+`LibraryKindFilter` is a facet on the current browse listing: All, Videos, Images, or Folders. It composes with **LibraryBrowseSearch** (both must match).
+
+## LibraryFavorites
+
+`LibraryFavorites` is a sidebar destination listing still images the user marked favorite (from **ImageStudioMetaBar** / path-keyed favorites). It is not a disk folder and does not include videos in v1.
+
+## LibraryMultiSelect
+
+`LibraryMultiSelect` is selecting multiple browse entries (modifier-click) for batch Trash, Add to Queue, or Play. Plain single-click still opens a folder or media item.
 
 ## LibraryBrowseSort
 
@@ -73,7 +137,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## LibraryMediaTile
 
-`LibraryMediaTile` is a grid cell for a video or image file in the `LibraryBrowseGrid`. It shows a real thumbnail preview (video poster frame or image preview) with a centered play button. Single-click triggers `LibraryMediaSelection` and opens the item in the center player.
+`LibraryMediaTile` is a cell for a video or image file in the `LibraryBrowseGrid`. In **Gallery**, tiles are caption-free with tight spacing; hover shows a thin border (no title tooltip). In **Grid**, tiles show a thumbnail with a title underneath. Folder tiles always keep their name visible. Single-click triggers `LibraryMediaSelection` and opens the item in the center player.
 
 ## LibraryMediaSelection
 
@@ -81,7 +145,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## MediaLibraryPanel
 
-`MediaLibraryPanel` is the docked left region that hosts the MediaLibrary UI (sidebar + browse grid), toggled via the Library control. It is not a slide-over sheet. Fixed width ~360pt (sidebar ~88pt + grid ~272pt). The sidebar lists `RecentlyViewed` and `LibraryRoot` folders only.
+`MediaLibraryPanel` hosts the MediaLibrary UI (sidebar + browse). On **EmptySurface** it fills the main content. During **VideoMedia** or **ImageMedia**, opening Library shows full-window folder management with the current item in a bottom-right mini preview until the panel is closed. The sidebar lists **RecentlyViewed**, **LibraryFavorites**, and `LibraryRoot` folders.
 
 ## RecentlyViewed
 
@@ -105,7 +169,7 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## AlternateDecoder
 
-`AlternateDecoder` is a secondary path for profiles **SystemDecodeStack** cannot open directly. On direct builds the default is **DirectMpv** (bundled subprocess mpv) for non-native containers and codecs when mpv is runnable; **CompatibilityRemux** via bundled FFmpeg remains the fallback when mpv is missing or fails.
+`AlternateDecoder` is a secondary path for profiles **SystemDecodeStack** cannot open directly. On direct builds the default is **CompatibilityRemux** via bundled FFmpeg into a temp MP4, then **NativePlaybackEngine** (AVPlayer / Metal). **DirectMpv** is not the picture engine: Homebrew mpv 0.41 cannot embed (`--wid` gone; cocoa-cb always opens its own window), and libmpv’s public render API is still OpenGL, which is deprecated and currently blacks out on this macOS. DirectMpv remains only when remux is unavailable or the user chooses **ExtendedPlaybackForSubtitles**.
 
 ## TryThenFailPolicy
 

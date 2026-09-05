@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- While a **video is playing**, LaughPlayer now prevents idle display/system sleep (same idea as QuickTime / Safari). Pause, images, and the empty library still allow sleep.
+- Playback diagnostics you can tail while a file plays: format probe (codec/audio/duration), route, remux/preview, and per-second buffer health (`starving` / `buffering` / `ready` / `full`) via `scripts/watch-playback-logs.sh`.
+- Unit tests for format reading (`FFmpegProbeParser`), buffer health, container routing, and media-kind detection. Run with `./scripts/test.sh`.
+- Image studio **Black & White** Contrast + Warmth; **Vignette** Midpoint.
+- Image studio **ImageExport** / **ImageUserPreset**: footer on the edit sidebar when adjusts are dirty; export writes a new JPEG/PNG (original unchanged); saved looks appear on the Presets tab.
+- Image studio Wave 1 develop tools: Whites/Blacks, Hue, Color balance, Split toning, Structure, Denoise, Vignette, Black & White; Mood presets High Key / Super Contrast; Film presets Portra / Fuji / Noir.
+- Image studio preview pipeline: capped CI proxy while dragging sliders, full-res settle on background queue (Metal `CIContext` when available).
+- Image studio layout: same-folder bottom **ImageFolderCarousel**, toggleable left library while viewing, and right-sidebar **ImageAdjustSettings** (brightness / contrast / saturation, display-only).
+- Image toolbar parity with video chrome: Library, queue previous/next, Queue, and Settings.
+- Image zoom Actual Size control, plus display-only rotate left/right on the image bar.
+- Image **Crop** on the floating bar: Free / Original / 1:1 / 4:5 / 16:9, Cancel / Apply; display-only geometry included in **ImageExport**.
+- Image double-click toggles Fit ↔ Actual Size (does not enter fullscreen).
+
+### Changed
+- Direct builds open `.mkv` / `.webm` / similar containers with **CompatibilityRemux** then **AVPlayer** (Metal) so picture stays in LaughPlayer. DirectMpv is not the display engine: mpv 0.41 cannot embed, and libmpv’s OpenGL render API blacks out on current macOS. DirectMpv remains opt-in (**ExtendedPlaybackForSubtitles**) or when remux is missing.
+- Progressive remux preview transcodes **AC-3** to stereo AAC (same as E-AC-3) so instant preview is not a 1 KB stub. Long AC-3/E-AC-3 rips skip that preview and wait for stream-copy remux instead of encoding the whole soundtrack.
+- Image studio develop state lives in **ImageAdjustSession** (params + section bypass + preview settle + Before/After presentation); sliders are a thin adapter; built-in Looks/Mood/Film recipes moved to `ImageAdjustPreset`.
+- **Reset All** sits in **ImageStudioCommitFooter** above Save Preset / Export (footer also when crop/straighten/rotation is active; Reset All clears develop adjusts and display geometry).
+- Crop toolbar: three rows — Aspect (picker + quick 1:1/4:5/16:9), Transform (rotate/flip), Cancel / Apply.
+- Crop **Cancel** restores the uncropped original (clears applied crop/straighten); **Apply** commits the draft.
+- Image studio **Edits** tab uses Luminar-style outline groups (Essentials / Landscape / Creative / Portrait / Professional): expandable tools (Develop, Color, Black & White, Details, Denoise, Vignette) with one-at-a-time accordion; unfinished tools stay grayed as Coming soon.
+- Image floating bar uses a leading / centered tools / trailing accessory layout matching the video transport row.
+- Image mode keeps the photo in the main container when the library opens (docked sidebar/browse) instead of replacing it with mini-preview overlay.
+- Image studio: left library/folders hidden on open, right settings always shown, photo padded (Luminar-like), bottom carousel full-width with edge fades and no scrollbar.
+- Opening Library during image studio uses the same pattern as video: full folder-management view, with the open photo in the bottom-right mini preview.
+- Image studio meta bar above the carousel: favorite, 5-star rating, file name, Fit %, hide/show filmstrip, and Before/After adjust compare.
+- Image tools bar sits under the photo (above meta/filmstrip); sibling switches no longer rebuild the carousel; filmstrip edge fades always draw (AppKit gradient, light/dark).
+- Image studio uses a split layout: photo + carousel in the left content column, docked full-height edit sidebar on the right (not a floating settings sheet over the filmstrip).
+- Image edit sidebar is layout-pinned (pushes photo/meta/carousel) with shared opaque chrome matching the filmstrip floor.
+
 ## [1.2.0] - 2026-06-03
 
 ### Added

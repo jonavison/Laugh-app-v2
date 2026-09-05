@@ -15,7 +15,9 @@ enum DroppedMediaKind {
 
 enum MediaKindDetector {
     private static let imageExtensions: Set<String> = [
-        "jpg", "jpeg", "png", "gif", "heic", "heif", "bmp", "tiff", "tif", "webp"
+        "jpg", "jpeg", "png", "gif", "heic", "heif", "bmp", "tiff", "tif", "webp",
+        // Camera RAW (ImageIO uses embedded JPEG previews for library thumbs)
+        "nef", "nrw", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "pef", "raw", "srw"
     ]
 
     private static let videoExtensions: Set<String> = [

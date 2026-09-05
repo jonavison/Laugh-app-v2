@@ -18,8 +18,8 @@ Keep it updated whenever codec detection or playback behavior changes.
 - `.mp4`
 - `.mov`
 - `.m4v`
-- `.mkv` (try-then-fail; depends on inner codec)
-- `.webm` (try-then-fail)
+- `.mkv` (direct build: **CompatibilityRemux** then AVPlayer. App Store: try-then-fail native.)
+- `.webm` (direct build: remux then AVPlayer. App Store: try-then-fail.)
 - `.avi` (try-then-fail)
 
 ## Partially Supported / Known Issues
@@ -72,10 +72,10 @@ No bulk matrix updates—**IncrementalCodecRollout** only.
 
 | Priority | PlaybackProfile (example) | Target engine | Verification |
 |----------|---------------------------|---------------|----------------|
-| **1 (in progress)** | MKV + HEVC 10-bit (x265) | **DirectMpv** (bundled mpv); fallback **CompatibilityRemux** | [Checklist](docs/verification/0001-mkv-hevc-10bit.md) — **PlaybackVerificationRecord** pending |
-| 2 | MP4 + `hev1` (black video) | **DirectMpv** or **CompatibilityRemux** | After #1 passes |
-| 3 | WebM + VP9 | **DirectMpv**; fallback remux | After #2 |
-| 4 | MKV/WebM + AV1 | **DirectMpv**; fallback remux | After #3 |
+| **1 (in progress)** | MKV + HEVC 10-bit (x265) | **CompatibilityRemux** then AVPlayer | [Checklist](docs/verification/0001-mkv-hevc-10bit.md) — **PlaybackVerificationRecord** pending |
+| 2 | MP4 + `hev1` (black video) | **CompatibilityRemux** | After #1 passes |
+| 3 | WebM + VP9 | **CompatibilityRemux** | After #2 |
+| 4 | MKV/WebM + AV1 | **CompatibilityRemux** | After #3 |
 | 5 | Legacy AVI / WMV subsets | **CompatibilityRemux** | Lower priority |
 
 **SystemDecodeStack** (AVFoundation) remains primary; **VideoToolbox** is not a separate alternate for these profiles (see [ADR 0003](docs/adr/0003-system-decode-compatibility-remux-not-videotoolbox.md)). Gaps are closed via **AlternateDecoder** after **IncrementalCodecRollout** verification—not by expanding the native fourcc list.

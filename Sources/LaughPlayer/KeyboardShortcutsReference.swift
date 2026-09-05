@@ -37,6 +37,8 @@ enum KeyboardShortcutsReference {
     ⌥← / ⌥→ — Seek ±1 second
     Home / End — Jump to start / end
     ↑ / ↓ — Volume up / down
+    Scroll ↕ — Volume up / down (over video)
+    Scroll ↔ or ⇧Scroll — Seek ±10 seconds (over video)
     ⌥M — Mute / unmute
     ⌘- / ⌘+ — Slower / faster
     ⌘0 — Normal speed (1×)
@@ -64,6 +66,7 @@ enum KeyboardShortcutsReference {
     IMAGE
     ⌘+ / ⌘- — Zoom in / out
     ⌘0 — Reset zoom (fit)
+    Double-click image — Toggle fit / actual size
 
     LIBRARY (browse grid visible)
     ⌘⌥← / ⌘⌥→ — Browse back / forward

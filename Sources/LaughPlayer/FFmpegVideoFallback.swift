@@ -22,7 +22,7 @@ enum FFmpegVideoFallback {
         let sourceIdentity: String
     }
 
-    private static let remuxProfileVersion = "8-chunked-progressive"
+    private static let remuxProfileVersion = "9-all-text-subs"
 
     private enum RemuxStrategy: String {
         /// All audio streams + all text subs (slow; many sidecar-like sub tracks).
@@ -134,26 +134,23 @@ enum FFmpegVideoFallback {
     private static var readyOutputPaths: Set<String> = []
     private static var remuxCache: [String: CacheEntry] = [:]
 
-    /// Minimum bytes before attempting to open a fragmented preview MP4.
-    private static let progressivePlayableMinBytes = 64 * 1024
-
     /// Reads the primary video stream codec tag from ffmpeg's header probe (stderr).
     static func probePrimaryVideoCodecTag(for inputURL: URL) -> String? {
         guard isAvailable() else { return nil }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
-        return parseVideoCodecTag(from: stderr)
+        return FFmpegProbeParser.parse(stderr).videoCodecTag
     }
 
     static func sourceHasAudioStreams(for inputURL: URL) -> Bool {
         guard isAvailable() else { return true }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
-        return stderr.contains("Audio:")
+        return FFmpegProbeParser.parse(stderr).hasAudio
     }
 
     static func probePrimaryAudioCodec(for inputURL: URL) -> String? {
         guard isAvailable() else { return nil }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
-        return parsePrimaryAudioCodec(from: stderr)
+        return FFmpegProbeParser.parse(stderr).audioCodec
     }
 
     static func requiresAudioTranscodeForNativePlayback(for inputURL: URL) -> Bool {
@@ -173,20 +170,27 @@ enum FFmpegVideoFallback {
     static func shouldPreferBlockingRemux(for inputURL: URL) -> Bool {
         guard isAvailable() else { return false }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
-        guard stderr.contains("Audio:"),
-              let codec = parsePrimaryAudioCodec(from: stderr) else { return false }
+        let summary = FFmpegProbeParser.parse(stderr)
+        guard let codec = summary.audioCodec else { return false }
         return requiresAudioTranscodeForNativePlayback(codec: codec)
     }
 
     private static func requiresFragmentedAudioTranscode(for inputURL: URL) -> Bool {
-        guard let codec = probePrimaryAudioCodec(for: inputURL) else { return false }
-        let normalized = codec.lowercased().replacingOccurrences(of: "-", with: "")
-        return normalized == "eac3" || normalized == "ec3"
+        FFmpegProbeParser.needsFragmentedAudioTranscode(audioCodec: probePrimaryAudioCodec(for: inputURL))
+    }
+
+    /// Fragmented AC-3/E-AC-3 preview transcodes the *whole* soundtrack to AAC.
+    /// For a 2h rip that is slower than waiting for stream-copy remux, and fights the full remux for disk.
+    static func shouldSkipProgressivePreview(audioCodec: String?) -> Bool {
+        FFmpegProbeParser.needsFragmentedAudioTranscode(audioCodec: audioCodec)
     }
 
     private static func progressivePreviewStrategy(for inputURL: URL) -> RemuxStrategy {
         if requiresFragmentedAudioTranscode(for: inputURL) {
             return .progressivePreviewStereo
+        }
+        if !probeTextSubtitleStreamIndices(for: inputURL).isEmpty {
+            return .firstAudioWithTextSubs
         }
         return .firstAudioNoSubs
     }
@@ -281,26 +285,15 @@ enum FFmpegVideoFallback {
     static func probeSourceDurationSec(for inputURL: URL) -> Double? {
         guard isAvailable() else { return nil }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
-        return parseDurationSec(from: stderr)
+        let summary = FFmpegProbeParser.parse(stderr)
+        PlaybackTrace.emit("[DEBUG-format] \(summary.logLine) file=\(inputURL.lastPathComponent)")
+        return summary.durationSec
     }
 
     static func remuxOutputDurationSec(at url: URL) -> Double? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", url.path])
-        return parseDurationSec(from: stderr)
-    }
-
-    private static func parseDurationSec(from stderr: String) -> Double? {
-        guard let range = stderr.range(of: "Duration:") else { return nil }
-        let after = stderr[range.upperBound...]
-        guard let comma = after.firstIndex(of: ",") else { return nil }
-        let timeToken = after[..<comma].trimmingCharacters(in: .whitespaces)
-        let parts = timeToken.split(separator: ":")
-        guard parts.count == 3,
-              let hours = Double(parts[0]),
-              let minutes = Double(parts[1]),
-              let seconds = Double(parts[2]) else { return nil }
-        return hours * 3600 + minutes * 60 + seconds
+        return FFmpegProbeParser.parse(stderr).durationSec
     }
 
     private static func remuxOutputHasAudioStream(at url: URL) -> Bool {
@@ -405,10 +398,34 @@ enum FFmpegVideoFallback {
         let fullURL = makeOutputURL(for: inputURL)
         let previewURL = makePreviewOutputURL(for: inputURL)
         _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
-        if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
+        let skipPreview = shouldSkipProgressivePreview(audioCodec: probePrimaryAudioCodec(for: inputURL))
+        if skipPreview {
+            PlaybackTrace.emit("[DEBUG-fallback] skip progressive preview (would transcode full-length audio) input=\(inputURL.lastPathComponent)")
+        } else if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
             return .progressivePreview(preview: previewURL, fullTarget: fullURL)
         }
+        if waitUntilBackgroundFullRemuxReady(outputURL: fullURL, timeoutSec: 180) {
+            storeCache(inputURL: inputURL, outputURL: fullURL)
+            return .cacheHit(fullURL)
+        }
         return .failed
+    }
+
+    private static func waitUntilBackgroundFullRemuxReady(outputURL: URL, timeoutSec: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSec)
+        while Date() < deadline {
+            if isOutputReadyForPlayback(at: outputURL) {
+                return true
+            }
+            let stillRunning = onProcessQueue {
+                activeBackgroundFullRemux?.outputURL == outputURL && activeBackgroundFullRemux?.process.isRunning == true
+            }
+            if !stillRunning {
+                return isOutputReadyForPlayback(at: outputURL)
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return isOutputReadyForPlayback(at: outputURL)
     }
 
     static func isRemuxing(outputURL: URL) -> Bool {
@@ -421,8 +438,9 @@ enum FFmpegVideoFallback {
     static func isPreviewReadableEnoughForPlayback(url: URL) async -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard size >= progressivePlayableMinBytes else { return false }
-        guard fileContainsMOOFAtom(at: url) else { return false }
+        guard FFmpegProbeParser.isPreviewByteReady(fileSize: size, containsMOOF: fileContainsMOOFAtom(at: url)) else {
+            return false
+        }
 
         let asset = AVURLAsset(url: url)
         if let videoTracks = try? await asset.loadTracks(withMediaType: .video), !videoTracks.isEmpty {
@@ -494,7 +512,7 @@ enum FFmpegVideoFallback {
     }
 
     private static func fullRemuxStrategy(for inputURL: URL) -> RemuxStrategy {
-        if probeFirstTextSubtitleStreamIndex(for: inputURL) != nil {
+        if !probeTextSubtitleStreamIndices(for: inputURL).isEmpty {
             return .firstAudioWithTextSubs
         }
         return .firstAudioNoSubs
@@ -519,7 +537,7 @@ enum FFmpegVideoFallback {
 
         let isPreview = outputURL.lastPathComponent.contains("-preview")
         if !isPreview, !outputDurationMeetsSource(outputURL: outputURL, inputURL: inputURL) {
-            print("[DEBUG-fallback] remux output too short — not marking ready path=\(outputURL.path)")
+            PlaybackTrace.emit("[DEBUG-fallback] remux output too short — not marking ready path=\(outputURL.path)")
             return
         }
 
@@ -559,7 +577,7 @@ enum FFmpegVideoFallback {
             fragmented: false,
             strategy: strategy
         )
-        print("[DEBUG-fallback] background full remux strategy=\(strategy.rawValue) output=\(outputURL.path)")
+        PlaybackTrace.emit("[DEBUG-fallback] background full remux strategy=\(strategy.rawValue) output=\(outputURL.path)")
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
@@ -573,9 +591,9 @@ enum FFmpegVideoFallback {
                    FileManager.default.fileExists(atPath: outputURL.path) {
                     markOutputReadyIfValid(outputURL, inputURL: inputURL)
                     storeCache(inputURL: inputURL, outputURL: outputURL)
-                    print("[DEBUG-fallback] background full remux finished output=\(outputURL.path)")
+                    PlaybackTrace.emit("[DEBUG-fallback] background full remux finished output=\(outputURL.path)")
                 } else {
-                    print("[DEBUG-fallback] background full remux exit=\(finished.terminationStatus)")
+                    PlaybackTrace.emit("[DEBUG-fallback] background full remux exit=\(finished.terminationStatus)")
                 }
             }
         }
@@ -588,7 +606,7 @@ enum FFmpegVideoFallback {
             }
             return true
         } catch {
-            print("[DEBUG-fallback] background full remux launch failed: \(error)")
+            PlaybackTrace.emit("[DEBUG-fallback] background full remux launch failed: \(error)")
             return false
         }
     }
@@ -608,7 +626,7 @@ enum FFmpegVideoFallback {
             fragmented: true,
             strategy: strategy
         )
-        print("[DEBUG-fallback] progressive preview strategy=\(strategy.rawValue) preview=\(previewURL.path)")
+        PlaybackTrace.emit("[DEBUG-fallback] progressive preview strategy=\(strategy.rawValue) preview=\(previewURL.path)")
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
@@ -621,9 +639,9 @@ enum FFmpegVideoFallback {
                 if finished.terminationStatus == 0,
                    FileManager.default.fileExists(atPath: previewURL.path) {
                     markOutputReadyIfValid(previewURL, inputURL: inputURL)
-                    print("[DEBUG-fallback] progressive preview finished output=\(previewURL.path)")
+                    PlaybackTrace.emit("[DEBUG-fallback] progressive preview finished output=\(previewURL.path)")
                 } else {
-                    print("[DEBUG-fallback] progressive preview exit=\(finished.terminationStatus)")
+                    PlaybackTrace.emit("[DEBUG-fallback] progressive preview exit=\(finished.terminationStatus)")
                 }
                 previewFullTargets.removeValue(forKey: previewURL)
             }
@@ -638,7 +656,7 @@ enum FFmpegVideoFallback {
             }
             return true
         } catch {
-            print("[DEBUG-fallback] progressive preview launch failed: \(error)")
+            PlaybackTrace.emit("[DEBUG-fallback] progressive preview launch failed: \(error)")
             return false
         }
     }
@@ -676,7 +694,7 @@ enum FFmpegVideoFallback {
         case .allAudioWithSubs:
             args += ["-map", "0:s?", "-c:s", "mov_text"]
         case .firstAudioWithTextSubs:
-            if let subIndex = probeFirstTextSubtitleStreamIndex(for: inputURL) {
+            for subIndex in probeTextSubtitleStreamIndices(for: inputURL) {
                 args += ["-map", "0:s:\(subIndex)", "-c:s", "mov_text"]
             }
         default:
@@ -748,15 +766,15 @@ enum FFmpegVideoFallback {
                 let hasVideo = remuxOutputHasVideoStream(at: outputURL)
                 let hasAudio = !expectingAudio || remuxOutputHasAudioStream(at: outputURL)
                 if hasVideo && hasAudio {
-                    print("[DEBUG-fallback] remux succeeded with strategy=\(strategy.rawValue)")
+                    PlaybackTrace.emit("[DEBUG-fallback] remux succeeded with strategy=\(strategy.rawValue)")
                     return 0
                 }
-                print("[DEBUG-fallback] remux exit 0 but output incomplete, trying next strategy")
+                PlaybackTrace.emit("[DEBUG-fallback] remux exit 0 but output incomplete, trying next strategy")
             }
         }
         if !lastStderr.isEmpty {
             let tail = lastStderr.suffix(1200)
-            print("[DEBUG-fallback] remux failed strategies=\(strategies.map(\.rawValue).joined(separator: ",")) stderr=\(tail)")
+            PlaybackTrace.emit("[DEBUG-fallback] remux failed strategies=\(strategies.map(\.rawValue).joined(separator: ",")) stderr=\(tail)")
         }
         return lastExit
     }
@@ -832,54 +850,29 @@ enum FFmpegVideoFallback {
         return tempDir.appendingPathComponent("\(base)\(suffix)-\(hash).mp4")
     }
 
-    private static func parsePrimaryAudioCodec(from stderr: String) -> String? {
-        for line in stderr.components(separatedBy: .newlines) where line.contains("Audio:") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let audioRange = trimmed.range(of: "Audio:") else { continue }
-            let after = trimmed[audioRange.upperBound...]
-            let codecToken = after.split(separator: ",").first.map(String.init) ?? ""
-            let codec = codecToken.trimmingCharacters(in: .whitespaces)
-            if !codec.isEmpty { return codec.lowercased() }
-        }
-        return nil
-    }
-
     private static let textSubtitleCodecs: Set<String> = [
         "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"
     ]
 
-    private static func probeFirstTextSubtitleStreamIndex(for inputURL: URL) -> Int? {
-        guard isAvailable() else { return nil }
+    private static func probeTextSubtitleStreamIndices(for inputURL: URL) -> [Int] {
+        guard isAvailable() else { return [] }
         let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
+        var indices: [Int] = []
         var subIndex = -1
         for line in stderr.components(separatedBy: .newlines) {
             if line.contains("Subtitle:") {
                 subIndex += 1
                 let lower = line.lowercased()
                 if textSubtitleCodecs.contains(where: { lower.contains($0) }) {
-                    return subIndex
+                    indices.append(subIndex)
                 }
             }
         }
-        return nil
+        return indices
     }
 
-    private static func parseVideoCodecTag(from stderr: String) -> String? {
-        for line in stderr.components(separatedBy: .newlines) where line.contains("Video:") {
-            var candidates: [String] = []
-            var search = line[...]
-            while let open = search.firstIndex(of: "("),
-                  let close = search[open...].firstIndex(of: ")") {
-                let inner = search[search.index(after: open)..<close]
-                let token = inner.trimmingCharacters(in: .whitespaces)
-                if token.count == 4, token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) {
-                    candidates.append(token.lowercased())
-                }
-                search = search[search.index(after: close)...]
-            }
-            if let tag = candidates.last { return tag }
-        }
-        return nil
+    private static func probeFirstTextSubtitleStreamIndex(for inputURL: URL) -> Int? {
+        probeTextSubtitleStreamIndices(for: inputURL).first
     }
 
     private static func runCapturingStderrUnlocked(arguments: [String]) -> String {

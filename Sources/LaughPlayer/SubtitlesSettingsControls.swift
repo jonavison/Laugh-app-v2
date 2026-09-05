@@ -84,11 +84,11 @@ final class SubtitlesSettingsControls {
         }
 
         let trackH = SubtitleAppearanceStyle.settingsSliderTrackHeight
-        delaySlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
-        positionSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
-        scaleSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
-        fontSizeSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
-        borderWidthSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent)
+        delaySlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent, showsKnob: true)
+        positionSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent, showsKnob: true)
+        scaleSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent, showsKnob: true)
+        fontSizeSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent, showsKnob: true)
+        borderWidthSlider.useFlatBarAppearance(trackHeight: trackH, filledColor: LaughTheme.accent, showsKnob: true)
 
         LaughTheme.applySettingsAccentChrome(to: primaryTrackPopUp)
         LaughTheme.applySettingsAccentChrome(to: secondaryTrackPopUp)

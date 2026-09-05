@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-06-03), amended (2026-06-02) — direct **mpv** path for non-native containers
+Accepted (2026-06-03), amended (2026-08-24) — picture via remux + AVPlayer; DirectMpv is not the display engine
 
 ## Context
 
@@ -12,22 +12,22 @@ A separate question is whether **AlternateDecoder** should be in-player decode (
 
 ## Decision
 
-1. **Primary:** **NativePlaybackEngine** = **SystemDecodeStack** (AVFoundation). Do not replace this with a custom VideoToolbox-only pipeline for breadth.
-2. **Direct-build alternate (default when mpv is bundled and runnable):** **DirectMpv** — subprocess mpv embedded in the video surface (`MpvPlaybackController`, JSON IPC). Zero-wait open for MKV/WebM and similar containers.
-3. **Direct-build fallback:** **CompatibilityRemux** via bundled FFmpeg (`FFmpegVideoFallback`) when mpv is missing, fails to spawn, or IPC ready times out — stream copy to temp MP4, then **SystemDecodeStack**. Heavy transcode stays opt-in (`LAUGH_ENABLE_HEAVY_TRANSCODE`).
+1. **Primary / picture:** **NativePlaybackEngine** = **SystemDecodeStack** (AVPlayer, Metal). This is the 2026 display tool for LaughPlayer.
+2. **Direct-build alternate:** **CompatibilityRemux** via bundled FFmpeg (`FFmpegVideoFallback`) — stream copy to temp MP4, then **SystemDecodeStack**. Heavy transcode stays opt-in (`LAUGH_ENABLE_HEAVY_TRANSCODE`).
+3. **DirectMpv** is not used for picture. macOS mpv 0.41 removed `--wid`; cocoa-cb / macvk always opens its own window. libmpv’s public render API is still OpenGL (`CAOpenGLLayer`), which Apple deprecated and which currently presents black video here. DirectMpv remains an opt-in path (**ExtendedPlaybackForSubtitles**) until libmpv exposes a Metal / gpu-next render context.
 4. **App Store:** **SystemDecodeStack** only (no bundled mpv/remux per ADR 0002).
 
 mpv may use VideoToolbox as hwaccel internally; that is not “VideoToolbox instead of FFmpeg.”
 
 ## Consequences
 
-- Phase 2 queue items are verified against **DirectMpv** first on direct builds, then **CompatibilityRemux** if mpv is unavailable.
+- Phase 2 queue items are verified against **CompatibilityRemux** + **NativePlaybackEngine** on direct builds.
 - App Store builds stay **SystemDecodeStack**-only per ADR 0002.
-- Bundled mpv must be portable (same constraint as bundled ffmpeg); Homebrew-linked binaries are not supported for ship.
+- First-open remux costs disk and time on large rips; that is accepted until libmpv can present into a Metal surface.
 
 ## Alternatives considered
 
 - **VideoToolbox instead of FFmpeg for remaining codecs:** Rejected — no demux/remux; does not match SUPPORT.md Phase 2 profiles.
-- **Remux-only forever:** Superseded for direct builds where mpv is bundled — remux adds latency and disk IO on first play.
-- **libmpv in-process (v1):** Deferred — subprocess mpv + `--wid` ships first; libmpv if lifecycle/UI limits bite.
-- **FFmpeg software decode inside LaughPlayer UI:** Rejected as default — remux-then-native keeps AVPlayer integration when mpv is not used.
+- **Subprocess mpv + `--wid`:** Dead on macOS mpv 0.41 — cocoa-cb always creates its own window.
+- **In-process libmpv + OpenGL render API:** Rejected as the picture engine — OpenGL is deprecated; current macOS presents black video. Keep the code only for opt-in subtitle sessions until a Metal render API exists (~mpv 0.42 / gpu-next in libmpv).
+- **libmpv software blit:** Possible but CPU-heavy; not the default while remux + AVPlayer already works.

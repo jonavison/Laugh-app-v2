@@ -21,6 +21,20 @@ copy_if_exists() {
 copy_if_exists "$(command -v ffmpeg || true)" "ffmpeg"
 copy_if_exists "$(command -v mpv || true)" "mpv"
 
+LIB_DIR="${ROOT_DIR}/Sources/LaughPlayer/codec-tools/lib"
+mkdir -p "${LIB_DIR}"
+if [[ -f /opt/homebrew/lib/libmpv.2.dylib ]]; then
+  rm -f "${LIB_DIR}/libmpv.2.dylib"
+  cp /opt/homebrew/lib/libmpv.2.dylib "${LIB_DIR}/libmpv.2.dylib"
+  echo "[bundle-codec-tools] bundled libmpv.2.dylib"
+elif [[ -f /usr/local/lib/libmpv.2.dylib ]]; then
+  rm -f "${LIB_DIR}/libmpv.2.dylib"
+  cp /usr/local/lib/libmpv.2.dylib "${LIB_DIR}/libmpv.2.dylib"
+  echo "[bundle-codec-tools] bundled libmpv.2.dylib"
+else
+  echo "[bundle-codec-tools] WARNING: libmpv.2.dylib was not bundled."
+fi
+
 if [[ ! -x "${TARGET_DIR}/ffmpeg" ]]; then
   echo "[bundle-codec-tools] ERROR: ffmpeg was not bundled."
   echo "This project no longer auto-installs dependencies."

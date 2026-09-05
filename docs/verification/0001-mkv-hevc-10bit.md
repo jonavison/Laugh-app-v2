@@ -2,7 +2,7 @@
 
 **Status:** Pending **PlaybackVerificationRecord** — do not move this profile to **Currently Supported** in SUPPORT.md until complete.
 
-**ADR:** [0003](../adr/0003-system-decode-compatibility-remux-not-videotoolbox.md) — expect **DirectMpv** on direct builds when bundled mpv is runnable; else **CompatibilityRemux**.
+**ADR:** [0003](../adr/0003-system-decode-compatibility-remux-not-videotoolbox.md) — expect **CompatibilityRemux** then **NativePlaybackEngine** on direct builds.
 
 ## PlaybackProfile
 
@@ -12,9 +12,9 @@
 
 ## Intended engine (direct build)
 
-1. **PlaybackRoutePlanner** — `.directMpv(reason: container.mkv)` when `MpvPlaybackController.isAvailable()`.
-2. **DirectMpv** — subprocess mpv embedded in `PlayerSurfaceView` (no temp MP4, no “Preparing playback…” for remux).
-3. **Fallback** — if mpv missing or load fails, auto **CompatibilityRemux** (`FFmpegVideoFallback`) then **SystemDecodeStack**.
+1. **PlaybackRoutePlanner** — `.compatibilityRemux(reason: container.mkv)` when FFmpeg remux is available.
+2. **CompatibilityRemux** — stream-copy temp MP4, then **SystemDecodeStack** / AVPlayer in `PlayerSurfaceView`.
+3. **Fallback** — if remux is missing, **DirectMpv** (opt-in picture path; OpenGL, not the default).
 
 App Store build: **SystemDecodeStack** only; expect failure messaging without mpv/remux.
 

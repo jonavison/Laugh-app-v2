@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LaughTheme.activate()
         SubtitleFont.registerIfNeeded()
         FFmpegVideoFallback.warmAvailabilityCache()
+        MpvPlaybackController.warmAvailabilityCache()
         LaunchLog.emit("applicationWillFinishLaunching")
     }
 
@@ -20,12 +21,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = MainWindowController()
         windowController = controller
         LaunchLog.emit("applicationDidFinishLaunching: showing main window")
-        controller.show()
+        let openingFiles = !pendingOpenFileURLs.isEmpty
+        controller.show(skipInitialLibrary: openingFiles)
+        consumePendingOpenFileURLs()
 
         DispatchQueue.main.async { [weak self] in
             LaunchLog.emit("applicationDidFinishLaunching: bringMainWindowToFront")
             self?.bringMainWindowToFront()
-            self?.consumePendingOpenFileURLs()
         }
         LaunchLog.emit("applicationDidFinishLaunching: end")
     }
@@ -90,6 +92,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        windowController?.prepareForTermination()
+        MpvPlaybackController.terminateRunningProcesses()
         FFmpegVideoFallback.terminateRunningProcesses()
         LibraryRootsStore.shared.stopAllSecurityScopedAccess()
     }

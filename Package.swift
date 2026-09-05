@@ -13,15 +13,36 @@ let package = Package(
         )
     ],
     targets: [
+        .target(
+            name: "LibmpvEmbed",
+            path: "Sources/LibmpvEmbed",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath(".")
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreFoundation")
+            ]
+        ),
         .executableTarget(
             name: "LaughPlayer",
+            dependencies: [
+                "LibmpvEmbed"
+            ],
             resources: [
                 .copy("Resources"),
                 .copy("codec-tools")
             ],
             swiftSettings: [
                 .define("DIRECT_BUILD")
+            ],
+            linkerSettings: [
+                .linkedFramework("OpenGL")
             ]
+        ),
+        .testTarget(
+            name: "LaughPlayerTests",
+            dependencies: ["LaughPlayer"]
         )
     ]
 )

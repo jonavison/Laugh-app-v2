@@ -38,7 +38,7 @@ final class MainWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func show() {
+    func show(skipInitialLibrary: Bool = false) {
         guard let window else { return }
 
         if window.contentViewController == nil {
@@ -54,7 +54,7 @@ final class MainWindowController: NSWindowController {
         window.orderFrontRegardless()
 
         playerViewController.installPlayerInterfaceIfNeeded()
-        playerViewController.prepareInterfaceForDisplay()
+        playerViewController.prepareInterfaceForDisplay(skipLibrary: skipInitialLibrary)
         applyAspectPreference()
         centerWindowIfNeeded()
         logWindowState("show")
@@ -160,6 +160,10 @@ final class MainWindowController: NSWindowController {
         playerViewController.toggleQueuePopoverFromShortcut()
     }
     func commandStopAndClose() { playerViewController.commandStopAndClose() }
+
+    func prepareForTermination() {
+        playerViewController.prepareForTermination()
+    }
     func commandToggleLibrary() { playerViewController.commandToggleLibraryPanel() }
     func commandToggleInspector() { playerViewController.commandToggleSettingsInspector() }
     func commandSelectSettingsTab(_ index: Int) { playerViewController.commandSelectSettingsTab(index) }

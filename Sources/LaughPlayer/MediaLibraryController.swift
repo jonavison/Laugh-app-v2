@@ -10,6 +10,7 @@ final class MediaLibraryController {
     enum SidebarRow: Equatable {
         case recentItem(LibraryMediaFile)
         case recentHeader
+        case favoritesHeader
         case librarySeparator
         case librarySectionHeader
         case root(MediaLibraryRoot)
@@ -18,6 +19,7 @@ final class MediaLibraryController {
     enum SidebarMode: Equatable {
         case none
         case recentHeader
+        case favoritesHeader
         case root(MediaLibraryRoot)
     }
 
@@ -32,7 +34,14 @@ final class MediaLibraryController {
     private(set) var backStack: [URL] = []
     private(set) var forwardStack: [URL] = []
     private(set) var browseSort = LibraryBrowseSort.default
+    private(set) var viewMode: LibraryBrowseViewMode = LibraryBrowsePreferences.viewMode
+    private(set) var galleryScale: LibraryBrowseGalleryScale = LibraryBrowsePreferences.galleryScale
+    private(set) var searchQuery: String = ""
+    private(set) var kindFilter: LibraryKindFilter = .all
+    /// Unfiltered entries for the current destination (before search/kind filter).
+    private(set) var sourceEntries: [LibraryBrowseEntry] = []
     private(set) var displayedEntries: [LibraryBrowseEntry] = []
+    private(set) var selectedEntryIndices: IndexSet = []
 
     var onChange: (() -> Void)?
 
@@ -54,20 +63,23 @@ final class MediaLibraryController {
 
     private let recentsHeaderRowIndex = 0
 
-    private var librarySeparatorRowIndex: Int { 1 + recentPreviewItems.count }
+    private var favoritesHeaderRowIndex: Int { 1 + recentPreviewItems.count }
+
+    private var librarySeparatorRowIndex: Int { favoritesHeaderRowIndex + 1 }
 
     private var librarySectionRowIndex: Int { librarySeparatorRowIndex + 1 }
 
     func sidebarRowCount() -> Int {
-        1 + recentPreviewItems.count + 1 + 1 + roots.count
+        1 + recentPreviewItems.count + 1 + 1 + 1 + roots.count
     }
 
     func sidebarRow(at index: Int) -> SidebarRow? {
         guard index >= 0, index < sidebarRowCount() else { return nil }
         if index == recentsHeaderRowIndex { return .recentHeader }
-        if index < librarySeparatorRowIndex {
+        if index < favoritesHeaderRowIndex {
             return .recentItem(recentPreviewItems[index - 1])
         }
+        if index == favoritesHeaderRowIndex { return .favoritesHeader }
         if index == librarySeparatorRowIndex { return .librarySeparator }
         if index == librarySectionRowIndex { return .librarySectionHeader }
         let rootIndex = index - librarySectionRowIndex - 1
@@ -84,7 +96,7 @@ final class MediaLibraryController {
         switch sidebarRow {
         case .librarySectionHeader, .librarySeparator:
             return false
-        case .recentItem, .recentHeader, .root:
+        case .recentItem, .recentHeader, .favoritesHeader, .root:
             return true
         }
     }
@@ -95,6 +107,8 @@ final class MediaLibraryController {
         currentDirectoryURL = nil
         backStack = []
         forwardStack = []
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -115,14 +129,24 @@ final class MediaLibraryController {
             currentDirectoryURL = nil
             backStack = []
             forwardStack = []
+            clearSearchAndFilters(notify: false)
+        case .favoritesHeader:
+            selectedSidebarRow = row
+            sidebarMode = .favoritesHeader
+            currentDirectoryURL = nil
+            backStack = []
+            forwardStack = []
+            clearSearchAndFilters(notify: false)
         case .root(let root):
             selectedSidebarRow = row
             sidebarMode = .root(root)
             currentDirectoryURL = root.directoryURL
             backStack = []
             forwardStack = []
+            clearSearchAndFilters(notify: false)
         }
 
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -130,25 +154,66 @@ final class MediaLibraryController {
     func reloadGrid() {
         switch sidebarMode {
         case .none:
-            displayedEntries = []
+            sourceEntries = []
         case .recentHeader:
-            displayedEntries = recentBrowseEntries()
+            sourceEntries = recentBrowseEntries()
+        case .favoritesHeader:
+            sourceEntries = favoriteBrowseEntries()
         case .root:
             guard let directory = currentDirectoryURL else {
-                displayedEntries = []
+                sourceEntries = []
                 break
             }
-            displayedEntries = MediaLibraryScanner.browseEntries(in: directory)
+            sourceEntries = MediaLibraryScanner.browseEntries(in: directory)
         }
 
         if case .root = sidebarMode {
-            displayedEntries = LibraryBrowseItemSorter.sorted(displayedEntries, by: browseSort)
+            sourceEntries = LibraryBrowseItemSorter.sorted(sourceEntries, by: browseSort)
+        }
+
+        applyDisplayFilters()
+    }
+
+    private func applyDisplayFilters() {
+        var entries = sourceEntries
+        if kindFilter != .all {
+            entries = entries.filter { entry in
+                switch kindFilter {
+                case .all:
+                    return true
+                case .folders:
+                    return entry.isFolder
+                case .videos:
+                    if case .media(let file) = entry.kind { return file.kind == .video }
+                    return false
+                case .images:
+                    if case .media(let file) = entry.kind { return file.kind == .image }
+                    return false
+                }
+            }
+        }
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            entries = entries.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        }
+        displayedEntries = entries
+        selectedEntryIndices = selectedEntryIndices.filteredIndexSet { $0 < displayedEntries.count }
+    }
+
+    private func recentBrowseEntries() -> [LibraryBrowseEntry] {
+        RecentlyViewedStore.shared.mediaFiles().map { file in
+            LibraryBrowseEntry(
+                kind: .media(file),
+                name: file.url.lastPathComponent,
+                dateModified: nil,
+                dateAdded: nil,
+                size: nil
+            )
         }
     }
 
-    /// Recents content list: store order is most recently played first (no browse sort).
-    private func recentBrowseEntries() -> [LibraryBrowseEntry] {
-        RecentlyViewedStore.shared.mediaFiles().map { file in
+    private func favoriteBrowseEntries() -> [LibraryBrowseEntry] {
+        ImageLibraryMetaStore.favoritedImageFiles().map { file in
             LibraryBrowseEntry(
                 kind: .media(file),
                 name: file.url.lastPathComponent,
@@ -165,10 +230,56 @@ final class MediaLibraryController {
         onChange?()
     }
 
+    func setViewMode(_ mode: LibraryBrowseViewMode) {
+        guard viewMode != mode else { return }
+        viewMode = mode
+        LibraryBrowsePreferences.viewMode = mode
+        onChange?()
+    }
+
+    func setGalleryScale(_ scale: LibraryBrowseGalleryScale) {
+        guard galleryScale != scale else { return }
+        galleryScale = scale
+        LibraryBrowsePreferences.galleryScale = scale
+        onChange?()
+    }
+
+    var tileMetrics: LibraryBrowseTileMetrics {
+        LibraryBrowseTileMetrics.metrics(mode: effectiveViewMode, galleryScale: galleryScale)
+    }
+
+    func setSearchQuery(_ query: String) {
+        let trimmed = query
+        guard searchQuery != trimmed else { return }
+        searchQuery = trimmed
+        clearMultiSelection(notify: false)
+        applyDisplayFilters()
+        onChange?()
+    }
+
+    func setKindFilter(_ filter: LibraryKindFilter) {
+        guard kindFilter != filter else { return }
+        kindFilter = filter
+        clearMultiSelection(notify: false)
+        applyDisplayFilters()
+        onChange?()
+    }
+
+    private func clearSearchAndFilters(notify: Bool) {
+        searchQuery = ""
+        kindFilter = .all
+        if notify {
+            applyDisplayFilters()
+            onChange?()
+        }
+    }
+
     func goBack() {
         guard case .root = sidebarMode, let current = currentDirectoryURL, let previous = backStack.popLast() else { return }
         forwardStack.append(current)
         currentDirectoryURL = previous
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -177,6 +288,8 @@ final class MediaLibraryController {
         guard case .root = sidebarMode, let current = currentDirectoryURL, let next = forwardStack.popLast() else { return }
         backStack.append(current)
         currentDirectoryURL = next
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -188,6 +301,8 @@ final class MediaLibraryController {
             forwardStack.removeAll()
         }
         currentDirectoryURL = url
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -204,6 +319,8 @@ final class MediaLibraryController {
         backStack = newBack
         forwardStack = []
         currentDirectoryURL = url
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
         reloadGrid()
         onChange?()
     }
@@ -231,12 +348,69 @@ final class MediaLibraryController {
         clearSidebarSelection()
     }
 
+    // MARK: - Multi-select
+
+    func clearMultiSelection(notify: Bool = true) {
+        guard !selectedEntryIndices.isEmpty else { return }
+        selectedEntryIndices = []
+        if notify { onChange?() }
+    }
+
+    func setMultiSelection(_ indices: IndexSet) {
+        let filtered = indices.filteredIndexSet { $0 >= 0 && $0 < displayedEntries.count }
+        guard filtered != selectedEntryIndices else { return }
+        selectedEntryIndices = filtered
+        onChange?()
+    }
+
+    func toggleMultiSelection(at index: Int) {
+        guard index >= 0, index < displayedEntries.count else { return }
+        var next = selectedEntryIndices
+        if next.contains(index) {
+            next.remove(index)
+        } else {
+            next.insert(index)
+        }
+        selectedEntryIndices = next
+        onChange?()
+    }
+
+    func extendMultiSelection(to index: Int) {
+        guard index >= 0, index < displayedEntries.count else { return }
+        let anchor = selectedEntryIndices.min() ?? index
+        let range = IndexSet(integersIn: min(anchor, index)...max(anchor, index))
+        selectedEntryIndices = range
+        onChange?()
+    }
+
+    var selectedEntries: [LibraryBrowseEntry] {
+        selectedEntryIndices.sorted().compactMap { idx in
+            guard idx < displayedEntries.count else { return nil }
+            return displayedEntries[idx]
+        }
+    }
+
+    var hasMultiSelection: Bool {
+        selectedEntryIndices.count > 1 || (selectedEntryIndices.count == 1 && !selectedEntryIndices.isEmpty)
+    }
+
+    /// True when at least one entry is multi-selected (including a single modifier-selected item).
+    var hasBatchSelection: Bool {
+        !selectedEntryIndices.isEmpty
+    }
+
     var canGoBack: Bool {
-        sidebarMode != .recentHeader && sidebarMode != .none && !backStack.isEmpty
+        sidebarMode != .recentHeader
+            && sidebarMode != .favoritesHeader
+            && sidebarMode != .none
+            && !backStack.isEmpty
     }
 
     var canGoForward: Bool {
-        sidebarMode != .recentHeader && sidebarMode != .none && !forwardStack.isEmpty
+        sidebarMode != .recentHeader
+            && sidebarMode != .favoritesHeader
+            && sidebarMode != .none
+            && !forwardStack.isEmpty
     }
 
     var canRemoveSelectedRoot: Bool {
@@ -248,14 +422,47 @@ final class MediaLibraryController {
         sidebarMode == .recentHeader
     }
 
+    var showsFavoritesList: Bool {
+        sidebarMode == .favoritesHeader
+    }
+
     /// True when nothing is selected in the sidebar (browse shows the drop hint).
     var showsBrowsePlaceholder: Bool {
         sidebarMode == .none
     }
 
-    /// Media files in the current browse folder, in the same order as the grid (respects sort).
+    var showsFolderBrowseChrome: Bool {
+        if case .root = sidebarMode { return true }
+        return false
+    }
+
+    var showsBrowseSearch: Bool {
+        showsFolderBrowseChrome || showsFavoritesList
+    }
+
+    var showsKindFilter: Bool {
+        showsFolderBrowseChrome || showsFavoritesList
+    }
+
+    var showsBrowseViewModeControl: Bool {
+        showsFolderBrowseChrome || showsFavoritesList
+    }
+
+    var effectiveViewMode: LibraryBrowseViewMode {
+        if showsRecentList { return .list }
+        return viewMode
+    }
+
+    var isFiltering: Bool {
+        kindFilter != .all || !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Media files currently shown in browse order (respects search/kind filter).
     func mediaFilesInBrowseOrder() -> [LibraryMediaFile] {
-        mediaFiles(in: nil)
+        displayedEntries.compactMap { entry in
+            guard case .media(let file) = entry.kind else { return nil }
+            return file
+        }
     }
 
     /// Media in a folder (or the current browse folder when `directory` is nil), using the active sort.
@@ -265,6 +472,8 @@ final class MediaLibraryController {
             return []
         case .recentHeader:
             return RecentlyViewedStore.shared.mediaFiles()
+        case .favoritesHeader:
+            return ImageLibraryMetaStore.favoritedImageFiles()
         case .root:
             guard let targetDirectory = directory ?? currentDirectoryURL else { return [] }
             let entries = MediaLibraryScanner.browseEntries(in: targetDirectory)
@@ -287,12 +496,14 @@ final class MediaLibraryController {
     }
 
     var canPlayAllInBrowse: Bool {
-        showsRecentList || (!showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty)
+        showsRecentList
+            || showsFavoritesList
+            || (!showsBrowsePlaceholder && !mediaFilesInBrowseOrder().isEmpty)
     }
 
-    /// Sort control for folder browse only (recents stay in recently-played order).
+    /// Sort control for folder browse only (recents/favorites stay fixed order).
     var showsBrowseSortControl: Bool {
-        if case .root = sidebarMode { return !displayedEntries.isEmpty }
+        if case .root = sidebarMode { return !sourceEntries.isEmpty || isFiltering }
         return false
     }
 
@@ -302,7 +513,11 @@ final class MediaLibraryController {
             return ""
         case .recentHeader:
             return "No recent files"
+        case .favoritesHeader:
+            if isFiltering { return "No matches" }
+            return "No favorite images"
         case .root:
+            if isFiltering { return "No matches" }
             return "Empty folder"
         }
     }
@@ -313,6 +528,8 @@ final class MediaLibraryController {
             return []
         case .recentHeader:
             return [(title: "Recents", url: nil)]
+        case .favoritesHeader:
+            return [(title: "Favorites", url: nil)]
         case .root(let root):
             guard let current = currentDirectoryURL else { return [(title: root.displayName, url: root.directoryURL)] }
             return breadcrumbPathComponents(root: root, current: current).map { (title: $0.title, url: $0.url) }

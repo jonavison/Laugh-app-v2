@@ -47,15 +47,20 @@ enum ImmersiveWindowChrome {
     }
 
     static func applyFrostedPanelStyle(to effectView: NSVisualEffectView, leadingShadow: Bool) {
-        effectView.material = .menu
-        effectView.blendingMode = .behindWindow
+        // withinWindow + opaque floor keeps panel color stable in windowed and fullscreen.
+        effectView.material = .contentBackground
+        effectView.blendingMode = .withinWindow
         effectView.state = .active
         effectView.wantsLayer = true
         effectView.layer?.cornerRadius = 0
         effectView.layer?.masksToBounds = false
         effectView.layer?.borderWidth = 0
         effectView.layer?.borderColor = nil
-        effectView.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.78).cgColor
+        var fill = NSColor.windowBackgroundColor
+        effectView.effectiveAppearance.performAsCurrentDrawingAppearance {
+            fill = NSColor.windowBackgroundColor
+        }
+        effectView.layer?.backgroundColor = fill.cgColor
         if leadingShadow {
             effectView.layer?.shadowColor = NSColor.black.withAlphaComponent(0.22).cgColor
             effectView.layer?.shadowOpacity = 1
