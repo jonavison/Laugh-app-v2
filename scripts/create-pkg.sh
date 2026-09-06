@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/create-pkg.sh
-#   VERSION=1.0.1 ./scripts/create-pkg.sh
+#   VERSION=0.3.1 ./scripts/create-pkg.sh   # optional override
 #
 # Output:
 #   dist/LaughPlayer-Installer.pkg
@@ -16,7 +16,9 @@ APP_PATH="${DIST_DIR}/LaughPlayer.app"
 PAYLOAD_DIR="${DIST_DIR}/pkg-payload"
 COMPONENT_PKG="${DIST_DIR}/LaughPlayer-component.pkg"
 PKG_PATH="${DIST_DIR}/LaughPlayer-Installer.pkg"
-VERSION="${VERSION:-1.0.0}"
+if [[ -z "${VERSION:-}" ]]; then
+  VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/Packaging/RELEASE_VERSION")"
+fi
 IDENTIFIER="${IDENTIFIER:-com.laughplayer.app}"
 INSTALLER_ID="${INSTALLER_ID:-com.laughplayer.installer}"
 

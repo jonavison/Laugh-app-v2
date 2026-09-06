@@ -2,7 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is production-ready — same convention as Smile. Older `1.x` tags were an early packaging mistake, not a claim of 1.0 readiness.
+
 ## [Unreleased]
+
+### Changed
+- Marketing version reset to **0.3.0** (pre-production). Packaging scripts read `Packaging/RELEASE_VERSION` instead of hard-coded `1.0.0`.
 
 ### Added
 - Resume playback where you left off: reopening a video (after quit or switching files) seeks back to the saved playhead. Positions under ~3s or near the end are ignored so finished videos start clean.

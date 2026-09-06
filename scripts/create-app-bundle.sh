@@ -10,7 +10,9 @@ APP_DIR="${OUT_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-VERSION="${VERSION:-1.0.0}"
+if [[ -z "${VERSION:-}" ]]; then
+  VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/Packaging/RELEASE_VERSION")"
+fi
 BUNDLE_ID="${BUNDLE_ID:-com.laughplayer.app}"
 
 cd "${ROOT_DIR}"

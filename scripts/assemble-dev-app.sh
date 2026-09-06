@@ -24,6 +24,7 @@ APP_DIR="${ROOT_DIR}/.build/DevLaughPlayer.app"
 CONTENTS="${APP_DIR}/Contents"
 MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
+DEV_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/Packaging/RELEASE_VERSION")-dev"
 
 if [[ ! -x "${BIN}" ]]; then
   echo "[assemble-dev-app] Missing binary: ${BIN}" >&2
@@ -47,7 +48,7 @@ fi
 # Named accent for NSAccentColorName (must be Assets.car — not a raw .colorset folder).
 ./scripts/compile-accent-assets.sh "${RESOURCES}"
 
-cat > "${CONTENTS}/Info.plist" <<'EOF'
+cat > "${CONTENTS}/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -67,7 +68,7 @@ cat > "${CONTENTS}/Info.plist" <<'EOF'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0-dev</string>
+  <string>${DEV_VERSION}</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
