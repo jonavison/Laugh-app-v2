@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Resume playback where you left off: reopening a video (after quit or switching files) seeks back to the saved playhead. Positions under ~3s or near the end are ignored so finished videos start clean.
 - While a **video is playing**, LaughPlayer now prevents idle display/system sleep (same idea as QuickTime / Safari). Pause, images, and the empty library still allow sleep.
 - Playback diagnostics you can tail while a file plays: format probe (codec/audio/duration), route, remux/preview, and per-second buffer health (`starving` / `buffering` / `ready` / `full`) via `scripts/watch-playback-logs.sh`.
 - Unit tests for format reading (`FFmpegProbeParser`), buffer health, container routing, and media-kind detection. Run with `./scripts/test.sh`.
@@ -19,7 +20,8 @@ All notable changes to this project are documented in this file.
 - Image double-click toggles Fit ↔ Actual Size (does not enter fullscreen).
 
 ### Changed
-- Direct builds open `.mkv` / `.webm` / similar containers with **CompatibilityRemux** then **AVPlayer** (Metal) so picture stays in LaughPlayer. DirectMpv is not the display engine: mpv 0.41 cannot embed, and libmpv’s OpenGL render API blacks out on current macOS. DirectMpv remains opt-in (**ExtendedPlaybackForSubtitles**) or when remux is missing.
+- Direct builds open `.mkv` / `.webm` / similar containers with **CompatibilityRemux** then **AVPlayer** (Metal) so picture stays in LaughPlayer. DirectMpv is not the display engine: mpv 0.41 cannot embed, and libmpv’s OpenGL render API blacks out on current macOS. DirectMpv remains only when remux is missing — the former **ExtendedPlaybackForSubtitles** opt-in was removed.
+- Removed **Use extended playback for subtitles** from the Subtitles tab (it switched to DirectMpv and blacked out picture). Sidecar/external **.srt** / **.vtt** still work on native playback.
 - Progressive remux preview transcodes **AC-3** to stereo AAC (same as E-AC-3) so instant preview is not a 1 KB stub. Long AC-3/E-AC-3 rips skip that preview and wait for stream-copy remux instead of encoding the whole soundtrack.
 - Image studio develop state lives in **ImageAdjustSession** (params + section bypass + preview settle + Before/After presentation); sliders are a thin adapter; built-in Looks/Mood/Film recipes moved to `ImageAdjustPreset`.
 - **Reset All** sits in **ImageStudioCommitFooter** above Save Preset / Export (footer also when crop/straighten/rotation is active; Reset All clears develop adjusts and display geometry).

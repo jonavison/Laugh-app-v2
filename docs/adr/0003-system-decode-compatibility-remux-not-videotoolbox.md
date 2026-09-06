@@ -14,7 +14,7 @@ A separate question is whether **AlternateDecoder** should be in-player decode (
 
 1. **Primary / picture:** **NativePlaybackEngine** = **SystemDecodeStack** (AVPlayer, Metal). This is the 2026 display tool for LaughPlayer.
 2. **Direct-build alternate:** **CompatibilityRemux** via bundled FFmpeg (`FFmpegVideoFallback`) — stream copy to temp MP4, then **SystemDecodeStack**. Heavy transcode stays opt-in (`LAUGH_ENABLE_HEAVY_TRANSCODE`).
-3. **DirectMpv** is not used for picture. macOS mpv 0.41 removed `--wid`; cocoa-cb / macvk always opens its own window. libmpv’s public render API is still OpenGL (`CAOpenGLLayer`), which Apple deprecated and which currently presents black video here. DirectMpv remains an opt-in path (**ExtendedPlaybackForSubtitles**) until libmpv exposes a Metal / gpu-next render context.
+3. **DirectMpv** is not used for picture. macOS mpv 0.41 removed `--wid`; cocoa-cb / macvk always opens its own window. libmpv’s public render API is still OpenGL (`CAOpenGLLayer`), which Apple deprecated and which currently presents black video here. DirectMpv remains only when remux is unavailable — the former **ExtendedPlaybackForSubtitles** opt-in was removed so users are not pushed onto a black picture path.
 4. **App Store:** **SystemDecodeStack** only (no bundled mpv/remux per ADR 0002).
 
 mpv may use VideoToolbox as hwaccel internally; that is not “VideoToolbox instead of FFmpeg.”

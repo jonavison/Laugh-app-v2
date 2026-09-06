@@ -91,8 +91,8 @@ enum PlaybackRoutePlanner {
 
         // Picture is AVPlayer (Metal). libmpv's public render API is still OpenGL
         // (deprecated, black on current macOS); standalone mpv 0.41 cannot embed.
-        // DirectMpv stays only when remux is missing, or when the user forces it
-        // (ExtendedPlaybackForSubtitles).
+        // DirectMpv stays only when remux is missing (picture currently blacks out on
+        // opt-in subtitle paths, so those were removed).
         if remuxContainerExtensions.contains(ext) {
             if remuxAvailable {
                 return .compatibilityRemux(reason: "container.\(ext)")

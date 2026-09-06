@@ -8,9 +8,6 @@ final class SubtitlesSettingsControls {
     let secondaryTrackPopUp = NSPopUpButton()
     let loadExternalButton = NSButton(title: "Load file…", target: nil, action: nil)
     let externalFileLabel = NSTextField(labelWithString: "No external file")
-    let companionFilesLabel = NSTextField(labelWithString: "")
-    let extendedPlaybackButton = NSButton(title: "Use extended playback for subtitles", target: nil, action: nil)
-    let extendedOnlyLabel = NSTextField(labelWithString: "")
 
     let delaySlider = NSSlider(value: 0, minValue: SubtitleAppearanceStyle.delayMin, maxValue: SubtitleAppearanceStyle.delayMax, target: nil, action: nil)
     let delayValueLabel = NSTextField(labelWithString: "0.0 s")
@@ -36,24 +33,9 @@ final class SubtitlesSettingsControls {
             $0.setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
 
-        extendedOnlyLabel.font = .systemFont(ofSize: 11)
-        extendedOnlyLabel.textColor = .secondaryLabelColor
-        extendedOnlyLabel.maximumNumberOfLines = 0
-        extendedOnlyLabel.stringValue =
-            "Secondary subtitles, delay, styling, and sidecar load need extended playback (DirectMpv). Re-open via the button below when sidecars or embedded subs need mpv."
-
         externalFileLabel.font = .systemFont(ofSize: 11)
         externalFileLabel.textColor = .secondaryLabelColor
         externalFileLabel.lineBreakMode = .byTruncatingMiddle
-
-        companionFilesLabel.font = .systemFont(ofSize: 11)
-        companionFilesLabel.textColor = .secondaryLabelColor
-        companionFilesLabel.maximumNumberOfLines = 0
-        companionFilesLabel.isHidden = true
-
-        extendedPlaybackButton.bezelStyle = .rounded
-        extendedPlaybackButton.controlSize = .small
-        extendedPlaybackButton.isHidden = true
 
         loadExternalButton.bezelStyle = .rounded
         loadExternalButton.controlSize = .small
@@ -94,7 +76,6 @@ final class SubtitlesSettingsControls {
         LaughTheme.applySettingsAccentChrome(to: secondaryTrackPopUp)
         LaughTheme.applySettingsAccentChrome(to: backgroundEnabledCheckbox)
         LaughTheme.applySettingsAccentChrome(to: loadExternalButton)
-        LaughTheme.applySettingsAccentChrome(to: extendedPlaybackButton)
         LaughTheme.applySettingsAccentChrome(to: resetAppearanceButton)
     }
 
@@ -177,28 +158,12 @@ final class SubtitlesSettingsControls {
     func setMpvExclusiveControlsEnabled(_ extended: Bool) {
         secondaryEnabledSwitch.isEnabled = extended
         secondaryTrackPopUp.isEnabled = extended
-        loadExternalButton.isEnabled = extended
-    }
-
-    func updateExtendedHint(extendedActive: Bool, nativePlayback: Bool) {
-        if extendedActive {
-            extendedOnlyLabel.isHidden = true
-            return
-        }
-        extendedOnlyLabel.isHidden = false
-        if nativePlayback {
-            extendedOnlyLabel.stringValue =
-                "Font, color, position, and scale apply while you adjust the sliders. Subtitle delay and bitmap (PGS) subs need extended playback — use the button above."
-        } else {
-            extendedOnlyLabel.stringValue =
-                "Subtitle timing and styling need extended playback. Use the button above to switch."
-        }
+        loadExternalButton.isEnabled = true
     }
 
     /// Legacy name — enables appearance sliders only.
     func setExtendedControlsEnabled(_ enabled: Bool) {
         setAppearanceControlsEnabled(enabled)
         setMpvExclusiveControlsEnabled(enabled)
-        extendedOnlyLabel.isHidden = enabled
     }
 }

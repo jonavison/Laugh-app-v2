@@ -116,7 +116,7 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
     }
 
     private func configureSubviews() {
-        configureToolbarButton(addFolderButton, symbol: "plus", toolTip: "Add folder…", tint: LaughTheme.accent)
+        configureToolbarButton(addFolderButton, symbol: "plus", toolTip: "Add folder…", tint: .secondaryLabelColor)
         configureToolbarButton(removeFolderButton, symbol: "minus", toolTip: "Remove selected folder", tint: .secondaryLabelColor)
         addFolderButton.target = self
         addFolderButton.action = #selector(addFolderPressed)

@@ -46,17 +46,35 @@ enum SettingsSectionStyle {
         return NSColor.black.withAlphaComponent(0.028)
     }
 
-    /// Expanded Edits content — soft frosted base (mostly transparent).
+    /// Expanded collapsible content — soft even wash (no dark bottom falloff).
     static func editsGlassTint(appearance: NSAppearance = NSApp.effectiveAppearance) -> NSColor {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // Keep the wash light so the bottom-trailing corner doesn’t go muddy.
-        return NSColor.black.withAlphaComponent(isDark ? 0.12 : 0.035)
+        // Lift in dark mode (white), whisper shade in light — never a heavy black veil.
+        if isDark {
+            return NSColor.white.withAlphaComponent(0.055)
+        }
+        return NSColor.black.withAlphaComponent(0.03)
     }
 
     /// Soft specular highlight for glass depth (top → clear).
     static func editsGlassHighlight(appearance: NSAppearance = NSApp.effectiveAppearance) -> NSColor {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return NSColor.white.withAlphaComponent(isDark ? 0.08 : 0.20)
+        return NSColor.white.withAlphaComponent(isDark ? 0.06 : 0.16)
+    }
+
+    /// Full-width bottom lift so the lower edge stays as light as the top.
+    static func editsGlassBottomLift(appearance: NSAppearance = NSApp.effectiveAppearance) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return NSColor.white.withAlphaComponent(isDark ? 0.08 : 0.10)
+    }
+
+    /// Soft even accent underlay — restores color without darkening the bottom.
+    static func editsGlassAccentFill(
+        tint: NSColor,
+        appearance: NSAppearance = NSApp.effectiveAppearance
+    ) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return tint.withAlphaComponent(isDark ? 0.07 : 0.045)
     }
 
     /// Quiet accent veil — color present, not dominant.
@@ -65,7 +83,7 @@ enum SettingsSectionStyle {
         appearance: NSAppearance = NSApp.effectiveAppearance
     ) -> NSColor {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return tint.withAlphaComponent(isDark ? 0.09 : 0.06)
+        return tint.withAlphaComponent(isDark ? 0.12 : 0.08)
     }
 
     /// Even quieter accent for the fade end of the wash gradient.
@@ -74,7 +92,7 @@ enum SettingsSectionStyle {
         appearance: NSAppearance = NSApp.effectiveAppearance
     ) -> NSColor {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return tint.withAlphaComponent(isDark ? 0.03 : 0.02)
+        return tint.withAlphaComponent(isDark ? 0.04 : 0.03)
     }
 
     /// Card fill when sitting inside the content glass plate — keep clear.
@@ -99,19 +117,22 @@ enum SettingsSectionStyle {
     ) -> NSColor {
         let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         if let tint {
-            return tint.withAlphaComponent(isDark ? 0.10 : 0.07)
+            return tint.withAlphaComponent(isDark ? 0.18 : 0.14)
         }
-        return NSColor.white.withAlphaComponent(isDark ? 0.04 : 0.07)
+        return NSColor.white.withAlphaComponent(isDark ? 0.06 : 0.08)
     }
 }
 
-/// Soft frosted glass plate for expanded Edits content panels.
-final class SettingsGlassPlateView: NSVisualEffectView {
+/// Soft glass plate for expanded collapsible content — light base with a clear accent wash.
+final class SettingsGlassPlateView: NSView {
     private let tintOverlay = NSView()
+    private let accentFillOverlay = NSView()
     private let accentOverlay = NSView()
     private let accentGradient = CAGradientLayer()
     private let highlightOverlay = NSView()
     private let highlightGradient = CAGradientLayer()
+    private let liftOverlay = NSView()
+    private let liftGradient = CAGradientLayer()
     /// Inset stroke — avoids `masksToBounds` clipping a centered `borderWidth` rim.
     private let rimLayer = CAShapeLayer()
     var accentTint: NSColor? {
@@ -130,16 +151,12 @@ final class SettingsGlassPlateView: NSVisualEffectView {
 
     private func commonInit() {
         translatesAutoresizingMaskIntoConstraints = false
-        // Lighter frosted material — more glass, less opaque panel.
-        material = .popover
-        blendingMode = .withinWindow
-        state = .active
         wantsLayer = true
         layer?.cornerRadius = SettingsSectionStyle.cornerRadius
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
 
-        for view in [tintOverlay, accentOverlay, highlightOverlay] {
+        for view in [tintOverlay, accentFillOverlay, accentOverlay, highlightOverlay, liftOverlay] {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.wantsLayer = true
             view.layer?.cornerRadius = SettingsSectionStyle.cornerRadius
@@ -155,16 +172,21 @@ final class SettingsGlassPlateView: NSVisualEffectView {
         }
 
         accentOverlay.layer?.masksToBounds = true
-        // Soft diagonal color wash — stronger at top-leading, clears before bottom-trailing.
+        // Soft diagonal color wash — stronger at top-leading, clears before bottom.
         accentGradient.startPoint = CGPoint(x: 0, y: 1)
-        accentGradient.endPoint = CGPoint(x: 0.85, y: 0.2)
+        accentGradient.endPoint = CGPoint(x: 0.85, y: 0.25)
         accentOverlay.layer?.addSublayer(accentGradient)
 
         highlightOverlay.layer?.masksToBounds = true
-        // Specular reaches farther down so the lower edge doesn’t go flat-dark.
         highlightGradient.startPoint = CGPoint(x: 0.5, y: 1)
-        highlightGradient.endPoint = CGPoint(x: 0.5, y: 0.15)
+        highlightGradient.endPoint = CGPoint(x: 0.5, y: 0.35)
         highlightOverlay.layer?.addSublayer(highlightGradient)
+
+        liftOverlay.layer?.masksToBounds = true
+        // Full-width bottom lift — keeps the lower edge from reading darker than the top.
+        liftGradient.startPoint = CGPoint(x: 0.5, y: 0)
+        liftGradient.endPoint = CGPoint(x: 0.5, y: 0.45)
+        liftOverlay.layer?.addSublayer(liftGradient)
 
         rimLayer.fillColor = nil
         rimLayer.lineWidth = 0.5
@@ -179,6 +201,7 @@ final class SettingsGlassPlateView: NSVisualEffectView {
         super.layout()
         accentGradient.frame = accentOverlay.bounds
         highlightGradient.frame = highlightOverlay.bounds
+        liftGradient.frame = liftOverlay.bounds
         updateRimPath()
     }
 
@@ -192,7 +215,6 @@ final class SettingsGlassPlateView: NSVisualEffectView {
             rimLayer.path = nil
             return
         }
-        // Keep the full stroke inside bounds so corner masks never shave the rim.
         let inset = rimLayer.lineWidth / 2 + 0.25
         let rect = bounds.insetBy(dx: inset, dy: inset)
         let radius = max(0, SettingsSectionStyle.cornerRadius - inset)
@@ -210,7 +232,12 @@ final class SettingsGlassPlateView: NSVisualEffectView {
         tintOverlay.layer?.backgroundColor = SettingsSectionStyle.editsGlassTint(appearance: appearance).cgColor
 
         if let accentTint {
+            accentFillOverlay.isHidden = false
             accentOverlay.isHidden = false
+            accentFillOverlay.layer?.backgroundColor = SettingsSectionStyle.editsGlassAccentFill(
+                tint: accentTint,
+                appearance: appearance
+            ).cgColor
             let strong = SettingsSectionStyle.editsGlassAccentWash(tint: accentTint, appearance: appearance)
             let soft = SettingsSectionStyle.editsGlassAccentWashSoft(tint: accentTint, appearance: appearance)
             accentGradient.colors = [
@@ -218,14 +245,15 @@ final class SettingsGlassPlateView: NSVisualEffectView {
                 soft.cgColor,
                 NSColor.clear.cgColor
             ]
-            // Clear sooner so bottom-trailing stays open/light.
-            accentGradient.locations = [0, 0.38, 0.78] as [NSNumber]
+            // Color across most of the plate; clear only near the bottom edge.
+            accentGradient.locations = [0, 0.45, 0.88] as [NSNumber]
         } else {
+            accentFillOverlay.isHidden = true
             accentOverlay.isHidden = true
+            accentFillOverlay.layer?.backgroundColor = nil
             accentGradient.colors = nil
         }
 
-        // Resolve through the current appearance so alpha is preserved on the stroke.
         var stroke = SettingsSectionStyle.editsGlassBorder(
             tint: accentTint,
             appearance: appearance
@@ -246,9 +274,18 @@ final class SettingsGlassPlateView: NSVisualEffectView {
             highlight.cgColor,
             NSColor.clear.cgColor
         ]
+        highlightGradient.locations = [0, 1] as [NSNumber]
+
+        let lift = SettingsSectionStyle.editsGlassBottomLift(appearance: appearance)
+        liftGradient.colors = [
+            lift.cgColor,
+            NSColor.clear.cgColor
+        ]
+        liftGradient.locations = [0, 1] as [NSNumber]
 
         accentGradient.frame = accentOverlay.bounds
         highlightGradient.frame = highlightOverlay.bounds
+        liftGradient.frame = liftOverlay.bounds
     }
 }
 
@@ -403,7 +440,7 @@ final class SettingsSectionCard: NSView {
     private let backgroundView = NSView()
     private let contentStack = NSStackView()
     private var accentTint: NSColor?
-    /// When true, use the darker Edits glass fill instead of the light settings wash.
+    /// When true, sit inside the frosted glass plate (clear fill, no extra border).
     var usesEditsGlassFill = false {
         didSet { applyChromeToBackground() }
     }
@@ -547,7 +584,8 @@ enum SettingsSectionBuilder {
 
         let accent = SettingsSectionStyle.rainbowAccent(at: accentIndex)
         let card = SettingsSectionCard()
-        card.usesEditsGlassFill = showsSectionEditActions
+        // Same frosted glass body for video (Audio/Subtitles/…) and image Edits.
+        card.usesEditsGlassFill = true
         configure(card)
         card.setAccentTint(accent)
 
@@ -567,9 +605,9 @@ enum SettingsSectionBuilder {
 }
 
 /// Titled disclosure header wrapping a `SettingsSectionCard` of edit controls.
-/// Glass styling applies only to the expanded content body — not the header row.
+/// Frosted glass wraps only the expanded content body — not the header row.
 final class CollapsibleSettingsSectionView: NSView {
-    private let contentGlassPlate: SettingsGlassPlateView?
+    private let contentGlassPlate = SettingsGlassPlateView()
     private let headerButton = NSButton(title: "", target: nil, action: nil)
     private let headerChrome = SectionHeaderChromeView()
     private let iconView = NSImageView()
@@ -611,7 +649,6 @@ final class CollapsibleSettingsSectionView: NSView {
         self.accentIndex = accentIndex
         self.isExpanded = expanded
         self.showsSectionEditActions = showsSectionEditActions
-        self.contentGlassPlate = showsSectionEditActions ? SettingsGlassPlateView() : nil
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         build(title: title)
@@ -821,32 +858,20 @@ final class CollapsibleSettingsSectionView: NSView {
 
         // Glass wraps only the expanded content — header row stays plain.
         // Pin top only (not bottom) so height animation clips/reveals without vertically stretching the glass.
-        if let contentGlassPlate {
-            contentGlassPlate.addSubview(card)
-            bodyClip.addSubview(contentGlassPlate)
-            NSLayoutConstraint.activate([
-                contentGlassPlate.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
-                contentGlassPlate.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
-                contentGlassPlate.topAnchor.constraint(
-                    equalTo: bodyClip.topAnchor,
-                    constant: SettingsSectionStyle.headerToCardSpacing
-                ),
-                card.leadingAnchor.constraint(equalTo: contentGlassPlate.leadingAnchor),
-                card.trailingAnchor.constraint(equalTo: contentGlassPlate.trailingAnchor),
-                card.topAnchor.constraint(equalTo: contentGlassPlate.topAnchor),
-                card.bottomAnchor.constraint(equalTo: contentGlassPlate.bottomAnchor)
-            ])
-        } else {
-            bodyClip.addSubview(card)
-            NSLayoutConstraint.activate([
-                card.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
-                card.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
-                card.topAnchor.constraint(
-                    equalTo: bodyClip.topAnchor,
-                    constant: SettingsSectionStyle.headerToCardSpacing
-                )
-            ])
-        }
+        contentGlassPlate.addSubview(card)
+        bodyClip.addSubview(contentGlassPlate)
+        NSLayoutConstraint.activate([
+            contentGlassPlate.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor),
+            contentGlassPlate.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor),
+            contentGlassPlate.topAnchor.constraint(
+                equalTo: bodyClip.topAnchor,
+                constant: SettingsSectionStyle.headerToCardSpacing
+            ),
+            card.leadingAnchor.constraint(equalTo: contentGlassPlate.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: contentGlassPlate.trailingAnchor),
+            card.topAnchor.constraint(equalTo: contentGlassPlate.topAnchor),
+            card.bottomAnchor.constraint(equalTo: contentGlassPlate.bottomAnchor)
+        ])
         bodyHeightConstraint = bodyClip.heightAnchor.constraint(equalToConstant: 0)
         bodyHeightConstraint.priority = .required
 
@@ -920,7 +945,7 @@ final class CollapsibleSettingsSectionView: NSView {
             : NSColor.secondaryLabelColor
         bypassButton.contentTintColor = actionTint
         restoreButton.contentTintColor = .secondaryLabelColor
-        contentGlassPlate?.accentTint = accent
+        contentGlassPlate.accentTint = accent
         card.setAccentTint(accent)
     }
 
@@ -1051,13 +1076,12 @@ final class CollapsibleSettingsSectionView: NSView {
         let target = measuredBodyHeight()
         bodyHeightConstraint.isActive = true
         bodyHeightConstraint.constant = 0
-        let fadeTarget = contentGlassPlate ?? card
-        fadeTarget.alphaValue = 0
+        contentGlassPlate.alphaValue = 0
         layoutSubtreeIfNeeded()
 
         guard animated else {
             bodyHeightConstraint.constant = target
-            fadeTarget.alphaValue = 1
+            contentGlassPlate.alphaValue = 1
             return
         }
 
@@ -1067,7 +1091,7 @@ final class CollapsibleSettingsSectionView: NSView {
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             self.bodyHeightConstraint.animator().constant = target
-            fadeTarget.animator().alphaValue = 1
+            self.contentGlassPlate.animator().alphaValue = 1
         }, completionHandler: { [weak self] in
             self?.isAnimatingExpand = false
         })
@@ -1077,13 +1101,12 @@ final class CollapsibleSettingsSectionView: NSView {
         bodyHeightConstraint.isActive = true
         let current = max(bodyClip.bounds.height, bodyHeightConstraint.constant, measuredBodyHeight())
         bodyHeightConstraint.constant = current
-        let fadeTarget = contentGlassPlate ?? card
-        fadeTarget.alphaValue = 1
+        contentGlassPlate.alphaValue = 1
         layoutSubtreeIfNeeded()
 
         guard animated else {
             bodyHeightConstraint.constant = 0
-            fadeTarget.alphaValue = 1
+            contentGlassPlate.alphaValue = 1
             return
         }
 
@@ -1093,9 +1116,9 @@ final class CollapsibleSettingsSectionView: NSView {
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             self.bodyHeightConstraint.animator().constant = 0
-            fadeTarget.animator().alphaValue = 0
+            self.contentGlassPlate.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            fadeTarget.alphaValue = 1
+            self?.contentGlassPlate.alphaValue = 1
             self?.isAnimatingExpand = false
         })
     }

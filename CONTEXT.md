@@ -35,6 +35,10 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 `VideoMedia` is an active video item. Video playback controls are shown; settings use video-oriented tabs.
 
+## PlaybackResume
+
+`PlaybackResume` restores the playhead when the user reopens a **VideoMedia** file after quitting, stopping, or switching away. Positions are keyed by source path (not remux cache), ignored under ~3s, and cleared near the end so finished videos start clean. Explicit handoff times (remux / engine switch) still win over the stored resume.
+
 ## ImageMedia
 
 `ImageMedia` is an active still-image item. Image-oriented controls are shown instead of video playback controls. The image stays in the main container (not a separate fullscreen photo mode); the left **MediaLibraryPanel** remains toggleable.
@@ -165,11 +169,11 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## CompatibilityRemux
 
-`CompatibilityRemux` is an **AlternateDecoder** step that produces a temporary MP4 the **SystemDecodeStack** can open, preferring stream copy without re-encoding video. Embedded **text** subtitles (for example SRT in MKV) are muxed as `mov_text` so **NativePlaybackEngine** can expose them via `.legible`; bitmap/image subs and sidecar-only files still require **DirectMpv** or **ExtendedPlaybackForSubtitles**.
+`CompatibilityRemux` is an **AlternateDecoder** step that produces a temporary MP4 the **SystemDecodeStack** can open, preferring stream copy without re-encoding video. Embedded **text** subtitles (for example SRT in MKV) are muxed as `mov_text` so **NativePlaybackEngine** can expose them via `.legible`. Sidecar **.srt** / **.vtt** files play via the native subtitle overlay; ASS/SSA and bitmap (PGS) subs are not offered as a DirectMpv opt-in because **DirectMpv** picture currently blacks out on this macOS.
 
 ## AlternateDecoder
 
-`AlternateDecoder` is a secondary path for profiles **SystemDecodeStack** cannot open directly. On direct builds the default is **CompatibilityRemux** via bundled FFmpeg into a temp MP4, then **NativePlaybackEngine** (AVPlayer / Metal). **DirectMpv** is not the picture engine: Homebrew mpv 0.41 cannot embed (`--wid` gone; cocoa-cb always opens its own window), and libmpv’s public render API is still OpenGL, which is deprecated and currently blacks out on this macOS. DirectMpv remains only when remux is unavailable or the user chooses **ExtendedPlaybackForSubtitles**.
+`AlternateDecoder` is a secondary path for profiles **SystemDecodeStack** cannot open directly. On direct builds the default is **CompatibilityRemux** via bundled FFmpeg into a temp MP4, then **NativePlaybackEngine** (AVPlayer / Metal). **DirectMpv** is not the picture engine: Homebrew mpv 0.41 cannot embed (`--wid` gone; cocoa-cb always opens its own window), and libmpv’s public render API is still OpenGL, which is deprecated and currently blacks out on this macOS. DirectMpv remains only when remux is unavailable.
 
 ## TryThenFailPolicy
 
@@ -269,19 +273,15 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## CompanionSubtitleFile
 
-`CompanionSubtitleFile` is a sidecar subtitle file on disk associated with the current **VideoMedia** by **CompanionSubtitleDiscovery** rules—not chosen through the load dialog. On **DirectMpv**, every discovered file is auto-attached and appears in **SubtitleTrackPicker** (language inferred from filename when present); **PrimarySubtitleTrack** stays off until the user enables it. On **NativePlaybackEngine**, companions are listed but not playable until the user chooses **ExtendedPlaybackForSubtitles**. Distinct from **EmbeddedSubtitleTrack** and from user-picked **ExternalSubtitleFile**.
+`CompanionSubtitleFile` is a sidecar subtitle file on disk associated with the current **VideoMedia** by **CompanionSubtitleDiscovery** rules—not chosen through the load dialog. On **NativePlaybackEngine**, **.srt** / **.vtt** companions are playable via the native subtitle overlay and appear in **SubtitleTrackPicker**; **PrimarySubtitleTrack** stays off until the user enables it. ASS/SSA companions may be listed but are not playable while DirectMpv picture is unavailable. Distinct from **EmbeddedSubtitleTrack** and from user-picked **ExternalSubtitleFile**.
 
 ## CompanionSubtitleDiscovery
 
 `CompanionSubtitleDiscovery` is how LaughPlayer finds **CompanionSubtitleFile**s for the open **VideoMedia**: case-insensitive basename match; extensions `.srt`, `.vtt`, `.ass`, `.ssa`; optional language tag (two–three letters or common names such as English) and optional `forced` before the extension. Search locations are the media folder, a sibling flat `Subs/` or `subtitles/` folder, and `Subs/<basename>/` or `subtitles/<basename>/` (Plex-style per-title folder)—not a recursive library-wide scan. Inside a per-title folder only that episode’s files are considered (any subtitle extension; language parsed from names like `2_English.srt`). A flat `Subs/` or `subtitles/` folder beside the video also accepts loose names (e.g. `3_English.srt` for a single movie). The media folder itself still requires basename match so unrelated sidecars are not picked up. All matches are attached; the user chooses among them in **SubtitleTrackPicker**.
 
-## ExtendedPlaybackForSubtitles
-
-`ExtendedPlaybackForSubtitles` is reloading the current **VideoMedia** on **DirectMpv** at the same playhead so **CompanionSubtitleFile**s or full **SubtitlesSettings** can apply, without changing the user’s default **PlaybackRoute** for files that play natively. Offered from **SubtitlesSettings** when sidecars exist but the active session is **NativePlaybackEngine**, or when the user wants to retry **DirectMpv** after **CompatibilityRemux** fallback. Play/pause state and playhead time are preserved.
-
 ## SubtitlesSettings
 
-`SubtitlesSettings` is the right-settings **Subtitles** tab: track pickers with on/off toggles, **CompanionSubtitleFile** discovery, **ExtendedPlaybackForSubtitles**, manual **ExternalSubtitleFile** load, delay (−5s to +5s), vertical position, scale, and **SubtitleAppearance** (font size/color, border width/color, background on/off + color). **PrimarySubtitleTrack** and **SecondarySubtitleTrack** default off until the user enables them. Full subtitle controls apply on **DirectMpv**; **NativePlaybackEngine** supports embedded **SubtitleTrackPicker** only—companions and extended controls show an unavailable note or **ExtendedPlaybackForSubtitles** when sidecars exist.
+`SubtitlesSettings` is the right-settings **Subtitles** tab: **PrimarySubtitleTrack** picker, **SecondarySubtitleTrack** (shown only if a DirectMpv session is already active), **ExternalSubtitleFile** load (.srt / .vtt on native), delay (−5s to +5s), vertical position, scale, and **SubtitleAppearance**. Sidecar discovery stays automatic — matches appear in **SubtitleTrackPicker**. There is no user-facing **ExtendedPlaybackForSubtitles** switch: DirectMpv picture currently blacks out, so LaughPlayer stays on **NativePlaybackEngine** for normal playback.
 
 ## SubtitleTrackPicker
 
@@ -297,7 +297,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## ExternalSubtitleFile
 
-`ExternalSubtitleFile` is a subtitle file the user explicitly chose via the load dialog (any path), added to the current **DirectMpv** session. Distinct from **CompanionSubtitleFile**, which is found automatically beside the media. After load, the track appears in **SubtitleTrackPicker**.
+`ExternalSubtitleFile` is a subtitle file the user explicitly chose via the load dialog (any path). On **NativePlaybackEngine**, **.srt** / **.vtt** files play through the native subtitle overlay; after load, the file name is shown under Tracks. Distinct from **CompanionSubtitleFile**, which is found automatically beside the media.
 
 ## SubtitleAppearance
 
