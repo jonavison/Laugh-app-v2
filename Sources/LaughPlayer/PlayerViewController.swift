@@ -123,7 +123,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var secondarySubtitlesEnabled = false
     private var lastExternalSubtitlePath: String?
     private var pendingCompanionSubtitlePath: String?
-    private var secondarySubtitlesBlock: NSView?
     private var userDisabledSubtitlesForSourcePath: String?
     private var cachedDiscoveredCompanions: [DiscoveredCompanionSubtitle] = []
     private let subtitlesTabView = NSStackView()
@@ -4654,19 +4653,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         externalRow.addArrangedSubview(s.externalFileLabel)
 
         addPlaybackSettingsSection(to: subtitlesTabView, title: "Tracks", symbolName: "captions.bubble", isFirst: true) { card in
-            let primaryBlock = self.makeSettingsSubtitleTrackBlock(
+            card.addRow(self.makeSettingsSubtitleTrackBlock(
                 title: "Primary",
                 toggle: s.primaryEnabledSwitch,
                 popUp: s.primaryTrackPopUp
-            )
-            let secondaryBlock = self.makeSettingsSubtitleTrackBlock(
-                title: "Secondary",
-                toggle: s.secondaryEnabledSwitch,
-                popUp: s.secondaryTrackPopUp
-            )
-            self.secondarySubtitlesBlock = secondaryBlock
-            card.addRow(primaryBlock)
-            card.addRow(secondaryBlock)
+            ))
             card.addFinalRow(SettingsRowFactory.fullWidthRow(externalRow))
         }
 
@@ -5811,19 +5802,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updateCompanionSubtitlesUI(allowHeavyProbe: Bool = true) {
+        // Tracks no longer lists Secondary (DirectMpv-only dual subs); keep this hook for probes.
         _ = allowHeavyProbe
-        // Secondary is mpv-only (dual subs). Hide it on native AVPlayer so Tracks stays simple.
-        let extendedActive = mpvBackendActive && mpvPlaybackStarted
-        secondarySubtitlesBlock?.isHidden = !extendedActive
-        if let secondary = secondarySubtitlesBlock,
-           let stack = secondary.superview as? NSStackView,
-           let index = stack.arrangedSubviews.firstIndex(of: secondary),
-           index + 1 < stack.arrangedSubviews.count {
-            let maybeSeparator = stack.arrangedSubviews[index + 1]
-            if maybeSeparator is NSBox {
-                maybeSeparator.isHidden = !extendedActive
-            }
-        }
     }
 
     @MainActor

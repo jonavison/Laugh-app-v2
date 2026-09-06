@@ -281,7 +281,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## SubtitlesSettings
 
-`SubtitlesSettings` is the right-settings **Subtitles** tab: **PrimarySubtitleTrack** picker, **SecondarySubtitleTrack** (shown only if a DirectMpv session is already active), **ExternalSubtitleFile** load (.srt / .vtt on native), delay (−5s to +5s), vertical position, scale, and **SubtitleAppearance**. Sidecar discovery stays automatic — matches appear in **SubtitleTrackPicker**. There is no user-facing **ExtendedPlaybackForSubtitles** switch: DirectMpv picture currently blacks out, so LaughPlayer stays on **NativePlaybackEngine** for normal playback.
+`SubtitlesSettings` is the right-settings **Subtitles** tab: **PrimarySubtitleTrack** picker, **ExternalSubtitleFile** load (.srt / .vtt on native), delay (−5s to +5s), vertical position, scale, and **SubtitleAppearance**. Sidecar discovery stays automatic — matches appear in **SubtitleTrackPicker**. **SecondarySubtitleTrack** is not shown in Tracks while DirectMpv picture is unavailable. There is no user-facing **ExtendedPlaybackForSubtitles** switch.
 
 ## SubtitleTrackPicker
 
