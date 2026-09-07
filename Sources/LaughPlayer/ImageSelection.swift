@@ -585,21 +585,27 @@ enum SelectionPersonPriorGate {
         sam: CIImage,
         prior: CIImage,
         extent: CGRect,
-        context: CIContext
+        context: CIContext,
+        subjectBox: CGRect? = nil,
+        closingFraction: Double = 0.04,
+        slackFraction: Double = 0.05
     ) -> CIImage {
         guard coverage(of: prior, extent: extent, context: context) >= minimumPriorCoverage else {
             return sam
         }
-        let longEdge = max(extent.width, extent.height)
+        // Scale to the subject, not the frame. A person 700px wide in a 4288px photo needs
+        // tens of pixels of slack, not hundreds: image-scaled radii close over an occluder
+        // the size of a plant leaf, which readmits exactly what the gate exists to veto.
+        let reference = subjectBox.map { Double(min($0.width, $0.height)) }
+            ?? Double(max(extent.width, extent.height))
         // Slack is a tradeoff measured on group photos: too little vetoes subject regions
-        // the segmenter missed (dark clothing), too much readmits the occluder. 5% keeps
-        // the subject whole while dropping occluder area that reaches beyond the envelope.
-        let slack = Float(max(4.0, longEdge * 0.05))
+        // the segmenter missed (dark clothing), too much readmits the occluder.
+        let slack = Float(max(4.0, reference * slackFraction))
         // Close before dilating: the prior is used as a silhouette envelope, and the
         // segmenter routinely drops interior regions it cannot read (dark clothing against
         // a dark background). Closing refills those without pushing the outer boundary
         // outward — a blur would fill the holes but also readmit the occluder.
-        let closing = Float(max(6.0, longEdge * 0.04))
+        let closing = Float(max(6.0, reference * closingFraction))
         let envelope = prior
             .clampedToExtent()
             .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: closing])

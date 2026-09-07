@@ -17,7 +17,7 @@ enum SelectionPromptBuilder {
         imageExtent: CGRect,
         exclusion: SelectionMask? = nil,
         positiveCount: Int = 4,
-        negativeCount: Int = 6,
+        negativeCount: Int = 8,
         onThreshold: UInt8 = 140,
         offThreshold: UInt8 = 40
     ) -> SelectionPrompt {
@@ -60,20 +60,62 @@ enum SelectionPromptBuilder {
             height: CGFloat(min(height - 1, maxY + pad) - max(0, minY - pad) + 1)
         )
 
-        // Prefer interior samples: require a small neighborhood also on-mask.
-        let radius = max(1, min(width, height) / 80)
+        // Positives must sit as deep inside the subject as the shape allows. A subject is a
+        // solid body with thin structures hanging off it, and a small neighbourhood test
+        // accepts those: scanning row-major then lands every positive in the hair mass at
+        // the top of the person, and hair positives make SAM return an edge-ish region that
+        // drops the face — measured at 47% of one subject's interior lost. Widest depth
+        // that still yields samples wins, so thin subjects degrade instead of failing.
+        let shortSide = Double(min(box.width, box.height))
+        let probeStep = max(1, Int(shortSide) / 24)
+        var core: [Int] = []
+        for depthFraction in [0.30, 0.22, 0.16, 0.11, 0.07, 0.04, 0.02] {
+            let radius = max(2, Int(depthFraction * shortSide))
+            var atDepth: [Int] = []
+            var y = minY
+            while y <= maxY {
+                var x = minX
+                while x <= maxX {
+                    if isDeepInterior(
+                        x: x,
+                        y: y,
+                        width: width,
+                        height: height,
+                        pixels: pixels,
+                        threshold: onThreshold,
+                        radius: radius
+                    ) {
+                        atDepth.append(y * width + x)
+                    }
+                    x += probeStep
+                }
+                y += probeStep
+            }
+            if atDepth.isEmpty { continue }
+            // Keep the deepest samples found so far, and stop as soon as a depth offers
+            // enough of them to spread across the subject.
+            if core.isEmpty { core = atDepth }
+            if atDepth.count >= positiveCount {
+                core = atDepth
+                break
+            }
+        }
+
         var interior: [CGPoint] = []
         interior.reserveCapacity(positiveCount)
-        let step = max(1, onIndices.count / max(positiveCount * 4, 1))
-        var i = 0
-        while i < onIndices.count && interior.count < positiveCount {
-            let idx = onIndices[i]
-            let x = idx % width
-            let y = idx / width
-            if isInterior(x: x, y: y, width: width, height: height, pixels: pixels, threshold: onThreshold, radius: radius) {
-                interior.append(CGPoint(x: extent.minX + CGFloat(x) + 0.5, y: extent.minY + CGFloat(y) + 0.5))
-            }
-            i += step
+        // Even stride across the core spreads the points without chasing extremities, which
+        // is what a farthest-first spread would do.
+        let coreStep = max(1, core.count / positiveCount)
+        var coreIndex = 0
+        while coreIndex < core.count && interior.count < positiveCount {
+            let idx = core[coreIndex]
+            interior.append(
+                CGPoint(
+                    x: extent.minX + CGFloat(idx % width) + 0.5,
+                    y: extent.minY + CGFloat(idx / width) + 0.5
+                )
+            )
+            coreIndex += coreStep
         }
         if interior.isEmpty {
             // Fallback: any on-mask samples.
@@ -91,13 +133,19 @@ enum SelectionPromptBuilder {
         var negatives: [CGPoint] = []
         negatives.reserveCapacity(negativeCount)
 
+        // Split the budget explicitly. Neighbouring people and occluders inside the box are
+        // different jobs, and letting the first tier take what it likes starves the second:
+        // one shared pool left a plant in front of a group with no negative on it at all.
+        let neighbourBudget = min(2, negativeCount / 3)
+        let occluderBudget = max(2, negativeCount / 2)
+
         // Neighbouring people first: these are the negatives that keep per-instance
         // prompts from collapsing back into one group blob where boxes overlap.
         if let exclusionPixels {
             // Contested pixels inside the box matter most, then the ring around it, then
             // anywhere — a far-off neighbour still deserves one "not this person" point.
-            let margin = max(pad, min(width, height) / 8)
-            let searchStep = max(1, min(width, height) / 24)
+            let margin = max(pad, Int(shortSide * 0.15))
+            let searchStep = max(1, Int(shortSide / 20))
             var insideBox: [CGPoint] = []
             var nearBox: [CGPoint] = []
             var elsewhere: [CGPoint] = []
@@ -121,7 +169,7 @@ enum SelectionPromptBuilder {
                 }
                 ny += searchStep
             }
-            for point in farthestFirst(insideBox + nearBox + elsewhere, limit: min(3, negativeCount)) {
+            for point in farthestFirst(insideBox + nearBox + elsewhere, limit: neighbourBudget) {
                 negatives.append(
                     CGPoint(x: extent.minX + point.x + 0.5, y: extent.minY + point.y + 0.5)
                 )
@@ -132,8 +180,12 @@ enum SelectionPromptBuilder {
         // outside-box negatives, and the box prompt actively encourages SAM to fill them.
         // Sample background from *within* the box, keeping clear of the subject boundary so
         // a rough mask that undershoots (missed hair) cannot veto real subject pixels.
-        let clearRadius = max(2, min(width, height) / 40)
-        let gridStep = max(1, min(width, height) / 16)
+        // Scale the search to the subject, not the frame: an image-scaled clear radius (71px
+        // on a 4288px photo) can only be satisfied by wide-open background, so an occluder
+        // *surrounded* by the subject — a leaf across someone's chest — never gets a
+        // negative and SAM keeps it. Measured: 40% of the selection was plant.
+        let clearRadius = max(2, Int(shortSide * 0.03))
+        let gridStep = max(1, Int(shortSide / 20))
         var insideCandidates: [CGPoint] = []
         var y = minY
         while y <= maxY {
@@ -154,7 +206,7 @@ enum SelectionPromptBuilder {
             }
             y += gridStep
         }
-        for point in farthestFirst(insideCandidates, limit: max(0, negativeCount - 2 - negatives.count)) {
+        for point in farthestFirst(insideCandidates, limit: occluderBudget) {
             negatives.append(
                 CGPoint(x: extent.minX + point.x + 0.5, y: extent.minY + point.y + 0.5)
             )
@@ -247,7 +299,10 @@ enum SelectionPromptBuilder {
         return chosen
     }
 
-    private static func isInterior(
+    /// True when the mask still covers the point at `radius` in every direction — the point
+    /// is `radius` deep inside the subject rather than in a strand, a hand, or an edge ramp.
+    /// Samples two rings instead of the full disc, which is 24 reads instead of `radius²`.
+    private static func isDeepInterior(
         x: Int,
         y: Int,
         width: Int,
@@ -256,10 +311,13 @@ enum SelectionPromptBuilder {
         threshold: UInt8,
         radius: Int
     ) -> Bool {
-        for dy in -radius...radius {
-            for dx in -radius...radius {
-                let nx = x + dx
-                let ny = y + dy
+        let directions = 16
+        for scale in [1.0, 0.5] {
+            let r = Double(radius) * scale
+            for step in 0..<directions {
+                let angle = 2 * Double.pi * Double(step) / Double(directions)
+                let nx = x + Int((cos(angle) * r).rounded())
+                let ny = y + Int((sin(angle) * r).rounded())
                 if nx < 0 || ny < 0 || nx >= width || ny >= height { return false }
                 if pixels[ny * width + nx] < threshold { return false }
             }

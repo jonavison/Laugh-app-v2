@@ -73,6 +73,47 @@ final class SelectionPersonInstanceTests: XCTestCase {
         XCTAssertTrue(plans.isEmpty)
     }
 
+    /// Vision's instance request reports a limited number of people and can drop one
+    /// outright — measured on a real 3-person photo where it returned 2. The merged matte
+    /// still sees them, so the person it left out must come back as their own plan.
+    func testPersonMissedByTheInstanceRequestIsRecoveredFromTheMergedMatte() async throws {
+        let missed = CGRect(x: 130, y: 90, width: 60, height: 90)
+        let segmenter = StubInstanceSegmenter(
+            rects: [left, right],
+            extent: extent,
+            mergedRects: [left, right, missed]
+        )
+        let plans = try await SelectionPersonPromptAssist.buildInstancePlans(
+            using: segmenter,
+            image: photo(rects: [left, right, missed])
+        )
+
+        XCTAssertEqual(plans.count, 3, "the dropped person should be prompted for too")
+        let recovered = try XCTUnwrap(
+            plans.first { plan in
+                guard let box = plan.prompt.box else { return false }
+                return box.contains(CGPoint(x: missed.midX, y: extent.height - missed.midY))
+            },
+            "no plan covers the person the instance request missed"
+        )
+        XCTAssertFalse(recovered.prompt.positivePoints.isEmpty)
+    }
+
+    /// The recovered residual must be a person, not the fringe left over between two
+    /// instances whose boundaries disagree with the merged matte by a few pixels.
+    func testSliverBetweenInstancesIsNotMistakenForAPerson() async throws {
+        let segmenter = StubInstanceSegmenter(
+            rects: [left, right],
+            extent: extent,
+            mergedRects: [left, right, CGRect(x: left.maxX, y: left.minY, width: 3, height: left.height)]
+        )
+        let plans = try await SelectionPersonPromptAssist.buildInstancePlans(
+            using: segmenter,
+            image: photo(rects: [left, right])
+        )
+        XCTAssertEqual(plans.count, 2, "a 3px sliver is not a person")
+    }
+
     func testUnionKeepsInstancesAddressable() throws {
         let masks = [
             try mask(rects: [left]),
@@ -287,34 +328,59 @@ final class SelectionPersonInstanceTests: XCTestCase {
     }
 }
 
-/// Stands in for `VNGeneratePersonInstanceMaskRequest` so per-person planning is testable
-/// without needing a photo Vision agrees contains people.
-private final class StubInstanceSegmenter: PersonInstanceSegmenting, @unchecked Sendable {
-    private let rects: [CGRect]
+/// Stands in for Vision so per-person planning is testable without needing a photo Vision
+/// agrees contains people. `instanceRects` are the per-instance masks; `mergedRects` is what
+/// the merged person matte sees, which is how a dropped instance gets recovered.
+private final class StubInstanceSegmenter: SelectionProvider, PersonInstanceSegmenting, @unchecked Sendable {
+    let providerID = "test.vision.instances"
+    private let instanceRects: [CGRect]
+    private let mergedRects: [CGRect]
     private let extent: CGRect
     private let ctx = CIContext(options: [.cacheIntermediates: false])
 
-    init(rects: [CGRect], extent: CGRect) {
-        self.rects = rects
+    init(rects: [CGRect], extent: CGRect, mergedRects: [CGRect]? = nil) {
+        self.instanceRects = rects
+        self.mergedRects = mergedRects ?? rects
         self.extent = extent
     }
 
     func personInstanceMasks(in image: CIImage, quality: SelectionQuality) async throws -> [SelectionMask] {
         _ = image
         _ = quality
-        return rects.compactMap { rect in
-            let composed = CIImage(color: .white)
-                .cropped(to: rect)
-                .composited(over: CIImage(color: .black).cropped(to: extent))
-                .cropped(to: extent)
-            guard let cg = ctx.createCGImage(composed, from: extent) else { return nil }
-            return SelectionMask(
-                cgImage: cg,
-                extent: extent,
-                confidence: 0.9,
-                semanticClass: .person,
-                source: .visionPerson
-            )
+        return instanceRects.compactMap { mask(rects: [$0]) }
+    }
+
+    func selectClass(in image: CIImage, class semanticClass: SemanticClass, quality: SelectionQuality) async throws -> SelectionMask {
+        _ = image
+        _ = quality
+        guard semanticClass == .person else { throw SelectionError.unsupportedClass(semanticClass) }
+        guard let merged = mask(rects: mergedRects) else { throw SelectionError.emptyResult }
+        return merged
+    }
+
+    func selectRegion(in image: CIImage, at point: CGPoint, quality: SelectionQuality) async throws -> SelectionMask {
+        _ = point
+        return try await selectClass(in: image, class: .person, quality: quality)
+    }
+
+    func select(in image: CIImage, prompt: SelectionPrompt, quality: SelectionQuality) async throws -> SelectionMask {
+        _ = prompt
+        return try await selectClass(in: image, class: .person, quality: quality)
+    }
+
+    private func mask(rects: [CGRect]) -> SelectionMask? {
+        guard !rects.isEmpty else { return nil }
+        var composed = CIImage(color: .black).cropped(to: extent)
+        for rect in rects {
+            composed = CIImage(color: .white).cropped(to: rect).composited(over: composed)
         }
+        guard let cg = ctx.createCGImage(composed.cropped(to: extent), from: extent) else { return nil }
+        return SelectionMask(
+            cgImage: cg,
+            extent: extent,
+            confidence: 0.9,
+            semanticClass: .person,
+            source: .visionPerson
+        )
     }
 }

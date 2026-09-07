@@ -37,16 +37,39 @@ enum SelectionPersonPromptAssist {
     /// Returned in `SelectionPersonInstances` precedence order. Empty when Vision has no
     /// per-instance masks to offer, which is the caller's cue to use `buildPlan`.
     static func buildInstancePlans(
-        using segmenter: PersonInstanceSegmenting,
+        using visionProvider: SelectionProvider,
         image: CIImage
     ) async throws -> [Plan] {
+        guard let segmenter = visionProvider as? PersonInstanceSegmenting else { return [] }
         let instances = try await segmenter.personInstanceMasks(in: image, quality: .preview)
         guard !instances.isEmpty else { return [] }
 
         let extent = image.extent.integral
+        // The instance request can drop a person the merged matte sees, so recover whatever
+        // it left behind rather than silently losing someone from a group selection.
+        var subjects = instances
+        if let merged = try? await visionProvider.selectClass(in: image, class: .person, quality: .preview) {
+            let context = SelectionPersonInstances.context
+            // Residual is measured against the raw instances — that is what Vision claimed
+            // to have covered — then every subject is confined to the merged matte.
+            let residual = SelectionPersonInstances.residualSubject(
+                merged: merged,
+                instances: instances,
+                extent: extent,
+                context: context
+            )
+            subjects = SelectionPersonInstances.narrowed(
+                instances,
+                to: merged,
+                extent: extent,
+                context: context
+            )
+            if let residual { subjects.append(residual) }
+        }
+
         var plans: [Plan] = []
-        for (index, instance) in instances.enumerated() {
-            let others = instances.enumerated().filter { $0.offset != index }.map(\.element)
+        for (index, instance) in subjects.enumerated() {
+            let others = subjects.enumerated().filter { $0.offset != index }.map(\.element)
             let exclusion = SelectionPersonInstances.combining(others, extent: extent)?.combined
             let prompt = SelectionPromptBuilder.fromRoughMask(
                 instance,

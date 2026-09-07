@@ -50,6 +50,43 @@ Vision reports confidence per observation, not per instance, so there is no per-
 to sort on. The union is unaffected by order; this only matters once per-pixel ownership is
 exposed. Re-check on a real family photo where someone stands behind another.
 
+### Addendum: what a real group photo broke (W3-08c)
+
+A 4288×2848 three-person photo produced marching ants that cut through a face and enclosed a
+plant. Three defects, all found by replaying the pipeline stage by stage on that photo:
+
+**Prompt geometry scaled to the frame, not the subject.** Three sampling radii were derived
+from the image dimensions, which only holds for a subject that fills the frame.
+
+- Positive points required a `min(w,h)/80` neighbourhood on-mask, which a hair mass passes.
+  Scanning row-major then put every positive in the hair at the top of the person, and hair
+  positives make SAM return an edge-ish region that drops the face: **47% of one subject's
+  interior went unselected**. Positives now come from the deepest ring test the shape
+  supports (30% of the subject's short side, stepping down until enough samples appear),
+  which lands them in the torso. Interior miss fell to 1.3%, and fixture edge agreement
+  roughly tripled (studio 0.050 → 0.154) — the bug was costing precision on every photo, not
+  just this one.
+- The occluder-negative scan needed a 71px clear radius on a 4288px frame, so an occluder
+  *surrounded* by the subject could never qualify for a negative. Now 3% of the subject box.
+- The prior gate's closing and slack radii were 171px and 214px, wide enough to close over
+  an occluder. `subjectBox` now sets the scale.
+
+**Per-instance negatives starved the occluder budget.** One shared pool let neighbouring
+people take the points, leaving a plant in front of a subject with no negative on it at all.
+The budget is now split explicitly (neighbours ≤2, occluders ≥half).
+
+**Instances say who, the merged matte says where.** `VNGeneratePersonInstanceMaskRequest`
+returned 2 instances for 3 people — at both qualities — and its masks are soft, covering the
+plant at ~0.5. Mid-grey reads as subject to every consumer downstream, so the negative
+sampler skipped the plant and the gate passed it. Two corrections, same principle:
+
+- `SelectionPersonInstances.narrowed`: each instance is intersected with the merged
+  `VNGeneratePersonSegmentationRequest` matte, which is crisp about the same pixels.
+  Occluder pixels in the selection fell from 40.6% to 13.3%.
+- `SelectionPersonInstances.residualSubject`: whatever the merged matte covers that no
+  instance claims (opened, ≥0.4% of frame) becomes its own plan, which recovered the third
+  person. Without it the instance route silently loses people the old route selected.
+
 ## Revisit
 
 - EfficientSAM3 when CoreML export ships

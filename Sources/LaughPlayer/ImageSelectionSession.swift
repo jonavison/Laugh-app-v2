@@ -508,9 +508,7 @@ final class ImageSelectionSession {
             // Prefer per-person prompting: Vision already separates individuals, so each
             // person gets their own box/points instead of a group-wide box that invites SAM
             // to merge people (and swallow whatever sits between them).
-            if let segmenter = visionProvider as? PersonInstanceSegmenting,
-               let result = await personInstanceSelect(using: segmenter, image: image)
-            {
+            if let result = await personInstanceSelect(image: image) {
                 return SelectResult(mask: result.combined, instances: result.instances)
             }
             // Person specificity stays in the prompt-assist helper, not in refine/export.
@@ -544,12 +542,9 @@ final class ImageSelectionSession {
     /// Per-person route: a prompt per Vision instance → one SAM decode each → per-person
     /// occluder gate → matte → union. Nil when Vision sees nobody or SAM returns nothing,
     /// which sends `accurateSelect` back to the single group-wide prompt.
-    private func personInstanceSelect(
-        using segmenter: PersonInstanceSegmenting,
-        image: CIImage
-    ) async -> SelectionPersonInstances? {
+    private func personInstanceSelect(image: CIImage) async -> SelectionPersonInstances? {
         guard let plans = try? await SelectionPersonPromptAssist.buildInstancePlans(
-            using: segmenter,
+            using: visionProvider,
             image: image
         ), !plans.isEmpty else { return nil }
 
@@ -558,8 +553,9 @@ final class ImageSelectionSession {
         for (plan, mask) in zip(plans, masks) {
             guard let mask else { continue }
             // Gate against *this* person's Vision matte: SAM is class-blind, so a plant in
-            // front of one person is only excludable per person, not group-wide.
-            let gated = Self.gated(mask: mask, prior: plan.rough) ?? mask
+            // front of one person is only excludable per person, not group-wide. The box
+            // gives the gate a subject scale, so its radii do not depend on photo size.
+            let gated = Self.gated(mask: mask, prior: plan.rough, subjectBox: plan.prompt.box) ?? mask
             instances.append(Self.labelled(gated, as: .person))
         }
         return SelectionPersonInstances.combining(instances, extent: image.extent.integral)
@@ -593,14 +589,19 @@ final class ImageSelectionSession {
 
     /// Removes SAM regions the person segmenter never called a person (occluders inside
     /// the prompt box). Returns nil when the gated matte cannot be rendered.
-    private static func gated(mask: SelectionMask, prior: SelectionMask) -> SelectionMask? {
+    private static func gated(
+        mask: SelectionMask,
+        prior: SelectionMask,
+        subjectBox: CGRect? = nil
+    ) -> SelectionMask? {
         let extent = mask.extent.integral
         guard extent.width > 1, extent.height > 1 else { return nil }
         let gatedCI = SelectionPersonPriorGate.apply(
             sam: mask.ciImageMatching(extent: extent),
             prior: prior.ciImageMatching(extent: extent),
             extent: extent,
-            context: gateContext
+            context: gateContext,
+            subjectBox: subjectBox
         )
         guard let cg = gateContext.createCGImage(gatedCI, from: extent) else { return nil }
         return SelectionMask(
