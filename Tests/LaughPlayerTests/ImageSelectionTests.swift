@@ -233,24 +233,229 @@ final class ImageSelectionTests: XCTestCase {
         else {
             return XCTFail("render failed")
         }
-        XCTAssertNotEqual(fingerprint(srcCG), fingerprint(antsCG), "Marching ants should paint over the photo")
+        XCTAssertNotEqual(fingerprint(srcCG), fingerprint(antsCG), "Marching ants preview should dim outside the subject")
 
-        // Regression: zebra wash painted full-frame when the edge gate was soft.
-        // Corners / interior must stay near the source color (allow tiny CI round-trip drift).
-        assertNearRGB(sampleRGB(srcCG, x: 2, y: 2), sampleRGB(antsCG, x: 2, y: 2))
-        assertNearRGB(sampleRGB(srcCG, x: 61, y: 2), sampleRGB(antsCG, x: 61, y: 2))
-        assertNearRGB(sampleRGB(srcCG, x: 2, y: 61), sampleRGB(antsCG, x: 2, y: 61))
-        assertNearRGB(sampleRGB(srcCG, x: 61, y: 61), sampleRGB(antsCG, x: 61, y: 61))
+        // Outside the subject is lightly dimmed; interior stays photographic.
+        // Exact dashed contour is drawn in view space (CAShapeLayer), not baked into CI.
+        let corner = sampleRGB(antsCG, x: 2, y: 2)
+        let srcCorner = sampleRGB(srcCG, x: 2, y: 2)
+        XCTAssertLessThan(corner.0, srcCorner.0, "Unselected area should be dimmed")
         assertNearRGB(sampleRGB(srcCG, x: 32, y: 32), sampleRGB(antsCG, x: 32, y: 32))
-        // And must not be pure white dash paint (old zebra / white-ant symptom).
-        // Pure black is allowed only on the contour — corners/interior must stay photographic.
-        for point in [(2, 2), (61, 2), (2, 61), (61, 61), (32, 32)] as [(Int, Int)] {
-            let rgb = sampleRGB(antsCG, x: point.0, y: point.1)
-            let isPureWhite = rgb.0 == 255 && rgb.1 == 255 && rgb.2 == 255
-            let isPureBlack = rgb.0 == 0 && rgb.1 == 0 && rgb.2 == 0
-            XCTAssertFalse(isPureWhite, "Unexpected white dash paint at \(point)")
-            XCTAssertFalse(isPureBlack, "Unexpected black dash away from contour at \(point)")
+    }
+
+    func testAntsContourPathFollowsHardMatte() {
+        var data = [UInt8](repeating: 0, count: 128 * 128)
+        for y in 32..<96 {
+            for x in 32..<96 {
+                data[y * 128 + x] = 255
+            }
         }
+        let cs = CGColorSpaceCreateDeviceGray()
+        let gctx = CGContext(
+            data: &data,
+            width: 128,
+            height: 128,
+            bitsPerComponent: 8,
+            bytesPerRow: 128,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        )!
+        let cg = gctx.makeImage()!
+        let path = SelectionAntsContour.normalizedPath(fromHardMatte: cg)
+        XCTAssertNotNil(path)
+        XCTAssertFalse(path?.isEmpty ?? true)
+        let inView = SelectionAntsContour.pathInView(
+            normalized: path!,
+            photoFrame: CGRect(x: 10, y: 20, width: 200, height: 200)
+        )
+        XCTAssertNotNil(inView)
+        let box = inView!.boundingBox
+        XCTAssertGreaterThan(box.width, 50)
+        XCTAssertGreaterThan(box.height, 50)
+    }
+
+    func testAntsContourFromAlphaCarryingMatte() {
+        // Regression: MobileSAM mattes are premultiplied with coverage in alpha over
+        // mid-grey RGB (sRGB 0.53 → ~0.24 linear), which sat on the binary threshold and
+        // left the contour plate empty. Coverage must be read from alpha instead.
+        let side = 128
+        var rgba = [UInt8](repeating: 0, count: side * side * 4)
+        for y in 32..<96 {
+            for x in 32..<96 {
+                let i = (y * side + x) * 4
+                rgba[i] = 134
+                rgba[i + 1] = 134
+                rgba[i + 2] = 134
+                rgba[i + 3] = 254
+            }
+        }
+        let provider = CGDataProvider(data: Data(rgba) as CFData)!
+        let matteCG = CGImage(
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: side * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )!
+
+        let extent = CGRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side))
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        let mask = SelectionMask(
+            cgImage: matteCG,
+            extent: extent,
+            confidence: 0.9,
+            semanticClass: .unknown,
+            source: .coreML(modelID: "test")
+        )
+
+        XCTAssertTrue(
+            SelectionMatteNormalization.carriesCoverageInAlpha(mask.ciImage, extent: extent, context: ctx),
+            "premultiplied SAM-shaped matte should be detected as alpha-carrying"
+        )
+        guard let path = SelectionAntsContour.normalizedPath(mask: mask, context: ctx) else {
+            return XCTFail("expected a contour from an alpha-carrying matte")
+        }
+        let box = path.boundingBox
+        XCTAssertGreaterThan(box.width, 0.3)
+        XCTAssertGreaterThan(box.height, 0.3)
+    }
+
+    func testAntsContourIgnoresSpeckleNoise() {
+        // Regression: a noisy matte produced dozens of tiny contours, so the overlay
+        // rendered scattered dashes instead of one silhouette outline.
+        var data = [UInt8](repeating: 0, count: 128 * 128)
+        for y in 40..<88 {
+            for x in 40..<88 {
+                data[y * 128 + x] = 255
+            }
+        }
+        for (x, y) in [(6, 6), (10, 110), (118, 12), (100, 100), (64, 8), (8, 64)] {
+            data[y * 128 + x] = 255
+            data[y * 128 + x + 1] = 255
+        }
+        let gctx = CGContext(
+            data: &data,
+            width: 128,
+            height: 128,
+            bitsPerComponent: 8,
+            bytesPerRow: 128,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        )!
+        let path = SelectionAntsContour.normalizedPath(fromHardMatte: gctx.makeImage()!)
+        guard let path else { return XCTFail("expected a silhouette contour") }
+
+        // Only the square survives: bounds hug it instead of spanning the speckles.
+        let box = path.boundingBox
+        XCTAssertGreaterThan(box.minX, 0.2)
+        XCTAssertGreaterThan(box.minY, 0.2)
+        XCTAssertLessThan(box.maxX, 0.8)
+        XCTAssertLessThan(box.maxY, 0.8)
+    }
+
+    func testMarchingAntsVisibleWithSoftOpaqueRGBAMatte() {
+        // Regression: MobileSAM mattes are often opaque RGBA with soft mid-gray RGB.
+        // Old path hard-thresholded at 0.5 and/or used alpha-only blend → invisible ants.
+        let extent = CGRect(x: 0, y: 0, width: 128, height: 128)
+        let image = CIImage(color: CIColor(red: 0.2, green: 0.45, blue: 0.7, alpha: 1))
+            .cropped(to: extent)
+        var rgba = [UInt8](repeating: 0, count: 128 * 128 * 4)
+        for y in 24..<104 {
+            for x in 24..<104 {
+                let i = (y * 128 + x) * 4
+                rgba[i] = 90      // ~0.35 — below old 0.5 hard cut
+                rgba[i + 1] = 90
+                rgba[i + 2] = 90
+                rgba[i + 3] = 255  // opaque
+            }
+        }
+        for i in stride(from: 3, to: rgba.count, by: 4) where rgba[i] == 0 {
+            rgba[i] = 255
+        }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let gctx = CGContext(
+            data: &rgba,
+            width: 128,
+            height: 128,
+            bitsPerComponent: 8,
+            bytesPerRow: 128 * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        let cg = gctx.makeImage()!
+        let mask = SelectionMask(
+            cgImage: cg,
+            extent: extent,
+            confidence: 0.7,
+            semanticClass: .person,
+            source: .coreML(modelID: "test")
+        )
+        let ants = SelectionCompositor.apply(
+            image: image,
+            mask: mask,
+            mode: .marchingAnts,
+            appearance: NSAppearance(named: .aqua)!,
+            antsPhase: 6
+        )
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        guard let srcCG = ctx.createCGImage(image, from: extent),
+              let antsCG = ctx.createCGImage(ants, from: extent)
+        else {
+            return XCTFail("render failed")
+        }
+        XCTAssertNotEqual(
+            fingerprint(srcCG),
+            fingerprint(antsCG),
+            "Soft opaque MobileSAM-like mattes must still produce a visible ants preview"
+        )
+    }
+
+    func testMarchingAntsVisibleAfterDownscale() {
+        // Regression: hairline ants vanish when a large photo is fit into the studio.
+        let extent = CGRect(x: 0, y: 0, width: 1600, height: 1200)
+        let image = CIImage(color: CIColor(red: 0.15, green: 0.15, blue: 0.18, alpha: 1))
+            .cropped(to: extent)
+        let subject = CIImage(color: .white)
+            .cropped(to: CGRect(x: 400, y: 200, width: 800, height: 800))
+        let mattePlate = subject.composited(over: CIImage(color: .black).cropped(to: extent))
+            .cropped(to: extent)
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        guard let matteCG = ctx.createCGImage(mattePlate, from: extent) else {
+            return XCTFail("matte render failed")
+        }
+        let mask = SelectionMask(
+            cgImage: matteCG,
+            extent: extent,
+            confidence: 1,
+            semanticClass: .person,
+            source: .visionPerson
+        )
+        let ants = SelectionCompositor.apply(
+            image: image,
+            mask: mask,
+            mode: .marchingAnts,
+            appearance: NSAppearance(named: .darkAqua)!,
+            antsPhase: 4
+        )
+        let scaled = ants.transformed(by: CGAffineTransform(scaleX: 0.25, y: 0.25))
+        let viewExtent = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let scaledSrc = image.transformed(by: CGAffineTransform(scaleX: 0.25, y: 0.25))
+        guard let antsCG = ctx.createCGImage(scaled, from: viewExtent),
+              let srcCG = ctx.createCGImage(scaledSrc, from: viewExtent)
+        else {
+            return XCTFail("downscale render failed")
+        }
+        XCTAssertNotEqual(
+            fingerprint(srcCG),
+            fingerprint(antsCG),
+            "Ants must remain visible after fit-to-view downscale"
+        )
     }
 
     func testRefineShiftEdgeChangesMatte() {

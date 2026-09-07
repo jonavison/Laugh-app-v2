@@ -204,6 +204,7 @@ final class ImageSelectionSession {
     /// Tool-layer convenience for Subject Select → Auto Select Person.
     func selectPerson(in image: CIImage) {
         promptDraft = .empty
+        displayMode = .marchingAnts
         select(in: image, class: .person)
     }
 

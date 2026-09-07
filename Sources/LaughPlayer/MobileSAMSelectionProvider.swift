@@ -109,6 +109,13 @@ final class MobileSAMSelectionProvider: SelectionProvider, @unchecked Sendable {
             )
         }
         maskCI = maskCI.cropped(to: extent)
+        // SamKit hands back coverage in alpha over mid-grey RGB. Every downstream step
+        // (polish, preview blend, ants contour) reads luminance, so canonicalise first.
+        maskCI = SelectionMatteNormalization.opaqueCoverage(
+            matte: maskCI,
+            extent: extent,
+            context: ciContext
+        )
 
         if applyPolish {
             maskCI = SelectionMattePrecision.refine(mask: maskCI, photo: image, extent: extent)

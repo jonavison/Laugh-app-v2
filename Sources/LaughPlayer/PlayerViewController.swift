@@ -140,13 +140,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subjectSelectClearButton = NSButton(title: "Clear", target: nil, action: nil)
     private let subjectSelectCancelDownloadButton = NSButton(title: "Cancel Download", target: nil, action: nil)
     private let subjectSelectExportButton = NSButton(title: "Export Cutout…", target: nil, action: nil)
-    private let subjectSelectViewPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let subjectSelectQualityControl = NSSegmentedControl(
-        labels: ["Preview", "Accurate"],
-        trackingMode: .selectOne,
-        target: nil,
-        action: nil
-    )
     private let subjectSelectSmoothSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let subjectSelectFeatherSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let subjectSelectContrastSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
@@ -533,10 +526,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         imageSelectionSession.onChange = { [weak self] quality in
             guard let self else { return }
+            let mask = self.imageSelectionSession.currentMask
+            let mode = self.imageSelectionSession.currentDisplayMode
             let renderQuality: ImageAdjustRenderQuality = quality == .accurate ? .full : .preview
             self.imageSurfaceView.setSelectionPreview(
-                mask: self.imageSelectionSession.currentMask,
-                displayMode: self.imageSelectionSession.currentDisplayMode,
+                mask: mask,
+                displayMode: mode,
                 refine: self.imageSelectionSession.currentRefine,
                 quality: renderQuality
             )
@@ -5023,20 +5018,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectExportButton.target = self
         subjectSelectExportButton.action = #selector(subjectSelectExportPressed)
 
-        subjectSelectViewPopUp.removeAllItems()
-        for mode in SelectionDisplayMode.previewCycle {
-            subjectSelectViewPopUp.addItem(withTitle: mode.menuTitle)
-            subjectSelectViewPopUp.lastItem?.representedObject = mode.rawValue
-        }
-        subjectSelectViewPopUp.target = self
-        subjectSelectViewPopUp.action = #selector(subjectSelectViewChanged)
-        subjectSelectViewPopUp.controlSize = .small
-        subjectSelectViewPopUp.font = .systemFont(ofSize: 12)
-        subjectSelectViewPopUp.focusRingType = .none
-
-        configureSettingsSegmentedControl(subjectSelectQualityControl, action: #selector(subjectSelectQualityChanged))
-        subjectSelectQualityControl.selectedSegment = 1
-
         configureSubjectSelectRefineSlider(subjectSelectSmoothSlider, action: #selector(subjectSelectRefineChanged))
         configureSubjectSelectRefineSlider(subjectSelectFeatherSlider, action: #selector(subjectSelectRefineChanged))
         configureSubjectSelectRefineSlider(subjectSelectContrastSlider, action: #selector(subjectSelectRefineChanged))
@@ -5070,8 +5051,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectAutoButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
 
         card.addRow(SettingsRowFactory.fullWidthRow(actions))
-        card.addRow(SettingsRowFactory.stackedRow(title: "View", control: subjectSelectViewPopUp))
-        card.addRow(SettingsRowFactory.stackedRow(title: "Quality", control: subjectSelectQualityControl))
         card.addRow(SettingsRowFactory.sliderRow(
             title: "Smooth",
             slider: subjectSelectSmoothSlider,
@@ -5127,8 +5106,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc private func subjectSelectAutoPressed() {
-        guard let image = imageSurfaceView.selectionSourceCIImage else { return }
+        guard let image = imageSurfaceView.selectionSourceCIImage else {
+            subjectSelectStatusLabel.stringValue = "Open an image first, then run Auto Select."
+            subjectSelectStatusLabel.textColor = .systemOrange
+            return
+        }
         imageSelectionSession.selectPerson(in: image)
+        refreshSubjectSelectChrome()
     }
 
     @objc private func subjectSelectClearPressed() {
@@ -5138,13 +5122,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc private func subjectSelectCancelDownloadPressed() {
         imageSelectionSession.cancelModelDownload()
-    }
-
-    @objc private func subjectSelectViewChanged() {
-        guard let raw = subjectSelectViewPopUp.selectedItem?.representedObject as? String,
-              let mode = SelectionDisplayMode(rawValue: raw)
-        else { return }
-        imageSelectionSession.setDisplayMode(mode)
     }
 
     @objc private func subjectSelectRefineChanged() {
@@ -5207,19 +5184,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageSurfaceView.setSelectionBrushRadius(radius)
     }
 
-    @objc private func subjectSelectQualityChanged() {
-        let quality: SelectionQuality = subjectSelectQualityControl.selectedSegment == 1 ? .accurate : .preview
-        imageSelectionSession.setQuality(quality)
-    }
-
     @objc private func subjectSelectExportPressed() {
         exportSubjectCutout()
-    }
-
-    private func cycleSubjectSelectViewMode() {
-        guard imageSelectionSession.hasSelection else { return }
-        let next = imageSelectionSession.currentDisplayMode.nextInPreviewCycle()
-        imageSelectionSession.setDisplayMode(next)
     }
 
     private func syncSubjectSelectRefineValueLabels(_ refine: SelectionRefineParameters) {
@@ -5244,8 +5210,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectCancelDownloadButton.isEnabled = downloading
         subjectSelectExportButton.isEnabled = hasMask && !loading
         subjectSelectAutoButton.isEnabled = !loading
-        subjectSelectViewPopUp.isEnabled = hasMask
-        subjectSelectQualityControl.isEnabled = hasMask || loading
         let refineEnabled = hasMask && !loading
         subjectSelectSmoothSlider.isEnabled = refineEnabled
         subjectSelectFeatherSlider.isEnabled = refineEnabled
@@ -5264,13 +5228,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectClickToggle.applySwitchState(subjectSelectClickEnabled)
         subjectSelectBrushToggle.applySwitchState(subjectSelectBrushEnabled)
 
-        let mode = imageSelectionSession.currentDisplayMode
-        if let idx = SelectionDisplayMode.previewCycle.firstIndex(of: mode) {
-            subjectSelectViewPopUp.selectItem(at: idx)
-        } else if hasMask {
-            subjectSelectViewPopUp.selectItem(at: SelectionDisplayMode.previewCycle.firstIndex(of: .marchingAnts) ?? 0)
-        }
-        subjectSelectQualityControl.selectedSegment = imageSelectionSession.currentQuality == .accurate ? 1 : 0
         if let brushIdx = SelectionBrushMode.allCases.firstIndex(of: imageSelectionSession.currentBrushMode) {
             subjectSelectBrushModeControl.selectedSegment = brushIdx
         }
@@ -5312,7 +5269,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 brushNote = ""
             }
-            subjectSelectStatusLabel.stringValue = "\(engineNote)\(mode.menuTitle) — press F to cycle views.\(brushNote) Display-only."
+            subjectSelectStatusLabel.stringValue = "\(engineNote)Marching ants.\(brushNote)"
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else if subjectSelectClickEnabled {
             subjectSelectStatusLabel.stringValue = "Click Select: click object (+), ⌥-click (−), ⇧ to add; drag for box. Downloads MobileSAM if needed."
@@ -10113,10 +10070,6 @@ extension PlayerViewController {
                     return true
                 }
             case 3:
-                if activeMediaKind == .image, imageSelectionSession.hasSelection {
-                    cycleSubjectSelectViewMode()
-                    return true
-                }
                 if activeMediaKind == .video {
                     commandToggleVideoFitMode()
                     return true
@@ -10201,6 +10154,10 @@ final class ImageSurfaceView: NSView {
     private var selectionRefine = SelectionRefineParameters.identity
     private var marchingAntsPhase: CGFloat = 0
     private var marchingAntsTimer: Timer?
+    private let antsWhiteLayer = CAShapeLayer()
+    private let antsBlackLayer = CAShapeLayer()
+    /// Vision-normalized contour (0…1) in the current display matte space.
+    private var antsNormalizedPath: CGPath?
     private var selectionBrushEnabled = false
     private var selectionClickEnabled = false
     private var selectionBrushRadius: CGFloat = 24
@@ -10258,6 +10215,11 @@ final class ImageSurfaceView: NSView {
         clickBoxLayer.isHidden = true
         clickBoxLayer.zPosition = 51
         layer?.addSublayer(clickBoxLayer)
+
+        configureAntsOverlayLayer(antsWhiteLayer, color: .white, dashPhase: 0)
+        configureAntsOverlayLayer(antsBlackLayer, color: .black, dashPhase: 5)
+        layer?.addSublayer(antsWhiteLayer)
+        layer?.addSublayer(antsBlackLayer)
 
         cropOverlay.translatesAutoresizingMaskIntoConstraints = false
         cropOverlay.isHidden = true
@@ -10645,6 +10607,7 @@ final class ImageSurfaceView: NSView {
         selectionMask = mask
         selectionDisplayMode = displayMode
         selectionRefine = refine
+        rebuildAntsContour()
         syncMarchingAntsAnimation()
         refreshDisplayedImage(quality: quality)
     }
@@ -10652,11 +10615,14 @@ final class ImageSurfaceView: NSView {
     private func syncMarchingAntsAnimation() {
         let shouldAnimate = selectionMask != nil && selectionDisplayMode == .marchingAnts
         if shouldAnimate {
+            updateAntsOverlayGeometry()
             guard marchingAntsTimer == nil else { return }
             let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
                 guard let self else { return }
-                self.marchingAntsPhase += 3.0
-                self.refreshDisplayedImage(quality: .preview)
+                self.marchingAntsPhase += 1.25
+                // Opposite phase on black/white layers → classic ------ ants along the path.
+                self.antsWhiteLayer.lineDashPhase = self.marchingAntsPhase
+                self.antsBlackLayer.lineDashPhase = self.marchingAntsPhase + 5
             }
             RunLoop.main.add(timer, forMode: .common)
             marchingAntsTimer = timer
@@ -10664,7 +10630,96 @@ final class ImageSurfaceView: NSView {
             marchingAntsTimer?.invalidate()
             marchingAntsTimer = nil
             marchingAntsPhase = 0
+            antsWhiteLayer.isHidden = true
+            antsBlackLayer.isHidden = true
+            antsWhiteLayer.path = nil
+            antsBlackLayer.path = nil
         }
+    }
+
+    /// Extract exact silhouette path (display-space matte) for CAShapeLayer ants.
+    private func rebuildAntsContour() {
+        guard let selectionMask,
+              selectionDisplayMode == .marchingAnts,
+              let baseCIImage
+        else {
+            antsNormalizedPath = nil
+            updateAntsOverlayGeometry()
+            return
+        }
+
+        let crop = effectiveCropForDisplay()
+        let straighten = effectiveStraightenForDisplay()
+        var maskCI = selectionMask.ciImageMatching(extent: baseCIImage.extent)
+        maskCI = selectionRefine.applying(to: maskCI, extent: baseCIImage.extent)
+        maskCI = Self.rotatedCIImage(maskCI, quarterTurns: rotationQuarterTurns)
+        maskCI = Self.flippedCIImage(maskCI, horizontal: flipHorizontal, vertical: flipVertical)
+        maskCI = Self.straightenedCIImage(maskCI, radians: straighten)
+        if let crop, !ImageCropGeometry.isIdentity(crop) {
+            let size = CGSize(width: maskCI.extent.width, height: maskCI.extent.height)
+            let pixel = ImageCropGeometry.pixelRect(normalized: crop, imageSize: size)
+            let cropInExtent = pixel.offsetBy(dx: maskCI.extent.minX, dy: maskCI.extent.minY)
+            maskCI = maskCI.cropped(to: cropInExtent)
+            if maskCI.extent.origin != .zero {
+                maskCI = maskCI.transformed(
+                    by: CGAffineTransform(translationX: -maskCI.extent.minX, y: -maskCI.extent.minY)
+                )
+            }
+        }
+        let plateExtent = maskCI.extent.integral
+        var plate = SelectionMatteNormalization.opaqueCoverage(
+            matte: maskCI,
+            extent: plateExtent,
+            context: ciContext
+        )
+        plate = SelectionCompositor.hardBinaryMatte(mask: plate, extent: plateExtent)
+
+        let maxEdge: CGFloat = 768
+        let longEdge = max(plateExtent.width, plateExtent.height)
+        if longEdge > maxEdge {
+            let scale = maxEdge / longEdge
+            plate = plate.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        let renderExtent = plate.extent.integral
+        // Re-threshold after downscale, then despeckle: stray blobs became dozens of
+        // tiny Vision contours, which drew as scattered dashes instead of one outline.
+        plate = SelectionCompositor.hardBinaryMatte(mask: plate, extent: renderExtent)
+        plate = SelectionAntsContour.cleanedHardMatte(plate, extent: renderExtent)
+        guard let cg = ciContext.createCGImage(plate, from: renderExtent) else {
+            antsNormalizedPath = nil
+            updateAntsOverlayGeometry()
+            return
+        }
+        antsNormalizedPath = SelectionAntsContour.normalizedPath(fromHardMatte: cg)
+        updateAntsOverlayGeometry()
+    }
+
+    private func updateAntsOverlayGeometry() {
+        guard let antsNormalizedPath,
+              selectionMask != nil,
+              selectionDisplayMode == .marchingAnts
+        else {
+            antsWhiteLayer.isHidden = true
+            antsBlackLayer.isHidden = true
+            antsWhiteLayer.path = nil
+            antsBlackLayer.path = nil
+            return
+        }
+        let frame = photoFrameInOverlay()
+        guard let viewPath = SelectionAntsContour.pathInView(
+            normalized: antsNormalizedPath,
+            photoFrame: frame
+        ) else {
+            antsWhiteLayer.isHidden = true
+            antsBlackLayer.isHidden = true
+            return
+        }
+        antsWhiteLayer.path = viewPath
+        antsBlackLayer.path = viewPath
+        antsWhiteLayer.isHidden = false
+        antsBlackLayer.isHidden = false
+        antsWhiteLayer.lineDashPhase = marchingAntsPhase
+        antsBlackLayer.lineDashPhase = marchingAntsPhase + 5
     }
 
     /// Base CIImage in source pixel space for selection providers.
@@ -10827,9 +10882,11 @@ final class ImageSurfaceView: NSView {
             appliedCropNormalized = nil
         }
         panOffset = .zero
+        rebuildAntsContour()
         refreshDisplayedImage(quality: .full)
         needsLayout = true
         layoutSubtreeIfNeeded()
+        updateAntsOverlayGeometry()
         if isCropMode {
             let draft = ImageCropGeometry.defaultNormalizedRect(
                 aspect: cropAspect,
@@ -11007,6 +11064,20 @@ final class ImageSurfaceView: NSView {
             layoutCropOverlay()
         }
         updateBrushRing()
+        updateAntsOverlayGeometry()
+    }
+
+    private func configureAntsOverlayLayer(_ layer: CAShapeLayer, color: NSColor, dashPhase: CGFloat) {
+        layer.fillColor = nil
+        layer.strokeColor = color.cgColor
+        layer.lineWidth = 1.5
+        layer.lineJoin = .round
+        layer.lineCap = .butt
+        layer.lineDashPattern = [5, 5]
+        layer.lineDashPhase = dashPhase
+        layer.isHidden = true
+        layer.zPosition = 45
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
     }
 
     private var canPanImage: Bool {
@@ -11240,9 +11311,7 @@ final class ImageSurfaceView: NSView {
             format: .RGBA8,
             colorSpace: colorSpace,
             deferred: false
-        ) else {
-            return nil
-        }
+        ) else { return nil }
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 

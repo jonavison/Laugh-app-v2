@@ -54,7 +54,7 @@ enum KeyboardShortcutsReference {
     ⌘L — Toggle library panel
     ⌘I — Toggle settings inspector
     ⌃⌘F — Toggle full screen
-    F — Toggle video fit / fill (image: cycle Subject Select view when a matte is active)
+    F — Toggle video fit / fill
     ⌃⌘A — Cycle window aspect preset
     ⌘⇧K — Toggle lock window aspect
     ⌘1 / ⌘2 / ⌘3 — Video / Audio / Subtitles tab

@@ -272,23 +272,25 @@ enum SelectionCompositor {
         case .none:
             return image
         case .onionSkin:
-            return onionSkin(image: image, mask: mask, extent: extent)
+            return onionSkin(image: image, mask: maskForBlend(mask, extent: extent), extent: extent)
         case .marchingAnts:
-            return marchingAnts(image: image, mask: mask, extent: extent, phase: antsPhase)
+            // Soft dim only — exact dashed contour is drawn in view space (CAShapeLayer).
+            let blendMask = maskForBlend(mask, extent: extent)
+            return onionSkin(image: image, mask: blendMask, extent: extent, veilAlpha: 0.28)
         case .overlay:
             let wash = CIImage(color: overlayFill).cropped(to: extent)
-            return blend(foreground: image, background: wash, mask: mask, extent: extent) ?? image
+            return blend(foreground: image, background: wash, mask: maskForBlend(mask, extent: extent), extent: extent) ?? image
         case .onBlack:
             let backdrop = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: extent)
-            return blend(foreground: image, background: backdrop, mask: mask, extent: extent) ?? image
+            return blend(foreground: image, background: backdrop, mask: maskForBlend(mask, extent: extent), extent: extent) ?? image
         case .onWhite:
             let backdrop = CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: 1)).cropped(to: extent)
-            return blend(foreground: image, background: backdrop, mask: mask, extent: extent) ?? image
+            return blend(foreground: image, background: backdrop, mask: maskForBlend(mask, extent: extent), extent: extent) ?? image
         case .blackAndWhite:
             return grayscaleMatte(mask: mask, extent: extent)
         case .onLayers:
             let backdrop = checkerboardBackdrop(extent: extent, appearance: appearance)
-            return blend(foreground: image, background: backdrop, mask: mask, extent: extent) ?? image
+            return blend(foreground: image, background: backdrop, mask: maskForBlend(mask, extent: extent), extent: extent) ?? image
         }
     }
 
@@ -329,6 +331,15 @@ enum SelectionCompositor {
         return blend.cropped(to: extent)
     }
 
+    /// MobileSAM / Metal mattes are often opaque RGBA with the signal in RGB.
+    /// `CIBlendWithMask` prefers alpha — convert luminance → alpha so soft mattes blend correctly.
+    private static func maskForBlend(_ mask: CIImage, extent: CGRect) -> CIImage {
+        mask
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+            .applyingFilter("CIMaskToAlpha")
+            .cropped(to: extent)
+    }
+
     private static func multiply(_ a: CIImage, _ b: CIImage, extent: CGRect) -> CIImage {
         guard let out = CIFilter(name: "CIMultiplyCompositing", parameters: [
             kCIInputImageKey: a,
@@ -339,8 +350,13 @@ enum SelectionCompositor {
         return out.cropped(to: extent)
     }
 
-    private static func onionSkin(image: CIImage, mask: CIImage, extent: CGRect) -> CIImage {
-        let veil = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0.58)).cropped(to: extent)
+    private static func onionSkin(
+        image: CIImage,
+        mask: CIImage,
+        extent: CGRect,
+        veilAlpha: CGFloat = 0.58
+    ) -> CIImage {
+        let veil = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: veilAlpha)).cropped(to: extent)
         let dimmed = veil.composited(over: image).cropped(to: extent)
         return blend(foreground: image, background: dimmed, mask: mask, extent: extent) ?? image
     }
@@ -348,97 +364,26 @@ enum SelectionCompositor {
     private static func grayscaleMatte(mask: CIImage, extent: CGRect) -> CIImage {
         let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: extent)
         let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: 1)).cropped(to: extent)
-        return blend(foreground: white, background: black, mask: mask, extent: extent) ?? black
+        return blend(foreground: white, background: black, mask: maskForBlend(mask, extent: extent), extent: extent) ?? black
     }
 
-    /// Animated black/white dashes along the matte contour (Photoshop-style marching ants).
-    private static func marchingAnts(
-        image: CIImage,
-        mask: CIImage,
-        extent: CGRect,
-        phase: CGFloat
-    ) -> CIImage {
-        let hard = hardBinaryMatte(mask: mask, extent: extent)
-        guard let kernel = marchingAntsKernel else {
-            return solidContourFallback(image: image, hardMatte: hard, extent: extent)
-        }
-        let result = kernel.apply(
-            extent: extent,
-            roiCallback: { _, rect in rect },
-            arguments: [image, hard, phase as NSNumber]
-        )
-        return result?.cropped(to: extent) ?? image
-    }
-
-    /// Binary black/white plate from a soft Vision matte.
-    private static func hardBinaryMatte(mask: CIImage, extent: CGRect) -> CIImage {
-        let plate = grayscaleMatte(mask: mask, extent: extent)
-        // Crush midtones: values below ~0.5 → 0, above → 1.
-        return plate
+    /// Binary plate from a soft matte. Threshold ~0.25 so soft MobileSAM interiors survive.
+    static func hardBinaryMatte(mask: CIImage, extent: CGRect) -> CIImage {
+        mask
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
             .applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: 20, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: 20, z: 0, w: 0),
                 "inputBVector": CIVector(x: 0, y: 0, z: 20, w: 0),
                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                "inputBiasVector": CIVector(x: -10, y: -10, z: -10, w: 0)
+                // 20x - 5 → binary cut near 0.25 (soft SAM often sits below 0.5).
+                "inputBiasVector": CIVector(x: -5, y: -5, z: -5, w: 0)
             ])
             .applyingFilter("CIColorClamp", parameters: [
                 "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
                 "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
             ])
             .cropped(to: extent)
-    }
-
-    /// Neighbor-difference edge + black dashed ants; gaps stay photographic (no white wash).
-    private static let marchingAntsKernel: CIKernel? = {
-        let source = """
-        kernel vec4 laughMarchingAnts(sampler image, sampler matte, float phase) {
-            vec2 dc = destCoord();
-            float m  = sample(matte, samplerTransform(matte, dc)).r;
-            float mL = sample(matte, samplerTransform(matte, dc + vec2(-1.0, 0.0))).r;
-            float mR = sample(matte, samplerTransform(matte, dc + vec2( 1.0, 0.0))).r;
-            float mD = sample(matte, samplerTransform(matte, dc + vec2( 0.0,-1.0))).r;
-            float mU = sample(matte, samplerTransform(matte, dc + vec2( 0.0, 1.0))).r;
-            float mL2 = sample(matte, samplerTransform(matte, dc + vec2(-2.0, 0.0))).r;
-            float mR2 = sample(matte, samplerTransform(matte, dc + vec2( 2.0, 0.0))).r;
-            float mD2 = sample(matte, samplerTransform(matte, dc + vec2( 0.0,-2.0))).r;
-            float mU2 = sample(matte, samplerTransform(matte, dc + vec2( 0.0, 2.0))).r;
-            float edge = abs(m - mL) + abs(m - mR) + abs(m - mD) + abs(m - mU)
-                       + abs(m - mL2) + abs(m - mR2) + abs(m - mD2) + abs(m - mU2);
-            vec4 photo = sample(image, samplerTransform(image, dc));
-            if (edge < 0.5) {
-                return photo;
-            }
-            float period = 8.0;
-            float t = mod(dc.x + dc.y + phase, period);
-            // Dash = black ant; gap = leave photo (transparent overlay).
-            float dash = step(period * 0.5, t);
-            if (dash < 0.5) {
-                return photo;
-            }
-            return vec4(0.0, 0.0, 0.0, 1.0);
-        }
-        """
-        return CIKernel(source: source)
-    }()
-
-    /// If the CIKernel fails to compile, draw a simple solid black contour.
-    private static func solidContourFallback(image: CIImage, hardMatte: CIImage, extent: CGRect) -> CIImage {
-        let clamped = hardMatte.clampedToExtent()
-        let dilated = clamped
-            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 1.5])
-            .cropped(to: extent)
-        let eroded = clamped
-            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: 1.5])
-            .cropped(to: extent)
-        guard let ring = CIFilter(name: "CIDifferenceBlendMode", parameters: [
-            kCIInputImageKey: dilated,
-            kCIInputBackgroundImageKey: eroded
-        ])?.outputImage?.cropped(to: extent) else {
-            return image
-        }
-        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: extent)
-        return blend(foreground: black, background: image, mask: ring, extent: extent) ?? image
     }
 
     private static func checkerboardBackdrop(extent: CGRect, appearance: NSAppearance) -> CIImage {
@@ -463,6 +408,146 @@ enum SelectionCompositor {
             return CIImage(color: dark).cropped(to: extent)
         }
         return board
+    }
+}
+
+/// Canonical matte shape for every downstream consumer: opaque alpha, coverage in luminance.
+enum SelectionMatteNormalization {
+    /// Coverage as an opaque grayscale matte.
+    ///
+    /// MobileSAM returns premultiplied mattes carrying coverage in *alpha*; their RGB sits
+    /// near mid-grey (sRGB 0.53), which Core Image linearises to ~0.24 — right on the binary
+    /// threshold, so any luminance-based step (polish, blend, contour) sees a near-empty
+    /// matte. Vision is the opposite: opaque alpha with coverage already in luminance, and
+    /// those mattes pass through untouched.
+    static func opaqueCoverage(matte: CIImage, extent: CGRect, context: CIContext) -> CIImage {
+        guard carriesCoverageInAlpha(matte, extent: extent, context: context) else { return matte }
+        return matte
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+            ])
+            .cropped(to: extent)
+    }
+
+    /// True when alpha varies — i.e. alpha is the coverage channel, not a constant 1.
+    static func carriesCoverageInAlpha(
+        _ matte: CIImage,
+        extent: CGRect,
+        context: CIContext
+    ) -> Bool {
+        let average = matte.applyingFilter("CIAreaAverage", parameters: [
+            kCIInputExtentKey: CIVector(cgRect: extent)
+        ])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return pixel[3] < 250
+    }
+}
+
+/// Builds a Vision contour path for view-space marching ants (exact subject outline).
+enum SelectionAntsContour {
+    /// Normalized CGPath (0…1, Vision bottom-leading) for the hard matte silhouette.
+    static func normalizedPath(
+        mask: SelectionMask,
+        refine: SelectionRefineParameters = .identity,
+        context: CIContext
+    ) -> CGPath? {
+        let extent = mask.extent.integral
+        guard extent.width > 2, extent.height > 2 else { return nil }
+        var matte = refine.applying(to: mask.ciImageMatching(extent: extent), extent: extent)
+        matte = SelectionMatteNormalization.opaqueCoverage(
+            matte: matte,
+            extent: extent,
+            context: context
+        )
+        matte = SelectionCompositor.hardBinaryMatte(mask: matte, extent: extent)
+
+        // Cap for Vision — contour quality stays high; overlay scales to the photo frame.
+        let maxEdge: CGFloat = 768
+        let longEdge = max(extent.width, extent.height)
+        if longEdge > maxEdge {
+            let scale = maxEdge / longEdge
+            matte = matte.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        let plateExtent = matte.extent.integral
+        matte = SelectionCompositor.hardBinaryMatte(mask: matte, extent: plateExtent)
+        matte = cleanedHardMatte(matte, extent: plateExtent)
+        guard let cg = context.createCGImage(matte, from: plateExtent) else { return nil }
+        return normalizedPath(fromHardMatte: cg)
+    }
+
+    /// Morphological close → open. Fills pinholes and drops speckles that would otherwise
+    /// become dozens of tiny noise contours (scattered dashes instead of one outline).
+    static func cleanedHardMatte(_ hardMatte: CIImage, extent: CGRect) -> CIImage {
+        let radius = max(1.5, min(extent.width, extent.height) / 220.0)
+        return hardMatte.clampedToExtent()
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
+            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: radius * 2])
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
+            .cropped(to: extent)
+    }
+
+    /// Silhouette outline only — noise contours are discarded by normalized bounding-box size.
+    static func normalizedPath(fromHardMatte cgImage: CGImage) -> CGPath? {
+        let request = VNDetectContoursRequest()
+        request.contrastAdjustment = 1.0
+        request.detectsDarkOnLight = false
+        request.maximumImageDimension = 768
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
+        }
+        guard let observation = request.results?.first else { return nil }
+
+        let combined = CGMutablePath()
+        var appended = false
+        for contour in observation.topLevelContours {
+            appended = append(contour, to: combined, minimumSpan: 0.08) || appended
+        }
+        guard appended else { return nil }
+        return combined
+    }
+
+    /// Appends a contour (and its holes) when it spans enough of the frame to be real structure.
+    private static func append(
+        _ contour: VNContour,
+        to path: CGMutablePath,
+        minimumSpan: CGFloat
+    ) -> Bool {
+        var appended = false
+        let contourPath = contour.normalizedPath
+        let box = contourPath.boundingBox
+        if contour.pointCount >= 12,
+           max(box.width, box.height) >= minimumSpan {
+            path.addPath(contourPath)
+            appended = true
+            // Holes (eyes / gaps) are legitimate but need a smaller span to survive.
+            for child in contour.childContours {
+                _ = append(child, to: path, minimumSpan: minimumSpan * 0.5)
+            }
+        }
+        return appended
+    }
+
+    /// Map Vision normalized path into an AppKit view rect (bottom-leading origin).
+    static func pathInView(normalized: CGPath, photoFrame: CGRect) -> CGPath? {
+        guard photoFrame.width > 1, photoFrame.height > 1 else { return nil }
+        var transform = CGAffineTransform(translationX: photoFrame.minX, y: photoFrame.minY)
+            .scaledBy(x: photoFrame.width, y: photoFrame.height)
+        return normalized.copy(using: &transform)
     }
 }
 
