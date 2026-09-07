@@ -113,15 +113,17 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         trailingDivider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        applyToolbarButtonChrome()
     }
 
     private func configureSubviews() {
-        configureToolbarButton(addFolderButton, symbol: "plus", toolTip: "Add folder…", tint: .secondaryLabelColor)
-        configureToolbarButton(removeFolderButton, symbol: "minus", toolTip: "Remove selected folder", tint: .secondaryLabelColor)
+        configureToolbarButton(addFolderButton, symbol: "plus", toolTip: "Add folder…")
+        configureToolbarButton(removeFolderButton, symbol: "minus", toolTip: "Remove selected folder")
         addFolderButton.target = self
         addFolderButton.action = #selector(addFolderPressed)
         removeFolderButton.target = self
         removeFolderButton.action = #selector(removeFolderPressed)
+        applyToolbarButtonChrome()
 
         toolbar.orientation = .horizontal
         toolbar.spacing = 6
@@ -262,21 +264,32 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
         }
     }
 
-    private func configureToolbarButton(_ button: NSButton, symbol: String, toolTip: String, tint: NSColor) {
-        button.bezelStyle = .accessoryBarAction
+    private func configureToolbarButton(_ button: NSButton, symbol: String, toolTip: String) {
+        button.bezelStyle = .inline
         button.isBordered = false
+        button.setButtonType(.momentaryChange)
+        button.focusRingType = .none
+        button.imagePosition = .imageOnly
         button.toolTip = toolTip
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip) {
+        if #available(macOS 11.0, *),
+           let image = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip) {
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-            button.image = image.withSymbolConfiguration(config)
-            button.image?.isTemplate = false
-            button.contentTintColor = tint
+            let templated = image.withSymbolConfiguration(config) ?? image
+            templated.isTemplate = true
+            button.image = templated
         }
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             button.widthAnchor.constraint(equalToConstant: 28),
             button.heightAnchor.constraint(equalToConstant: 28)
         ])
+    }
+
+    private func applyToolbarButtonChrome() {
+        // Same quiet grey as other sidebar chrome — never green/red accent.
+        let tint = NSColor.secondaryLabelColor
+        addFolderButton.contentTintColor = tint
+        removeFolderButton.contentTintColor = tint
     }
 
     func refresh() {
@@ -289,6 +302,7 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
             table.selectRowIndexes(IndexSet(integer: controller.selectedSidebarRow), byExtendingSelection: false)
         }
         removeFolderButton.isEnabled = controller.canRemoveSelectedRoot
+        applyToolbarButtonChrome()
         needsLayout = true
         updateScrollerVisibility()
     }
@@ -805,17 +819,43 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let plateView = LibraryPanelPlateView(style: .content)
     private let backButton = NSButton(title: "", target: nil, action: nil)
     private let forwardButton = NSButton(title: "", target: nil, action: nil)
-    private let openButton = NSButton(title: "Open…", target: nil, action: nil)
-    private let playAllButton = NSButton(title: "Play All", target: nil, action: nil)
-    private let batchPlayButton = NSButton(title: "Play", target: nil, action: nil)
-    private let batchQueueButton = NSButton(title: "Queue", target: nil, action: nil)
-    private let batchTrashButton = NSButton(title: "Trash", target: nil, action: nil)
-    private let layoutPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let openButton = LibraryPillButton(
+        title: "Open…",
+        symbol: "folder",
+        style: .labeled,
+        toolTip: "Open files"
+    )
+    private let playAllButton = LibraryPillButton(
+        title: "Play All",
+        symbol: "play.fill",
+        style: .labeled,
+        toolTip: "Play every video and image in this folder, in sort order"
+    )
+    private let batchPlayButton = LibraryPillButton(
+        title: "Play",
+        symbol: "play.fill",
+        style: .labeled,
+        toolTip: "Play selected items"
+    )
+    private let batchQueueButton = LibraryPillButton(
+        title: "Queue",
+        symbol: "text.badge.plus",
+        style: .labeled,
+        toolTip: "Add selected items to queue"
+    )
+    private let batchDeleteButton = LibraryPillButton(
+        title: "Delete",
+        symbol: "trash",
+        style: .labeled,
+        toolTip: "Move selected items to Trash"
+    )
+    private let batchEditPopUp = LibraryPillPopUp(symbol: "ellipsis", toolTip: "Edit selection")
+    private let layoutModeControl = LibraryLayoutModeSwitcher()
     private let galleryScaleSlider = NSSlider()
     private let layoutControlsStack = NSStackView()
     private let searchField = NSSearchField()
-    private let kindFilterPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let sortPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let kindFilterPopUp = LibraryLabeledPillMenu()
+    private let sortPopUp = LibraryPillPopUp(symbol: "arrow.up.arrow.down", toolTip: "Sort")
     private let gridScroll = NSScrollView()
     private let collectionView = LibraryGridCollectionView()
     private let browseListScroll = NSScrollView()
@@ -825,19 +865,26 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let breadcrumbStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "Empty folder")
     private let browsePlaceholder = LibraryBrowsePlaceholderView()
+    private let topOverflowFade = ScrollOverflowFadeView()
+    private let bottomOverflowFade = ScrollOverflowFadeView()
     private var toolbarTopConstraint: NSLayoutConstraint?
     private var contentTopBelowToolbarConstraint: NSLayoutConstraint?
     private var contentTopBelowViewConstraint: NSLayoutConstraint?
+    private var breadcrumbTrailingToSliderConstraint: NSLayoutConstraint?
+    private var breadcrumbTrailingToEdgeConstraint: NSLayoutConstraint?
     private var titleBarChromeVisible = false
     private var thumbnailTasks: [IndexPath: URL] = [:]
+    private let gridCollectionLayout = NSCollectionViewGridLayout()
     private var searchDebounceWork: DispatchWorkItem?
     private var suppressBrowseListSelection = false
     private var appliedTileMetrics: LibraryBrowseTileMetrics?
     private var suppressGalleryScaleChange = false
+    private var previewSelectionIndices: IndexSet?
     var onOpenMediaPanel: (() -> Void)?
     var onPlayAll: (() -> Void)?
     var onContextAction: ((LibraryBrowseContextAction, LibraryBrowseEntry) -> Void)?
     var onBatchAction: ((LibraryBrowseBatchAction, [LibraryBrowseEntry]) -> Void)?
+    private var suppressCollectionSelectionCallback = false
 
     init(controller: MediaLibraryController) {
         self.controller = controller
@@ -877,23 +924,26 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             emptyLabel.stringValue = controller.emptyGridMessage
         }
 
+        applyBrowseListContentInsets()
+        updateOverflowFades()
+
         let hideNavToolbar = showRecentList
         backButton.isHidden = hideNavToolbar || showFavoritesChrome
         forwardButton.isHidden = hideNavToolbar || showFavoritesChrome
         openButton.isHidden = hideNavToolbar
         playAllButton.isHidden = hideNavToolbar || showPlaceholder
         sortPopUp.isHidden = hideNavToolbar || !controller.showsBrowseSortControl
-        layoutPopUp.isHidden = hideNavToolbar || !controller.showsBrowseViewModeControl
-        layoutControlsStack.isHidden = layoutPopUp.isHidden
-        let showGalleryScale = !layoutPopUp.isHidden && mode == .gallery
+        layoutModeControl.isHidden = hideNavToolbar || !controller.showsBrowseViewModeControl
+        layoutControlsStack.isHidden = layoutModeControl.isHidden
+        let showGalleryScale = !layoutModeControl.isHidden && mode == .gallery
         galleryScaleSlider.isHidden = !showGalleryScale
+        breadcrumbTrailingToSliderConstraint?.isActive = showGalleryScale
+        breadcrumbTrailingToEdgeConstraint?.isActive = !showGalleryScale
         searchField.isHidden = hideNavToolbar || !controller.showsBrowseSearch
         kindFilterPopUp.isHidden = hideNavToolbar || !controller.showsKindFilter
 
         let batchVisible = controller.hasBatchSelection && !showPlaceholder && !showRecentList
-        batchPlayButton.isHidden = !batchVisible
-        batchQueueButton.isHidden = !batchVisible
-        batchTrashButton.isHidden = !batchVisible
+        updateBatchToolbar(visible: batchVisible)
         if batchVisible {
             playAllButton.isHidden = true
         }
@@ -933,9 +983,37 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         updateSortControl()
         syncCollectionSelection()
         syncBrowseListSelection()
+        applyVisibleSelectionChrome()
         playAllButton.isEnabled = controller.canPlayAllInBrowse
         if showPlaceholder {
             playAllButton.isHidden = true
+        }
+    }
+
+    /// Lightweight selection update — keeps checkmarks / batch chrome instant (no grid reload).
+    func refreshSelection() {
+        let showPlaceholder = controller.showsBrowsePlaceholder
+        let showRecentList = controller.showsRecentList
+        let batchVisible = controller.hasBatchSelection && !showPlaceholder && !showRecentList
+        updateBatchToolbar(visible: batchVisible)
+        if batchVisible {
+            playAllButton.isHidden = true
+        } else if !showRecentList && !showPlaceholder {
+            playAllButton.isHidden = false
+            playAllButton.isEnabled = controller.canPlayAllInBrowse
+        }
+        syncCollectionSelection()
+        syncBrowseListSelection()
+        applyVisibleSelectionChrome()
+    }
+
+    private func updateBatchToolbar(visible: Bool) {
+        batchPlayButton.isHidden = !visible
+        batchQueueButton.isHidden = !visible
+        batchDeleteButton.isHidden = !visible
+        batchEditPopUp.isHidden = !visible
+        if visible {
+            refreshBatchEditMenu()
         }
     }
 
@@ -943,8 +1021,20 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         for path in collectionView.indexPathsForVisibleItems() {
             guard let entry = controller.entry(at: path) else { continue }
             switch entry.kind {
-            case .folder:
-                (collectionView.item(at: path) as? LibraryFolderGridItem)?.applyMetrics(metrics)
+            case .folder(let folderURL):
+                guard let item = collectionView.item(at: path) as? LibraryFolderGridItem else { continue }
+                item.applyMetrics(metrics)
+                let counts = MediaLibraryScanner.mediaCounts(in: folderURL)
+                item.configure(name: entry.name, itemCount: counts.total, dateModified: entry.dateModified)
+                if !metrics.showsTitle {
+                    item.loadPreviews(folderURL: folderURL, maxSide: metrics.thumbnailMaxSide, indexPath: path) { [weak self, weak item] images, indexPath in
+                        guard let self, let item, self.thumbnailTasks[indexPath] == folderURL else { return }
+                        item.setPreviews(images)
+                    }
+                    thumbnailTasks[path] = folderURL
+                } else {
+                    thumbnailTasks.removeValue(forKey: path)
+                }
             case .media(let file):
                 guard let item = collectionView.item(at: path) as? LibraryMediaGridItem else { continue }
                 item.applyMetrics(metrics)
@@ -981,41 +1071,26 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         forwardButton.target = self
         forwardButton.action = #selector(forwardPressed)
 
-        openButton.bezelStyle = .rounded
-        openButton.font = .systemFont(ofSize: 11)
         openButton.target = self
         openButton.action = #selector(openPressed)
-        openButton.translatesAutoresizingMaskIntoConstraints = false
 
-        playAllButton.bezelStyle = .rounded
-        playAllButton.font = .systemFont(ofSize: 11)
-        playAllButton.toolTip = "Play every video and image in this folder, in sort order"
         playAllButton.target = self
         playAllButton.action = #selector(playAllPressed)
-        playAllButton.translatesAutoresizingMaskIntoConstraints = false
 
-        for button in [batchPlayButton, batchQueueButton, batchTrashButton] {
-            button.bezelStyle = .rounded
-            button.font = .systemFont(ofSize: 11)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.isHidden = true
-        }
-        batchPlayButton.toolTip = "Play selected items"
         batchPlayButton.target = self
         batchPlayButton.action = #selector(batchPlayPressed)
-        batchQueueButton.toolTip = "Add selected items to queue"
+        batchPlayButton.isHidden = true
         batchQueueButton.target = self
         batchQueueButton.action = #selector(batchQueuePressed)
-        batchTrashButton.toolTip = "Move selected items to Trash"
-        batchTrashButton.target = self
-        batchTrashButton.action = #selector(batchTrashPressed)
+        batchQueueButton.isHidden = true
+        batchDeleteButton.target = self
+        batchDeleteButton.action = #selector(batchDeletePressed)
+        batchDeleteButton.isHidden = true
 
-        layoutPopUp.font = .systemFont(ofSize: 11)
-        layoutPopUp.controlSize = .small
-        layoutPopUp.toolTip = "Layout"
-        layoutPopUp.translatesAutoresizingMaskIntoConstraints = false
-        layoutPopUp.target = self
-        layoutPopUp.action = #selector(layoutPopUpChanged)
+        batchEditPopUp.isHidden = true
+        refreshBatchEditMenu()
+
+        configureLayoutModeControl()
         updateLayoutControl()
 
         galleryScaleSlider.minValue = 0
@@ -1034,35 +1109,26 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
 
         layoutControlsStack.orientation = .horizontal
         layoutControlsStack.alignment = .centerY
-        layoutControlsStack.spacing = 8
+        layoutControlsStack.spacing = 10
         layoutControlsStack.translatesAutoresizingMaskIntoConstraints = false
-        layoutControlsStack.addArrangedSubview(galleryScaleSlider)
-        layoutControlsStack.addArrangedSubview(layoutPopUp)
+        layoutControlsStack.addArrangedSubview(layoutModeControl)
 
         searchField.placeholderString = "Search this folder"
         searchField.font = .systemFont(ofSize: 11)
-        searchField.controlSize = .small
+        searchField.controlSize = .regular
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
         searchField.sendsSearchStringImmediately = true
         searchField.target = self
         searchField.action = #selector(searchFieldChanged)
+        styleSearchFieldAsPill()
 
-        kindFilterPopUp.font = .systemFont(ofSize: 11)
-        kindFilterPopUp.controlSize = .small
         kindFilterPopUp.translatesAutoresizingMaskIntoConstraints = false
-        kindFilterPopUp.target = self
-        kindFilterPopUp.action = #selector(kindFilterChanged)
         updateKindFilterControl()
 
-        sortPopUp.font = .systemFont(ofSize: 11)
-        sortPopUp.controlSize = .small
-        sortPopUp.translatesAutoresizingMaskIntoConstraints = false
-        sortPopUp.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        sortPopUp.cell?.lineBreakMode = .byTruncatingTail
         updateSortControl()
 
-        let layout = NSCollectionViewGridLayout()
+        let layout = gridCollectionLayout
         layout.margins = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
         collectionView.collectionViewLayout = layout
         applyCollectionLayout(animated: false)
@@ -1072,8 +1138,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         collectionView.allowsMultipleSelection = true
         collectionView.delegate = self
         collectionView.dataSource = self
+        collectionView.multiSelectHost = self
         collectionView.contextMenuProvider = { [weak self] event, collectionView in
             self?.contextMenu(for: event, in: collectionView)
+        }
+        collectionView.onKeyCommand = { [weak self] command in
+            self?.handleGridKeyCommand(command) ?? false
         }
         collectionView.register(LibraryFolderGridItem.self, forItemWithIdentifier: LibraryFolderGridItem.reuseID)
         collectionView.register(LibraryMediaGridItem.self, forItemWithIdentifier: LibraryMediaGridItem.reuseID)
@@ -1136,7 +1206,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         addSubview(playAllButton)
         addSubview(batchPlayButton)
         addSubview(batchQueueButton)
-        addSubview(batchTrashButton)
+        addSubview(batchDeleteButton)
+        addSubview(batchEditPopUp)
         addSubview(searchField)
         addSubview(kindFilterPopUp)
         addSubview(layoutControlsStack)
@@ -1144,7 +1215,17 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         addSubview(gridScroll)
         addSubview(browseListScroll)
         addSubview(recentListScroll)
+
+        topOverflowFade.edge = .top
+        topOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+        bottomOverflowFade.edge = .bottom
+        bottomOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(topOverflowFade)
+        addSubview(bottomOverflowFade)
+        refreshOverflowFadeFloor()
+
         addSubview(breadcrumbStack)
+        addSubview(galleryScaleSlider)
         addSubview(emptyLabel)
         addSubview(browsePlaceholder)
     }
@@ -1184,8 +1265,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         browseListScroll.scrollerStyle = .overlay
         browseListScroll.drawsBackground = false
         browseListScroll.borderType = .noBorder
+        browseListScroll.automaticallyAdjustsContentInsets = false
         browseListScroll.translatesAutoresizingMaskIntoConstraints = false
         browseListScroll.isHidden = true
+        applyBrowseListContentInsets()
     }
 
     func syncTitleBarContentInset(chromeVisible: Bool) {
@@ -1196,11 +1279,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyTitleBarContentInset()
-    }
-
-    override func layout() {
-        super.layout()
-        applyTitleBarContentInset()
+        updateOverflowFades()
     }
 
     private func applyTitleBarContentInset() {
@@ -1226,7 +1305,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         toolbarTopConstraint = backButton.topAnchor.constraint(equalTo: topAnchor, constant: 18)
         contentTopBelowToolbarConstraint = gridScroll.topAnchor.constraint(
             equalTo: backButton.bottomAnchor,
-            constant: 12
+            constant: 18
         )
         contentTopBelowViewConstraint = gridScroll.topAnchor.constraint(equalTo: topAnchor, constant: 24)
         contentTopBelowViewConstraint?.isActive = false
@@ -1236,10 +1315,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             backButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             forwardButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            forwardButton.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 2),
+            forwardButton.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 8),
 
             openButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            openButton.leadingAnchor.constraint(equalTo: forwardButton.trailingAnchor, constant: 12),
+            openButton.leadingAnchor.constraint(equalTo: forwardButton.trailingAnchor, constant: 20),
 
             playAllButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             playAllButton.leadingAnchor.constraint(equalTo: openButton.trailingAnchor, constant: 8),
@@ -1248,24 +1327,28 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             batchPlayButton.leadingAnchor.constraint(equalTo: openButton.trailingAnchor, constant: 8),
             batchQueueButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             batchQueueButton.leadingAnchor.constraint(equalTo: batchPlayButton.trailingAnchor, constant: 6),
-            batchTrashButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            batchTrashButton.leadingAnchor.constraint(equalTo: batchQueueButton.trailingAnchor, constant: 6),
+            batchDeleteButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            batchDeleteButton.leadingAnchor.constraint(equalTo: batchQueueButton.trailingAnchor, constant: 6),
+            batchEditPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            batchEditPopUp.leadingAnchor.constraint(equalTo: batchDeleteButton.trailingAnchor, constant: 6),
 
             sortPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             sortPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
-            layoutControlsStack.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            layoutControlsStack.trailingAnchor.constraint(equalTo: sortPopUp.leadingAnchor, constant: -8),
-
             kindFilterPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            kindFilterPopUp.trailingAnchor.constraint(equalTo: layoutControlsStack.leadingAnchor, constant: -8),
-            kindFilterPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 100),
+            kindFilterPopUp.trailingAnchor.constraint(equalTo: sortPopUp.leadingAnchor, constant: -8),
 
             searchField.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             searchField.trailingAnchor.constraint(equalTo: kindFilterPopUp.leadingAnchor, constant: -8),
             searchField.widthAnchor.constraint(equalToConstant: 160),
-            searchField.leadingAnchor.constraint(greaterThanOrEqualTo: batchTrashButton.trailingAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(greaterThanOrEqualTo: layoutControlsStack.trailingAnchor, constant: 16),
+            searchField.leadingAnchor.constraint(greaterThanOrEqualTo: batchEditPopUp.trailingAnchor, constant: 12),
             searchField.leadingAnchor.constraint(greaterThanOrEqualTo: playAllButton.trailingAnchor, constant: 12),
+
+            layoutControlsStack.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            layoutControlsStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            layoutControlsStack.leadingAnchor.constraint(greaterThanOrEqualTo: batchEditPopUp.trailingAnchor, constant: 12),
+            layoutControlsStack.leadingAnchor.constraint(greaterThanOrEqualTo: playAllButton.trailingAnchor, constant: 12),
 
             contentTopBelowToolbarConstraint!,
             gridScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -1282,6 +1365,16 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             recentListScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             recentListScroll.bottomAnchor.constraint(equalTo: breadcrumbStack.topAnchor, constant: -6),
 
+            topOverflowFade.leadingAnchor.constraint(equalTo: gridScroll.leadingAnchor),
+            topOverflowFade.trailingAnchor.constraint(equalTo: gridScroll.trailingAnchor),
+            topOverflowFade.topAnchor.constraint(equalTo: gridScroll.topAnchor),
+            topOverflowFade.heightAnchor.constraint(equalToConstant: 40),
+
+            bottomOverflowFade.leadingAnchor.constraint(equalTo: gridScroll.leadingAnchor),
+            bottomOverflowFade.trailingAnchor.constraint(equalTo: gridScroll.trailingAnchor),
+            bottomOverflowFade.bottomAnchor.constraint(equalTo: gridScroll.bottomAnchor),
+            bottomOverflowFade.heightAnchor.constraint(equalToConstant: 40),
+
             emptyLabel.centerXAnchor.constraint(equalTo: gridScroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: gridScroll.centerYAnchor),
 
@@ -1289,9 +1382,21 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             browsePlaceholder.centerYAnchor.constraint(equalTo: gridScroll.centerYAnchor),
 
             breadcrumbStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            breadcrumbStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            breadcrumbStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+            breadcrumbStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+
+            galleryScaleSlider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            galleryScaleSlider.centerYAnchor.constraint(equalTo: breadcrumbStack.centerYAnchor)
         ])
+
+        breadcrumbTrailingToSliderConstraint = breadcrumbStack.trailingAnchor.constraint(
+            lessThanOrEqualTo: galleryScaleSlider.leadingAnchor,
+            constant: -12
+        )
+        breadcrumbTrailingToEdgeConstraint = breadcrumbStack.trailingAnchor.constraint(
+            lessThanOrEqualTo: trailingAnchor,
+            constant: -16
+        )
+        breadcrumbTrailingToEdgeConstraint?.isActive = true
     }
 
     private func configureNavButton(_ button: NSButton, symbol: String, toolTip: String) {
@@ -1304,6 +1409,57 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             button.image?.isTemplate = true
         }
         button.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func applyToolbarSymbol(_ button: NSButton, symbol: String, pointSize: CGFloat) {
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.title) else { return }
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        button.image = image.withSymbolConfiguration(config)
+        button.imagePosition = .imageLeading
+        button.contentTintColor = .labelColor
+    }
+
+    private func styleSearchFieldAsPill() {
+        searchField.wantsLayer = true
+        searchField.layer?.masksToBounds = true
+        searchField.focusRingType = .none
+        searchField.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        searchField.layer?.cornerRadius = 15
+        searchField.layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: searchField.effectiveAppearance).cgColor
+    }
+
+    private func refreshBrowseToolbarPillChrome() {
+        openButton.refreshChrome()
+        playAllButton.refreshChrome()
+        batchPlayButton.refreshChrome()
+        batchQueueButton.refreshChrome()
+        batchDeleteButton.refreshChrome()
+        batchEditPopUp.refreshChrome()
+        sortPopUp.refreshChrome()
+        kindFilterPopUp.refreshChrome()
+        styleSearchFieldAsPill()
+    }
+
+    private func refreshBatchEditMenu() {
+        var items: [NSMenuItem] = []
+        let selectAll = NSMenuItem(title: "Select All", action: #selector(batchContextSelectAll), keyEquivalent: "")
+        selectAll.target = self
+        items.append(selectAll)
+        let deselect = NSMenuItem(title: "Deselect All", action: #selector(batchContextDeselectAll), keyEquivalent: "")
+        deselect.target = self
+        items.append(deselect)
+        batchEditPopUp.setPullDownItems(items, iconSymbol: "ellipsis")
+    }
+
+    private func configureLayoutModeControl() {
+        layoutModeControl.translatesAutoresizingMaskIntoConstraints = false
+        layoutModeControl.onChange = { [weak self] mode in
+            self?.controller.setViewMode(mode)
+        }
+    }
+
+    private func updateLayoutControl() {
+        layoutModeControl.setSelectedMode(controller.viewMode, animated: false)
     }
 
     private func updateBreadcrumb() {
@@ -1337,12 +1493,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     private func updateSortControl() {
+        guard controller.showsBrowseSortControl else { return }
         let sort = controller.browseSort
-        let showSort = controller.showsBrowseSortControl
-        sortPopUp.isHidden = !showSort
-        guard showSort else { return }
 
-        let menu = NSMenu()
+        var items: [NSMenuItem] = []
         for key in LibraryBrowseSortKey.allCases {
             let item = NSMenuItem(
                 title: key.menuTitle,
@@ -1352,9 +1506,9 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             item.target = self
             item.tag = key.menuTag
             item.state = sort.key == key ? .on : .off
-            menu.addItem(item)
+            items.append(item)
         }
-        menu.addItem(.separator())
+        items.append(.separator())
         for direction in [LibraryBrowseSortDirection.ascending, .descending] {
             let item = NSMenuItem(
                 title: direction.menuTitle,
@@ -1366,42 +1520,32 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
                 ? LibraryBrowseSortDirection.ascendingMenuTag
                 : LibraryBrowseSortDirection.descendingMenuTag
             item.state = sort.direction == direction ? .on : .off
-            menu.addItem(item)
+            items.append(item)
         }
-
-        sortPopUp.menu = menu
-        sortPopUp.select(nil)
-        sortPopUp.title = sort.key.menuTitle
+        sortPopUp.setPullDownItems(items, iconSymbol: "arrow.up.arrow.down")
     }
 
     private func updateKindFilterControl() {
         let selected = controller.kindFilter
-        let menu = NSMenu()
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        var items: [NSMenuItem] = []
         for filter in LibraryKindFilter.allCases {
             let item = NSMenuItem(title: filter.title, action: #selector(kindFilterMenuChosen(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = filter.rawValue
             item.state = filter == selected ? .on : .off
-            menu.addItem(item)
+            if let image = NSImage(systemSymbolName: filter.symbolName, accessibilityDescription: filter.title) {
+                let configured = image.withSymbolConfiguration(symbolConfig)
+                configured?.isTemplate = true
+                item.image = configured
+            }
+            items.append(item)
         }
-        kindFilterPopUp.menu = menu
-        kindFilterPopUp.select(nil)
-        kindFilterPopUp.title = selected.title
-    }
-
-    private func updateLayoutControl() {
-        let selected = controller.viewMode
-        let menu = NSMenu()
-        for mode in LibraryBrowseViewMode.allCases {
-            let item = NSMenuItem(title: mode.menuTitle, action: #selector(layoutMenuChosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = mode.rawValue
-            item.state = mode == selected ? .on : .off
-            menu.addItem(item)
-        }
-        layoutPopUp.menu = menu
-        layoutPopUp.select(nil)
-        layoutPopUp.title = selected.menuTitle
+        kindFilterPopUp.setContent(
+            title: selected.title,
+            symbolName: selected.symbolName,
+            menuItems: items
+        )
     }
 
     private func updateGalleryScaleControl() {
@@ -1420,15 +1564,23 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     private func applyCollectionLayout(animated: Bool) {
-        guard let layout = collectionView.collectionViewLayout as? NSCollectionViewGridLayout else { return }
         let metrics = controller.tileMetrics
         let apply = {
+            if self.collectionView.collectionViewLayout !== self.gridCollectionLayout {
+                self.collectionView.collectionViewLayout = self.gridCollectionLayout
+            }
+            let layout = self.gridCollectionLayout
             layout.minimumItemSize = metrics.minItemSize
             layout.maximumItemSize = metrics.maxItemSize
             layout.minimumInteritemSpacing = metrics.interitemSpacing
             layout.minimumLineSpacing = metrics.lineSpacing
-            let inset = metrics.contentInset
-            layout.margins = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
+            let side = metrics.contentInset
+            layout.margins = NSEdgeInsets(
+                top: metrics.contentTopInset,
+                left: side,
+                bottom: max(side, 18),
+                right: side
+            )
             layout.invalidateLayout()
         }
         if animated {
@@ -1442,12 +1594,144 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             apply()
         }
         appliedTileMetrics = metrics
+        applyBrowseListContentInsets()
+        updateOverflowFades()
+    }
+
+    private func applyBrowseListContentInsets() {
+        let metrics = controller.tileMetrics
+        let insets = NSEdgeInsets(
+            top: metrics.contentTopInset,
+            left: 8,
+            bottom: max(metrics.contentInset, 18),
+            right: 8
+        )
+        browseListScroll.contentInsets = insets
+        browseListScroll.scrollerInsets = NSEdgeInsets(
+            top: metrics.contentTopInset,
+            left: 0,
+            bottom: max(metrics.contentInset, 18),
+            right: 0
+        )
+    }
+
+    private func refreshOverflowFadeFloor() {
+        let floor = LaughTheme.libraryContentBackground(appearance: effectiveAppearance)
+        topOverflowFade.floorColor = floor
+        bottomOverflowFade.floorColor = floor
+    }
+
+    private func updateOverflowFades() {
+        refreshOverflowFadeFloor()
+        let activeScroll: NSScrollView?
+        if !gridScroll.isHidden {
+            activeScroll = gridScroll
+        } else if !browseListScroll.isHidden {
+            activeScroll = browseListScroll
+        } else if !recentListScroll.isHidden {
+            activeScroll = recentListScroll
+        } else {
+            activeScroll = nil
+        }
+
+        guard let activeScroll else {
+            topOverflowFade.detach()
+            bottomOverflowFade.detach()
+            topOverflowFade.alphaValue = 0
+            bottomOverflowFade.alphaValue = 0
+            topOverflowFade.isHidden = true
+            bottomOverflowFade.isHidden = true
+            return
+        }
+
+        topOverflowFade.attach(to: activeScroll)
+        bottomOverflowFade.attach(to: activeScroll)
+        addSubview(topOverflowFade, positioned: .above, relativeTo: nil)
+        addSubview(bottomOverflowFade, positioned: .above, relativeTo: nil)
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshOverflowFadeFloor()
+        refreshBrowseToolbarPillChrome()
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
+    }
+
+    override func layout() {
+        super.layout()
+        applyTitleBarContentInset()
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
     }
 
     private func syncCollectionSelection() {
         let paths = Set(controller.selectedEntryIndices.map { IndexPath(item: $0, section: 0) })
+        suppressCollectionSelectionCallback = true
+        defer { suppressCollectionSelectionCallback = false }
         if collectionView.selectionIndexPaths != paths {
             collectionView.selectionIndexPaths = paths
+        }
+    }
+
+    private func applyVisibleSelectionChrome() {
+        let live = previewSelectionIndices ?? controller.selectedEntryIndices
+        let previewing = previewSelectionIndices != nil
+        for path in collectionView.indexPathsForVisibleItems() {
+            let resolved: LibraryTileSelectionChrome
+            if !live.contains(path.item) {
+                resolved = .none
+            } else if previewing {
+                resolved = .preview
+            } else {
+                resolved = .selected
+            }
+            configureSelectableItem(at: path, chrome: resolved)
+        }
+    }
+
+    private func configureSelectableItem(at path: IndexPath, chrome: LibraryTileSelectionChrome) {
+        let index = path.item
+        if let folder = collectionView.item(at: path) as? LibraryFolderGridItem {
+            folder.onDeselectRequested = { [weak self] in
+                self?.deselectTile(at: index)
+            }
+            folder.applySelectionChrome(chrome)
+        } else if let media = collectionView.item(at: path) as? LibraryMediaGridItem {
+            media.onDeselectRequested = { [weak self] in
+                self?.deselectTile(at: index)
+            }
+            media.applySelectionChrome(chrome)
+        }
+    }
+
+    private func deselectTile(at index: Int) {
+        controller.removeFromMultiSelection(at: index)
+        syncCollectionSelection()
+        applyVisibleSelectionChrome()
+    }
+
+    private func handleGridKeyCommand(_ command: LibraryGridKeyCommand) -> Bool {
+        switch command {
+        case .escape:
+            guard controller.hasBatchSelection else { return false }
+            controller.clearMultiSelection()
+            return true
+        case .selectAll:
+            controller.selectAllDisplayed()
+            return true
+        case .move(let delta, let extending):
+            guard !controller.displayedEntries.isEmpty else { return false }
+            controller.moveSelection(by: delta, extending: extending)
+            if let focus = controller.selectionFocusIndex {
+                collectionView.scrollToItems(
+                    at: [IndexPath(item: focus, section: 0)],
+                    scrollPosition: .nearestHorizontalEdge
+                )
+            }
+            return true
         }
     }
 
@@ -1507,16 +1791,6 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
 
     @objc private func playAllPressed() { onPlayAll?() }
 
-    @objc private func layoutPopUpChanged() {
-        // Selection handled via menu items.
-    }
-
-    @objc private func layoutMenuChosen(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = LibraryBrowseViewMode(rawValue: raw) else { return }
-        controller.setViewMode(mode)
-    }
-
     @objc private func galleryScaleChanged() {
         guard !suppressGalleryScaleChange else { return }
         let scale = LibraryBrowseGalleryScale.from(sliderValue: galleryScaleSlider.doubleValue)
@@ -1536,10 +1810,6 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSSearchField === searchField else { return }
         searchFieldChanged()
-    }
-
-    @objc private func kindFilterChanged() {
-        // Selection driven by menu items.
     }
 
     @objc private func kindFilterMenuChosen(_ sender: NSMenuItem) {
@@ -1562,7 +1832,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         controller.clearMultiSelection()
     }
 
-    @objc private func batchTrashPressed() {
+    @objc private func batchDeletePressed() {
         let entries = controller.selectedEntries
         guard !entries.isEmpty else { return }
         onBatchAction?(.remove, entries)
@@ -1726,10 +1996,18 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         let entry = controller.displayedEntries[indexPath.item]
         let metrics = controller.tileMetrics
         switch entry.kind {
-        case .folder:
+        case .folder(let folderURL):
             let item = collectionView.makeItem(withIdentifier: LibraryFolderGridItem.reuseID, for: indexPath) as! LibraryFolderGridItem
             item.applyMetrics(metrics)
-            item.configure(name: entry.name)
+            let counts = MediaLibraryScanner.mediaCounts(in: folderURL)
+            item.configure(name: entry.name, itemCount: counts.total, dateModified: entry.dateModified)
+            if !metrics.showsTitle {
+                item.loadPreviews(folderURL: folderURL, maxSide: metrics.thumbnailMaxSide, indexPath: indexPath) { [weak self, weak item] images, path in
+                    guard let self, let item, self.thumbnailTasks[path] == folderURL else { return }
+                    item.setPreviews(images)
+                }
+                thumbnailTasks[indexPath] = folderURL
+            }
             return item
         case .media(let file):
             let item = collectionView.makeItem(withIdentifier: LibraryMediaGridItem.reuseID, for: indexPath) as! LibraryMediaGridItem
@@ -1749,15 +2027,28 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         willDisplay item: NSCollectionViewItem,
         forRepresentedObjectAt indexPath: IndexPath
     ) {
-        guard let entry = controller.entry(at: indexPath) else {
-            item.view.menu = nil
-            return
+        // Context menus come from LibraryGridCollectionView.contextMenuProvider.
+        item.view.menu = nil
+        let live = previewSelectionIndices ?? controller.selectedEntryIndices
+        let chrome: LibraryTileSelectionChrome
+        if !live.contains(indexPath.item) {
+            chrome = .none
+        } else if previewSelectionIndices != nil {
+            chrome = .preview
+        } else {
+            chrome = .selected
         }
-        item.view.menu = buildContextMenu(for: entry, itemIndex: indexPath.item)
+        configureSelectableItem(at: indexPath, chrome: chrome)
     }
 
     func collectionView(_ collectionView: NSCollectionView, shouldSelectItemsAt indexPaths: Set<IndexPath>) -> Set<IndexPath> {
+        if suppressCollectionSelectionCallback { return indexPaths }
         guard let event = NSApp.currentEvent else { return indexPaths }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Custom marquee/paint/open path owns unmodified clicks.
+        if !flags.contains(.command) && !flags.contains(.shift) {
+            return []
+        }
         return Set(indexPaths.filter { path in
             guard let entry = controller.entry(at: path) else { return false }
             if case .folder = entry.kind {
@@ -1769,31 +2060,33 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+        if suppressCollectionSelectionCallback { return }
         let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
         if flags.contains(.command) || flags.contains(.shift) {
             let indices = IndexSet(indexPaths.map(\.item))
             if flags.contains(.shift), let last = indices.max() {
                 controller.extendMultiSelection(to: last)
-            } else {
-                controller.setMultiSelection(indices.union(controller.selectedEntryIndices))
+            } else if flags.contains(.command) {
+                // Union newly selected (toggle off handled in didDeselect).
+                controller.setMultiSelection(indices.union(controller.selectedEntryIndices), anchor: indices.max())
             }
             syncCollectionSelection()
+            applyVisibleSelectionChrome()
             return
         }
-        guard let indexPath = indexPaths.first,
-              let entry = controller.entry(at: indexPath) else { return }
-        openBrowseEntry(entry)
-        collectionView.deselectAll(nil)
+        // Unmodified selection is handled by LibraryGridCollectionView multi-select host.
     }
 
     func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
+        if suppressCollectionSelectionCallback { return }
         let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
         guard flags.contains(.command) else { return }
         var next = controller.selectedEntryIndices
         for path in indexPaths {
             next.remove(path.item)
         }
-        controller.setMultiSelection(next)
+        controller.setMultiSelection(next, anchor: next.max())
+        applyVisibleSelectionChrome()
     }
 
     func collectionView(_ collectionView: NSCollectionView, menuFor event: NSEvent) -> NSMenu? {
@@ -1801,10 +2094,23 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     }
 
     private func contextMenu(for event: NSEvent, in collectionView: NSCollectionView) -> NSMenu? {
-        guard let indexPath = indexPath(for: event, in: collectionView),
-              let entry = controller.entry(at: indexPath) else {
+        guard let indexPath = indexPath(for: event, in: collectionView) else {
+            if controller.hasBatchSelection {
+                return buildEmptySpaceContextMenu()
+            }
             return nil
         }
+        guard controller.entry(at: indexPath) != nil else { return nil }
+
+        if controller.selectedEntryIndices.contains(indexPath.item), controller.hasBatchSelection {
+            return buildBatchContextMenu()
+        }
+
+        // Right-click outside selection replaces selection with that tile, then single-item menu.
+        controller.setMultiSelection(IndexSet(integer: indexPath.item), anchor: indexPath.item)
+        syncCollectionSelection()
+        applyVisibleSelectionChrome()
+        guard let entry = controller.entry(at: indexPath) else { return nil }
         return buildContextMenu(for: entry, itemIndex: indexPath.item)
     }
 
@@ -1813,7 +2119,6 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         if let indexPath = collectionView.indexPathForItem(at: point) {
             return indexPath
         }
-        // Fallback: hit-test item views (grid layout can miss indexPathForItem at edges).
         for indexPath in collectionView.indexPathsForVisibleItems() {
             guard let item = collectionView.item(at: indexPath) else { continue }
             let pointInItem = item.view.convert(event.locationInWindow, from: nil)
@@ -1822,6 +2127,35 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             }
         }
         return nil
+    }
+
+    private func buildBatchContextMenu() -> NSMenu {
+        let entries = controller.selectedEntries
+        let hasPlayable = entries.contains { entryHasPlayableMedia($0) }
+        let menu = NSMenu()
+
+        func append(_ title: String, action: Selector, enabled: Bool = true) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = enabled
+        }
+
+        append("Play", action: #selector(batchContextPlay), enabled: hasPlayable)
+        append("Add to Queue", action: #selector(batchContextQueue), enabled: hasPlayable)
+        append("Move to Trash", action: #selector(batchContextTrash))
+        menu.addItem(.separator())
+        append("Select All", action: #selector(batchContextSelectAll))
+        append("Deselect All", action: #selector(batchContextDeselectAll))
+        return menu
+    }
+
+    private func buildEmptySpaceContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let deselect = menu.addItem(withTitle: "Deselect All", action: #selector(batchContextDeselectAll), keyEquivalent: "")
+        deselect.target = self
+        let selectAll = menu.addItem(withTitle: "Select All", action: #selector(batchContextSelectAll), keyEquivalent: "")
+        selectAll.target = self
+        return menu
     }
 
     private func buildContextMenu(for entry: LibraryBrowseEntry, itemIndex: Int) -> NSMenu {
@@ -1843,6 +2177,11 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         appendItem("Show in Finder", action: #selector(contextMenuShowInFinder(_:)))
         menu.addItem(.separator())
         appendItem("Remove", action: #selector(contextMenuRemove(_:)))
+        menu.addItem(.separator())
+        appendItem("Select All", action: #selector(batchContextSelectAll))
+        if controller.hasBatchSelection {
+            appendItem("Deselect All", action: #selector(batchContextDeselectAll))
+        }
         return menu
     }
 
@@ -1870,39 +2209,134 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     @objc private func contextMenuRename(_ sender: NSMenuItem) { performContextAction(.rename, sender: sender) }
     @objc private func contextMenuShowInFinder(_ sender: NSMenuItem) { performContextAction(.showInFinder, sender: sender) }
     @objc private func contextMenuRemove(_ sender: NSMenuItem) { performContextAction(.remove, sender: sender) }
-}
 
-// MARK: - Collection view (explicit right-click)
-
-private final class LibraryGridCollectionView: NSCollectionView {
-    var contextMenuProvider: ((NSEvent, NSCollectionView) -> NSMenu?)?
-
-    override func rightMouseDown(with event: NSEvent) {
-        if let menu = contextMenuProvider?(event, self) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
-            return
-        }
-        super.rightMouseDown(with: event)
+    @objc private func batchContextPlay() {
+        let entries = controller.selectedEntries
+        guard !entries.isEmpty else { return }
+        onBatchAction?(.play, entries)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? {
-        contextMenuProvider?(event, self) ?? super.menu(for: event)
+    @objc private func batchContextQueue() {
+        let entries = controller.selectedEntries
+        guard !entries.isEmpty else { return }
+        onBatchAction?(.addToQueue, entries)
+    }
+
+    @objc private func batchContextTrash() {
+        let entries = controller.selectedEntries
+        guard !entries.isEmpty else { return }
+        onBatchAction?(.remove, entries)
+    }
+
+    @objc private func batchContextSelectAll() {
+        controller.selectAllDisplayed()
+    }
+
+    @objc private func batchContextDeselectAll() {
+        controller.clearMultiSelection()
+    }
+}
+
+// MARK: - Multi-select host
+
+extension LibraryBrowseView: LibraryGridMultiSelectHost {
+    func committedSelectionIndices() -> IndexSet {
+        controller.selectedEntryIndices
+    }
+
+    func selectionGestureDidUpdatePreview(_ indices: IndexSet) {
+        previewSelectionIndices = indices
+        applyVisibleSelectionChrome()
+    }
+
+    func selectionGestureDidCommit(_ indices: IndexSet) {
+        previewSelectionIndices = nil
+        controller.setMultiSelection(indices, anchor: indices.max())
+        syncCollectionSelection()
+        applyVisibleSelectionChrome()
+    }
+
+    func selectionGestureDidRequestOpen(at index: Int) {
+        previewSelectionIndices = nil
+        let path = IndexPath(item: index, section: 0)
+        guard let entry = controller.entry(at: path) else { return }
+        if case .folder = entry.kind {
+            guard let event = NSApp.currentEvent,
+                  let item = collectionView.item(at: path) as? LibraryFolderGridItem,
+                  item.containsFolderGlyphHit(for: event) else {
+                applyVisibleSelectionChrome()
+                return
+            }
+        }
+        openBrowseEntry(entry)
+        syncCollectionSelection()
+        applyVisibleSelectionChrome()
     }
 }
 
 // MARK: - Grid items
 
 private class LibraryGridItemView: NSView {
+    /// Optional deselect control that must still receive clicks.
+    var interactiveChromeHitTest: ((NSPoint) -> NSView?)?
+
+    private var parentGridCollection: LibraryGridCollectionView? {
+        sequence(first: superview as NSView?, next: { $0?.superview })
+            .compactMap { $0 as? LibraryGridCollectionView }
+            .first
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if let chromeHit = interactiveChromeHitTest?(local) {
+            return chromeHit
+        }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let collection = parentGridCollection {
+            collection.mouseDown(with: event)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if let collection = parentGridCollection {
+            collection.mouseDragged(with: event)
+            return
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let collection = parentGridCollection {
+            collection.mouseUp(with: event)
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         if let menu {
             NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        if let collection = parentGridCollection {
+            collection.rightMouseDown(with: event)
             return
         }
         super.rightMouseDown(with: event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        menu ?? super.menu(for: event)
+        if let menu { return menu }
+        if let collection = parentGridCollection {
+            return collection.menu(for: event)
+        }
+        return super.menu(for: event)
     }
 }
 
@@ -1946,188 +2380,746 @@ private func configureLibraryGridNameLabel(_ label: NSTextField, fontSize: CGFlo
     label.translatesAutoresizingMaskIntoConstraints = false
 }
 
-private final class LibraryFolderGridItem: NSCollectionViewItem {
+private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectableGridItem {
     static let reuseID = NSUserInterfaceItemIdentifier("LibraryFolderGridItem")
 
-    private let plateView = LibraryFolderPlateView()
-    private let titleBar = LibraryFolderTitleBarView()
-    private let iconView = NSImageView()
+    private let cardView = LibraryFolderCardChromeView()
+    private let previewHost = NSView()
+    private let collageGap: CGFloat = 1
+    private let leftThumb = LibraryCoverImageView()
+    private let rightTopThumb = LibraryCoverImageView()
+    private let rightBottomThumb = LibraryCoverImageView()
+    private let emptyIconView = NSImageView()
+    private let folderGlyphView = NSImageView()
+    private let badgeView = NSView()
+    private let badgeIconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private var iconWidthConstraint: NSLayoutConstraint?
-    private var iconHeightConstraint: NSLayoutConstraint?
-    private var iconCenterYConstraint: NSLayoutConstraint?
-    private var iconTopConstraint: NSLayoutConstraint?
-    private var titleBarHeightConstraint: NSLayoutConstraint?
-    private var nameLeadingConstraint: NSLayoutConstraint?
-    private var nameTrailingConstraint: NSLayoutConstraint?
-    private var isGalleryStyle = false
+    private let metaLabel = NSTextField(labelWithString: "")
+    private let selectionChrome = LibraryTileSelectionChromeView()
+    var onDeselectRequested: (() -> Void)?
+
+    private var previewHeightConstraint: NSLayoutConstraint?
+    private var previewTopConstraint: NSLayoutConstraint?
+    private var rightColumnWidthConstraint: NSLayoutConstraint?
+    private var leftTrailingToRightConstraint: NSLayoutConstraint?
+    private var leftTrailingToPreviewConstraint: NSLayoutConstraint?
+    private var nameTopConstraint: NSLayoutConstraint?
+    private var metaBottomConstraint: NSLayoutConstraint?
+    private var nameMetaSpacingConstraint: NSLayoutConstraint?
+    private var cardTopConstraint: NSLayoutConstraint?
+    private var cardLeadingConstraint: NSLayoutConstraint?
+    private var cardTrailingConstraint: NSLayoutConstraint?
+    private var cardBottomConstraint: NSLayoutConstraint?
+    private var folderGlyphSideConstraint: NSLayoutConstraint?
+    private var loadToken = UUID()
+    private var folderURL: URL?
+    private var usesIconOnlyLayout = false
+
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
 
     override func loadView() {
         view = LibraryGridItemView()
         view.wantsLayer = true
-        view.layer?.cornerRadius = 8
-        view.layer?.masksToBounds = true
+        view.layer?.masksToBounds = false
 
-        plateView.wantsLayer = true
-        plateView.layer?.cornerRadius = 8
-        plateView.translatesAutoresizingMaskIntoConstraints = false
-        plateView.refreshFill = { [weak self] in
-            self?.applyFolderPlateFill()
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 6
+        cardView.layer?.masksToBounds = true
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        cardView.onAppearanceChange = { [weak self] in
+            self?.applyChrome()
         }
 
-        titleBar.translatesAutoresizingMaskIntoConstraints = false
+        previewHost.wantsLayer = true
+        previewHost.layer?.cornerRadius = 4
+        previewHost.layer?.masksToBounds = true
+        previewHost.translatesAutoresizingMaskIntoConstraints = false
 
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        applyFolderIcon(pointSize: 46)
+        for thumb in [leftThumb, rightTopThumb, rightBottomThumb] {
+            thumb.translatesAutoresizingMaskIntoConstraints = false
+            thumb.setFillMode(true, placeholderBackground: nil)
+            previewHost.addSubview(thumb)
+        }
 
-        configureLibraryGridNameLabel(nameLabel, fontSize: 11)
+        emptyIconView.imageScaling = .scaleNone
+        emptyIconView.translatesAutoresizingMaskIntoConstraints = false
+        previewHost.addSubview(emptyIconView)
 
-        view.addSubview(plateView)
-        view.addSubview(iconView)
-        view.addSubview(titleBar)
-        view.addSubview(nameLabel)
+        folderGlyphView.imageScaling = .scaleProportionallyUpOrDown
+        folderGlyphView.translatesAutoresizingMaskIntoConstraints = false
+        folderGlyphView.isHidden = true
+        cardView.addSubview(folderGlyphView)
 
-        let width = iconView.widthAnchor.constraint(equalToConstant: 68)
-        let height = iconView.heightAnchor.constraint(equalToConstant: 68)
-        let iconTop = iconView.topAnchor.constraint(equalTo: view.topAnchor, constant: 6)
-        let iconCenterY = iconView.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -10)
-        let titleHeight = titleBar.heightAnchor.constraint(equalToConstant: 38)
-        let nameLeading = nameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8)
-        let nameTrailing = nameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8)
-        iconWidthConstraint = width
-        iconHeightConstraint = height
-        iconTopConstraint = iconTop
-        iconCenterYConstraint = iconCenterY
-        titleBarHeightConstraint = titleHeight
-        nameLeadingConstraint = nameLeading
-        nameTrailingConstraint = nameTrailing
-        iconCenterY.isActive = false
+        badgeView.wantsLayer = true
+        badgeView.layer?.cornerRadius = 6
+        badgeView.layer?.masksToBounds = true
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        previewHost.addSubview(badgeView)
+
+        badgeIconView.imageScaling = .scaleNone
+        badgeIconView.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.addSubview(badgeIconView)
+
+        configureLibraryGridNameLabel(nameLabel, fontSize: 13)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.alignment = .left
+        nameLabel.maximumNumberOfLines = 1
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.cell?.wraps = false
+        nameLabel.cell?.usesSingleLineMode = true
+        nameLabel.cell?.truncatesLastVisibleLine = true
+        nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        metaLabel.isEditable = false
+        metaLabel.isBordered = false
+        metaLabel.isBezeled = false
+        metaLabel.drawsBackground = false
+        metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        metaLabel.textColor = .secondaryLabelColor
+        metaLabel.lineBreakMode = .byTruncatingTail
+        metaLabel.maximumNumberOfLines = 1
+        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        metaLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        selectionChrome.translatesAutoresizingMaskIntoConstraints = false
+        selectionChrome.onDeselect = { [weak self] in
+            self?.onDeselectRequested?()
+        }
+        (view as? LibraryGridItemView)?.interactiveChromeHitTest = { [weak selectionChrome] local in
+            selectionChrome?.hitTest(local)
+        }
+
+        view.addSubview(cardView)
+        cardView.addSubview(previewHost)
+        cardView.addSubview(nameLabel)
+        cardView.addSubview(metaLabel)
+        view.addSubview(selectionChrome)
+
+        let previewTop = previewHost.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 6)
+        let previewHeight = previewHost.heightAnchor.constraint(equalToConstant: 112)
+        previewHeight.priority = .defaultHigh
+        let rightWidth = rightTopThumb.widthAnchor.constraint(equalTo: previewHost.widthAnchor, multiplier: 1.0 / 3.0)
+        let leftToRight = leftThumb.trailingAnchor.constraint(equalTo: rightTopThumb.leadingAnchor, constant: -collageGap)
+        let leftToPreview = leftThumb.trailingAnchor.constraint(equalTo: previewHost.trailingAnchor)
+        let nameTop = nameLabel.topAnchor.constraint(equalTo: previewHost.bottomAnchor, constant: 8)
+        let nameMetaSpacing = metaLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 3)
+        let metaBottom = metaLabel.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -6)
+        let cardTop = cardView.topAnchor.constraint(equalTo: view.topAnchor)
+        let cardLeading = cardView.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        let cardTrailing = cardView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        let cardBottom = cardView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        let glyphSide = folderGlyphView.widthAnchor.constraint(equalToConstant: 52)
+        previewTopConstraint = previewTop
+        previewHeightConstraint = previewHeight
+        rightColumnWidthConstraint = rightWidth
+        leftTrailingToRightConstraint = leftToRight
+        leftTrailingToPreviewConstraint = leftToPreview
+        nameTopConstraint = nameTop
+        nameMetaSpacingConstraint = nameMetaSpacing
+        metaBottomConstraint = metaBottom
+        cardTopConstraint = cardTop
+        cardLeadingConstraint = cardLeading
+        cardTrailingConstraint = cardTrailing
+        cardBottomConstraint = cardBottom
+        folderGlyphSideConstraint = glyphSide
+        leftToPreview.isActive = false
 
         NSLayoutConstraint.activate([
-            plateView.topAnchor.constraint(equalTo: view.topAnchor),
-            plateView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            plateView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            plateView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            cardTop,
+            cardLeading,
+            cardTrailing,
+            cardBottom,
 
-            iconTop,
-            iconView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            width,
-            height,
+            previewTop,
+            previewHost.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 6),
+            previewHost.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -6),
+            previewHeight,
 
-            titleBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            titleBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            titleBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            titleHeight,
+            leftThumb.leadingAnchor.constraint(equalTo: previewHost.leadingAnchor),
+            leftThumb.topAnchor.constraint(equalTo: previewHost.topAnchor),
+            leftThumb.bottomAnchor.constraint(equalTo: previewHost.bottomAnchor),
+            leftToRight,
 
-            nameLabel.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor),
-            nameLeading,
-            nameTrailing
+            rightWidth,
+            rightTopThumb.trailingAnchor.constraint(equalTo: previewHost.trailingAnchor),
+            rightTopThumb.topAnchor.constraint(equalTo: previewHost.topAnchor),
+            rightTopThumb.bottomAnchor.constraint(equalTo: rightBottomThumb.topAnchor, constant: -collageGap),
+            rightTopThumb.heightAnchor.constraint(equalTo: rightBottomThumb.heightAnchor),
+
+            rightBottomThumb.leadingAnchor.constraint(equalTo: rightTopThumb.leadingAnchor),
+            rightBottomThumb.trailingAnchor.constraint(equalTo: rightTopThumb.trailingAnchor),
+            rightBottomThumb.bottomAnchor.constraint(equalTo: previewHost.bottomAnchor),
+
+            emptyIconView.centerXAnchor.constraint(equalTo: previewHost.centerXAnchor),
+            emptyIconView.centerYAnchor.constraint(equalTo: previewHost.centerYAnchor),
+            emptyIconView.widthAnchor.constraint(equalToConstant: 28),
+            emptyIconView.heightAnchor.constraint(equalToConstant: 28),
+
+            folderGlyphView.centerXAnchor.constraint(equalTo: previewHost.centerXAnchor),
+            folderGlyphView.centerYAnchor.constraint(equalTo: previewHost.centerYAnchor),
+            glyphSide,
+            folderGlyphView.heightAnchor.constraint(equalTo: folderGlyphView.widthAnchor),
+
+            badgeView.leadingAnchor.constraint(equalTo: previewHost.leadingAnchor, constant: 6),
+            badgeView.bottomAnchor.constraint(equalTo: previewHost.bottomAnchor, constant: -6),
+            badgeView.widthAnchor.constraint(equalToConstant: 28),
+            badgeView.heightAnchor.constraint(equalToConstant: 28),
+
+            badgeIconView.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
+            badgeIconView.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
+            badgeIconView.widthAnchor.constraint(equalToConstant: 14),
+            badgeIconView.heightAnchor.constraint(equalToConstant: 14),
+
+            nameTop,
+            nameLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 8),
+            nameLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -8),
+
+            nameMetaSpacing,
+            metaLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
+            metaLabel.trailingAnchor.constraint(equalTo: nameLabel.trailingAnchor),
+            metaBottom,
+
+            selectionChrome.topAnchor.constraint(equalTo: view.topAnchor),
+            selectionChrome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            selectionChrome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            selectionChrome.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        applyBadgeIcon()
+        applyChrome()
+        showEmptyPreview()
+    }
+
+    func applySelectionChrome(_ chrome: LibraryTileSelectionChrome) {
+        selectionChrome.apply(chrome, appearance: view.effectiveAppearance, cornerRadius: 6)
     }
 
     func applyMetrics(_ metrics: LibraryBrowseTileMetrics) {
-        isGalleryStyle = !metrics.showsTitle
-        nameLabel.isHidden = false
-        let side = metrics.folderIconPointSize + 18
-        iconWidthConstraint?.constant = side
-        iconHeightConstraint?.constant = side
-        applyFolderIcon(pointSize: metrics.folderIconPointSize)
-
-        plateView.isHidden = false
-        titleBar.isHidden = false
-        titleBarHeightConstraint?.constant = isGalleryStyle ? 40 : 36
-        iconTopConstraint?.isActive = false
-        iconCenterYConstraint?.isActive = true
-        iconCenterYConstraint?.constant = isGalleryStyle ? -12 : -10
-        nameLeadingConstraint?.constant = 10
-        nameTrailingConstraint?.constant = -10
-        nameLabel.alignment = .center
-        nameLabel.font = .systemFont(ofSize: isGalleryStyle ? 12 : 11, weight: .medium)
-        nameLabel.textColor = .labelColor
-        nameLabel.maximumNumberOfLines = 2
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.cell?.wraps = true
-        nameLabel.shadow = nil
-        view.layer?.cornerRadius = 10
-        plateView.layer?.cornerRadius = 10
-        applyFolderPlateFill()
+        if metrics.showsTitle {
+            // Grid: classic folder glyph only — no media collage previews.
+            usesIconOnlyLayout = true
+            setCardInset(0)
+            previewTopConstraint?.constant = 10
+            nameTopConstraint?.constant = 8
+            nameMetaSpacingConstraint?.constant = 3
+            metaBottomConstraint?.constant = -8
+            nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+            nameLabel.alignment = .center
+            metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            metaLabel.alignment = .center
+            previewHeightConstraint?.constant = max(88, metrics.thumbHeight * 0.78)
+            folderGlyphSideConstraint?.constant = metrics.folderIconPointSize
+            applyFolderGlyph(pointSize: metrics.folderIconPointSize)
+            setCollageHidden(true)
+            folderGlyphView.isHidden = false
+            badgeView.isHidden = true
+            clearThumbs()
+            previewHost.layer?.backgroundColor = mutedPreviewFill().cgColor
+        } else {
+            // Gallery (~16:9): collage + caption with reserved space so title/count never overlap.
+            usesIconOnlyLayout = false
+            setCardInset(0)
+            let previewTopInset: CGFloat = 5
+            let captionBand: CGFloat = 44
+            previewTopConstraint?.constant = previewTopInset
+            nameTopConstraint?.constant = 6
+            nameMetaSpacingConstraint?.constant = 3
+            metaBottomConstraint?.constant = -6
+            nameLabel.font = .systemFont(ofSize: 11, weight: .medium)
+            nameLabel.alignment = .left
+            metaLabel.font = .systemFont(ofSize: 10, weight: .regular)
+            metaLabel.alignment = .left
+            let cellHeight = metrics.minItemSize.height
+            previewHeightConstraint?.constant = max(40, cellHeight - previewTopInset - captionBand)
+            setCollageHidden(false)
+            folderGlyphView.isHidden = true
+            badgeView.isHidden = false
+            showEmptyPreview()
+        }
+        applyChrome()
     }
 
-    private func applyFolderPlateFill() {
-        let fill = LaughTheme.librarySidebarBackground(appearance: view.effectiveAppearance)
-        plateView.layer?.backgroundColor = fill.cgColor
-        view.layer?.backgroundColor = fill.cgColor
-        view.layer?.borderWidth = 1
-        let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        view.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(isDark ? 0.18 : 0.22).cgColor
-        let lift = isDark
-            ? NSColor.white.withAlphaComponent(0.10)
-            : NSColor.white.withAlphaComponent(0.62)
-        titleBar.layer?.backgroundColor = LaughTheme.blend(fill, over: lift).cgColor
+    private func setCardInset(_ inset: CGFloat) {
+        cardTopConstraint?.constant = inset
+        cardLeadingConstraint?.constant = inset
+        cardTrailingConstraint?.constant = -inset
+        cardBottomConstraint?.constant = -inset
     }
 
-    private func applyFolderIcon(pointSize: CGFloat) {
+    private func setCollageHidden(_ hidden: Bool) {
+        leftThumb.isHidden = hidden
+        rightTopThumb.isHidden = hidden
+        rightBottomThumb.isHidden = hidden
+        emptyIconView.isHidden = hidden
+    }
+
+    private func applyFolderGlyph(pointSize: CGFloat) {
         if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
             let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
-            iconView.image = folder.withSymbolConfiguration(config)
-            iconView.contentTintColor = .tertiaryLabelColor
+            let configured = folder.withSymbolConfiguration(config)
+            configured?.isTemplate = true
+            folderGlyphView.image = configured
+            folderGlyphView.contentTintColor = .tertiaryLabelColor
         }
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        loadToken = UUID()
+        folderURL = nil
         nameLabel.stringValue = ""
+        metaLabel.stringValue = ""
         view.toolTip = nil
+        onDeselectRequested = nil
+        clearThumbs()
+        showEmptyPreview()
+        applySelectionChrome(.none)
     }
 
-    func configure(name: String) {
+    func configure(name: String, itemCount: Int, dateModified: Date?) {
         nameLabel.stringValue = name
-        view.toolTip = nil
+        view.toolTip = name
+        let countText: String
+        if itemCount == 1 {
+            countText = "1 item"
+        } else {
+            countText = "\(FolderMediaCounts.compactLabel(itemCount)) items"
+        }
+        if let dateModified {
+            let relative = Self.relativeDateFormatter.localizedString(for: dateModified, relativeTo: Date())
+            metaLabel.stringValue = "\(countText)  ·  \(relative)"
+        } else {
+            metaLabel.stringValue = countText
+        }
+        applyBadgePalette(for: name)
     }
 
-    /// True when the click lands on the folder glyph (not empty cell padding).
+    func loadPreviews(
+        folderURL: URL,
+        maxSide: CGFloat,
+        indexPath: IndexPath,
+        completion: @escaping ([NSImage?], IndexPath) -> Void
+    ) {
+        self.folderURL = folderURL
+        guard !usesIconOnlyLayout else {
+            completion([], indexPath)
+            return
+        }
+        let token = UUID()
+        loadToken = token
+        clearThumbs()
+        showEmptyPreview()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let files = MediaLibraryScanner.previewMediaFiles(in: folderURL, limit: 3)
+            let images: [NSImage?] = files.map { file in
+                MediaThumbnailGenerator.thumbnail(for: file.url, kind: file.kind, maxSide: maxSide)
+            }
+            DispatchQueue.main.async {
+                completion(images, indexPath)
+            }
+        }
+    }
+
+    func setPreviews(_ images: [NSImage?]) {
+        guard !usesIconOnlyLayout else { return }
+        let photos = images.compactMap { $0 }
+        clearThumbs()
+        switch photos.count {
+        case 0:
+            showEmptyPreview()
+        case 1:
+            emptyIconView.isHidden = true
+            leftThumb.isHidden = false
+            rightTopThumb.isHidden = true
+            rightBottomThumb.isHidden = true
+            leftTrailingToRightConstraint?.isActive = false
+            leftTrailingToPreviewConstraint?.isActive = true
+            rightColumnWidthConstraint?.isActive = false
+            leftThumb.setPhoto(photos[0])
+        case 2:
+            emptyIconView.isHidden = true
+            leftThumb.isHidden = false
+            rightTopThumb.isHidden = false
+            rightBottomThumb.isHidden = false
+            leftTrailingToPreviewConstraint?.isActive = false
+            leftTrailingToRightConstraint?.isActive = true
+            rightColumnWidthConstraint?.isActive = true
+            leftThumb.setPhoto(photos[0])
+            rightTopThumb.setPhoto(photos[1])
+            rightBottomThumb.setFillMode(true, placeholderBackground: mutedPreviewFill())
+        default:
+            emptyIconView.isHidden = true
+            leftThumb.isHidden = false
+            rightTopThumb.isHidden = false
+            rightBottomThumb.isHidden = false
+            leftTrailingToPreviewConstraint?.isActive = false
+            leftTrailingToRightConstraint?.isActive = true
+            rightColumnWidthConstraint?.isActive = true
+            leftThumb.setPhoto(photos[0])
+            rightTopThumb.setPhoto(photos[1])
+            rightBottomThumb.setPhoto(photos[2])
+        }
+        applyChrome()
+    }
+
+    /// Whole card opens the folder (card fills the cell like media tiles).
     func containsFolderGlyphHit(for event: NSEvent) -> Bool {
-        let point = iconView.convert(event.locationInWindow, from: nil)
-        // Slightly generous so the glyph corners remain easy to hit.
-        return iconView.bounds.insetBy(dx: -4, dy: -4).contains(point)
+        let point = view.convert(event.locationInWindow, from: nil)
+        return view.bounds.contains(point)
+    }
+
+    private func clearThumbs() {
+        leftThumb.clearImage()
+        rightTopThumb.clearImage()
+        rightBottomThumb.clearImage()
+        leftThumb.setFillMode(true, placeholderBackground: mutedPreviewFill())
+        rightTopThumb.setFillMode(true, placeholderBackground: mutedPreviewFill())
+        rightBottomThumb.setFillMode(true, placeholderBackground: mutedPreviewFill())
+    }
+
+    private func showEmptyPreview() {
+        guard !usesIconOnlyLayout else { return }
+        emptyIconView.isHidden = false
+        leftThumb.isHidden = true
+        rightTopThumb.isHidden = true
+        rightBottomThumb.isHidden = true
+        leftTrailingToPreviewConstraint?.isActive = false
+        leftTrailingToRightConstraint?.isActive = true
+        rightColumnWidthConstraint?.isActive = true
+        if let folder = NSImage(systemSymbolName: "folder", accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
+            let configured = folder.withSymbolConfiguration(config)
+            configured?.isTemplate = true
+            emptyIconView.image = configured
+            emptyIconView.contentTintColor = .tertiaryLabelColor
+        }
+        previewHost.layer?.backgroundColor = mutedPreviewFill().cgColor
+    }
+
+    private func applyBadgeIcon() {
+        if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            let configured = folder.withSymbolConfiguration(config)
+            configured?.isTemplate = true
+            configured?.size = NSSize(width: 14, height: 14)
+            badgeIconView.image = configured
+        }
+    }
+
+    private func applyBadgePalette(for name: String) {
+        let palette = Self.badgePalette(for: name, appearance: view.effectiveAppearance)
+        badgeView.layer?.backgroundColor = palette.fill.cgColor
+        badgeIconView.contentTintColor = palette.tint
+        let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        badgeView.layer?.borderWidth = 1
+        badgeView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor
+    }
+
+    private func applyChrome() {
+        let appearance = view.effectiveAppearance
+        // Card plate matches the left sidebar; collage gaps match the browse content pane.
+        let card = LaughTheme.librarySidebarBackground(appearance: appearance)
+        let content = LaughTheme.libraryContentBackground(appearance: appearance)
+        cardView.layer?.backgroundColor = card.cgColor
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+        previewHost.layer?.borderWidth = 1
+        previewHost.layer?.borderColor = NSColor.separatorColor.cgColor
+        previewHost.layer?.backgroundColor = content.cgColor
+        nameLabel.textColor = .labelColor
+        metaLabel.textColor = .secondaryLabelColor
+        let name = nameLabel.stringValue
+        if !name.isEmpty {
+            applyBadgePalette(for: name)
+        }
+    }
+
+    private func mutedPreviewFill() -> NSColor {
+        LaughTheme.libraryContentBackground(appearance: view.effectiveAppearance)
+    }
+
+    private struct BadgePalette {
+        let fill: NSColor
+        let tint: NSColor
+    }
+
+    private static func badgePalette(for name: String, appearance: NSAppearance) -> BadgePalette {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        // Soft tints inspired by the folder-management-grid cards (no system blue chrome).
+        let palettes: [BadgePalette] = [
+            BadgePalette(
+                fill: NSColor(srgbRed: 0.12, green: 0.55, blue: 0.52, alpha: isDark ? 0.22 : 0.14),
+                tint: NSColor(srgbRed: 0.18, green: 0.62, blue: 0.58, alpha: 1)
+            ),
+            BadgePalette(
+                fill: NSColor(srgbRed: 0.55, green: 0.35, blue: 0.85, alpha: isDark ? 0.22 : 0.12),
+                tint: NSColor(srgbRed: 0.58, green: 0.40, blue: 0.90, alpha: 1)
+            ),
+            BadgePalette(
+                fill: NSColor(srgbRed: 0.92, green: 0.48, blue: 0.22, alpha: isDark ? 0.22 : 0.14),
+                tint: NSColor(srgbRed: 0.90, green: 0.48, blue: 0.20, alpha: 1)
+            ),
+            BadgePalette(
+                fill: NSColor(srgbRed: 0.20, green: 0.62, blue: 0.42, alpha: isDark ? 0.22 : 0.14),
+                tint: NSColor(srgbRed: 0.22, green: 0.66, blue: 0.45, alpha: 1)
+            ),
+            BadgePalette(
+                fill: NSColor(srgbRed: 0.88, green: 0.32, blue: 0.55, alpha: isDark ? 0.22 : 0.12),
+                tint: NSColor(srgbRed: 0.90, green: 0.35, blue: 0.58, alpha: 1)
+            ),
+            BadgePalette(
+                fill: LaughTheme.chromeHoverFill(appearance: appearance),
+                tint: .secondaryLabelColor
+            )
+        ]
+        let hash = name.unicodeScalars.reduce(0) { ($0 &+ Int($1.value) &* 31) }
+        return palettes[abs(hash) % palettes.count]
     }
 }
 
-/// Soft Gallery plate that refreshes fill when appearance changes.
-private final class LibraryFolderPlateView: NSView {
-    var refreshFill: (() -> Void)?
+private final class LibraryFolderCardChromeView: NSView {
+    var onAppearanceChange: (() -> Void)?
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        refreshFill?()
+        onAppearanceChange?()
     }
 }
 
-/// Light caption band under the folder name.
-private final class LibraryFolderTitleBarView: NSView {
+// MARK: - Tile selection chrome
+
+private final class LibraryTileSelectionChromeView: NSView {
+    var onDeselect: (() -> Void)?
+    private let wash = NSView()
+    private let badgeView = NSView()
+    private let checkView = NSImageView()
+    private let deselectButton = NSButton(title: "", target: nil, action: nil)
+    private var current: LibraryTileSelectionChrome = .none
+    private let badgeSide: CGFloat = 20
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.masksToBounds = true
+
+        wash.wantsLayer = true
+        wash.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(wash)
+
+        badgeView.wantsLayer = true
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.layer?.masksToBounds = true
+        badgeView.layer?.cornerRadius = badgeSide / 2
+        addSubview(badgeView)
+
+        checkView.imageScaling = .scaleProportionallyDown
+        checkView.imageAlignment = .alignCenter
+        checkView.contentTintColor = .white
+        checkView.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.addSubview(checkView)
+
+        deselectButton.bezelStyle = .inline
+        deselectButton.isBordered = false
+        deselectButton.focusRingType = .none
+        deselectButton.title = ""
+        deselectButton.image = nil
+        deselectButton.translatesAutoresizingMaskIntoConstraints = false
+        deselectButton.target = self
+        deselectButton.action = #selector(deselectPressed)
+        deselectButton.toolTip = "Deselect"
+        addSubview(deselectButton)
+
+        NSLayoutConstraint.activate([
+            wash.topAnchor.constraint(equalTo: topAnchor),
+            wash.leadingAnchor.constraint(equalTo: leadingAnchor),
+            wash.trailingAnchor.constraint(equalTo: trailingAnchor),
+            wash.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            badgeView.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            badgeView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            badgeView.widthAnchor.constraint(equalToConstant: badgeSide),
+            badgeView.heightAnchor.constraint(equalToConstant: badgeSide),
+
+            checkView.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
+            checkView.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
+            checkView.widthAnchor.constraint(equalToConstant: 11),
+            checkView.heightAnchor.constraint(equalToConstant: 11),
+
+            deselectButton.topAnchor.constraint(equalTo: badgeView.topAnchor),
+            deselectButton.leadingAnchor.constraint(equalTo: badgeView.leadingAnchor),
+            deselectButton.trailingAnchor.constraint(equalTo: badgeView.trailingAnchor),
+            deselectButton.bottomAnchor.constraint(equalTo: badgeView.bottomAnchor)
+        ])
+        refreshDeselectButtonAppearance()
+        apply(.none, appearance: effectiveAppearance, cornerRadius: 8)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshDeselectButtonAppearance()
+        apply(current, appearance: effectiveAppearance, cornerRadius: layer?.cornerRadius ?? 8)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard (current == .selected || current == .preview), !badgeView.isHidden, !isHidden else { return nil }
+        guard frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if badgeView.frame.insetBy(dx: -2, dy: -2).contains(local) {
+            return deselectButton
+        }
+        return nil
+    }
+
+    func apply(_ chrome: LibraryTileSelectionChrome, appearance: NSAppearance, cornerRadius: CGFloat) {
+        current = chrome
+        layer?.cornerRadius = cornerRadius
+        wash.layer?.cornerRadius = cornerRadius
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        switch chrome {
+        case .none:
+            isHidden = true
+            badgeView.isHidden = true
+            deselectButton.isHidden = true
+            wash.layer?.backgroundColor = nil
+            layer?.borderWidth = 0
+            layer?.borderColor = nil
+        case .preview:
+            isHidden = false
+            badgeView.isHidden = false
+            deselectButton.isHidden = false
+            wash.layer?.backgroundColor = NSColor.black.withAlphaComponent(isDark ? 0.22 : 0.12).cgColor
+            layer?.borderWidth = 1.5
+            layer?.borderColor = LaughTheme.interactiveAccent.withAlphaComponent(isDark ? 0.55 : 0.45).cgColor
+            refreshDeselectButtonAppearance()
+        case .selected:
+            isHidden = false
+            badgeView.isHidden = false
+            deselectButton.isHidden = false
+            wash.layer?.backgroundColor = NSColor.black.withAlphaComponent(isDark ? 0.28 : 0.14).cgColor
+            layer?.borderWidth = 1.5
+            layer?.borderColor = LaughTheme.interactiveAccent.withAlphaComponent(isDark ? 0.70 : 0.55).cgColor
+            refreshDeselectButtonAppearance()
+        }
+    }
+
+    private func refreshDeselectButtonAppearance() {
+        if let image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Deselect") {
+            let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+            checkView.image = image.withSymbolConfiguration(config)
+        }
+        checkView.contentTintColor = .white
+        checkView.imageScaling = .scaleProportionallyDown
+        badgeView.layer?.backgroundColor = LaughTheme.interactiveAccent.cgColor
+        badgeView.layer?.borderWidth = 1.5
+        badgeView.layer?.borderColor = NSColor.white.cgColor
+        badgeView.layer?.cornerRadius = badgeSide / 2
+    }
+
+    @objc private func deselectPressed() {
+        onDeselect?()
+    }
 }
 
-private final class LibraryMediaGridItem: NSCollectionViewItem {
+/// Thumbnail that aspect-fills (Gallery cover) or fits (Grid / placeholders).
+private final class LibraryCoverImageView: NSView {
+    private var displayedImage: NSImage?
+    private var fillsBounds = false
+    private var placeholderTint: NSColor?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.contentsGravity = .resizeAspect
+        layer?.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        layer?.contentsScale = scale
+        refreshContents()
+    }
+
+    func setFillMode(_ fills: Bool, placeholderBackground: NSColor?) {
+        fillsBounds = fills
+        layer?.backgroundColor = placeholderBackground?.cgColor
+        layer?.contentsGravity = fills ? .resizeAspectFill : .resizeAspect
+        refreshContents()
+    }
+
+    func setPhoto(_ image: NSImage) {
+        displayedImage = image
+        placeholderTint = nil
+        refreshContents()
+    }
+
+    func setPlaceholderSymbol(_ image: NSImage, tint: NSColor) {
+        displayedImage = image
+        placeholderTint = tint
+        refreshContents()
+    }
+
+    func clearImage() {
+        displayedImage = nil
+        placeholderTint = nil
+        layer?.contents = nil
+    }
+
+    private func refreshContents() {
+        guard let displayedImage else {
+            layer?.contents = nil
+            return
+        }
+        let scale = layer?.contentsScale ?? 2
+        if let placeholderTint {
+            let tinted = displayedImage.copy() as? NSImage ?? displayedImage
+            tinted.isTemplate = true
+            let size = tinted.size
+            let rendered = NSImage(size: size, flipped: false) { rect in
+                placeholderTint.set()
+                tinted.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                return true
+            }
+            layer?.contentsGravity = .center
+            layer?.contents = rendered.layerContents(forContentsScale: scale)
+            return
+        }
+        layer?.contentsGravity = fillsBounds ? .resizeAspectFill : .resizeAspect
+        layer?.contents = displayedImage.layerContents(forContentsScale: scale)
+    }
+}
+
+private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectableGridItem {
     static let reuseID = NSUserInterfaceItemIdentifier("LibraryMediaGridItem")
 
-    private let thumbnailView = NSImageView()
+    private let thumbnailView = LibraryCoverImageView()
     private let playButton = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
+    private let selectionChrome = LibraryTileSelectionChromeView()
+    var onDeselectRequested: (() -> Void)?
     private var thumbHeightConstraint: NSLayoutConstraint?
     private var thumbBottomConstraint: NSLayoutConstraint?
     private var nameTopConstraint: NSLayoutConstraint?
+    private var nameBottomConstraint: NSLayoutConstraint?
     private var showsTitle = true
     private var hoverBorderEnabled = false
+    private var selectionState: LibraryTileSelectionChrome = .none
     private var loadToken = UUID()
+    private var hasPhoto = false
 
     override func loadView() {
         let host = LibraryMediaTileHostView()
@@ -2140,10 +3132,8 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
         view.layer?.masksToBounds = true
         view.layer?.borderWidth = 0
 
-        thumbnailView.imageScaling = .scaleProportionallyUpOrDown
-        thumbnailView.wantsLayer = true
-        thumbnailView.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
         thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+        thumbnailView.setFillMode(false, placeholderBackground: NSColor.quaternaryLabelColor)
 
         if let play = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "Play") {
             let config = NSImage.SymbolConfiguration(pointSize: 30, weight: .regular)
@@ -2154,17 +3144,29 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
 
         configureLibraryGridNameLabel(nameLabel, fontSize: 10)
 
+        selectionChrome.translatesAutoresizingMaskIntoConstraints = false
+        selectionChrome.onDeselect = { [weak self] in
+            self?.onDeselectRequested?()
+        }
+        host.interactiveChromeHitTest = { [weak selectionChrome] local in
+            selectionChrome?.hitTest(local)
+        }
+
         view.addSubview(thumbnailView)
         view.addSubview(playButton)
         view.addSubview(nameLabel)
+        view.addSubview(selectionChrome)
 
         let thumbHeight = thumbnailView.heightAnchor.constraint(equalToConstant: 84)
         let thumbBottom = thumbnailView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         let nameTop = nameLabel.topAnchor.constraint(equalTo: thumbnailView.bottomAnchor, constant: 4)
+        let nameBottom = nameLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4)
         thumbHeightConstraint = thumbHeight
         thumbBottomConstraint = thumbBottom
         nameTopConstraint = nameTop
+        nameBottomConstraint = nameBottom
         thumbBottom.isActive = false
+        nameBottom.isActive = false
 
         NSLayoutConstraint.activate([
             thumbnailView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -2176,32 +3178,50 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
             nameTop,
             nameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
             nameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
-            nameLabel.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -4)
+
+            selectionChrome.topAnchor.constraint(equalTo: view.topAnchor),
+            selectionChrome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            selectionChrome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            selectionChrome.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+    }
+
+    func applySelectionChrome(_ chrome: LibraryTileSelectionChrome) {
+        selectionState = chrome
+        selectionChrome.apply(chrome, appearance: view.effectiveAppearance, cornerRadius: view.layer?.cornerRadius ?? 8)
+        if chrome != .none {
+            view.layer?.borderWidth = 0
+            view.layer?.borderColor = nil
+        }
     }
 
     func applyMetrics(_ metrics: LibraryBrowseTileMetrics) {
         showsTitle = metrics.showsTitle
-        hoverBorderEnabled = !metrics.showsTitle
+        hoverBorderEnabled = true
         nameLabel.isHidden = !metrics.showsTitle
         setHovered(false)
         if metrics.showsTitle {
+            // Uniform Grid: fixed thumb well + caption.
             thumbHeightConstraint?.isActive = true
             thumbHeightConstraint?.constant = metrics.thumbHeight
             thumbBottomConstraint?.isActive = false
             nameTopConstraint?.isActive = true
+            nameBottomConstraint?.isActive = true
+            nameLabel.alignment = .center
+            nameLabel.maximumNumberOfLines = 2
+            nameLabel.lineBreakMode = .byTruncatingTail
             view.layer?.cornerRadius = 8
-            thumbnailView.imageScaling = .scaleProportionallyUpOrDown
-            thumbnailView.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+            thumbnailView.setFillMode(false, placeholderBackground: NSColor.quaternaryLabelColor)
         } else {
+            // Gallery (~16:9): image covers the whole tile.
             thumbHeightConstraint?.isActive = false
             thumbBottomConstraint?.isActive = true
             nameTopConstraint?.isActive = false
+            nameBottomConstraint?.isActive = false
             view.layer?.cornerRadius = 4
-            thumbnailView.imageScaling = .scaleProportionallyUpOrDown
-            thumbnailView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+            thumbnailView.setFillMode(true, placeholderBackground: nil)
         }
-        let playSize = max(26, min(metrics.thumbHeight * 0.18, 42))
+        let playSize = max(26, min(metrics.thumbHeight * 0.22, 42))
         if let play = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "Play") {
             let config = NSImage.SymbolConfiguration(pointSize: playSize, weight: .regular)
             playButton.image = play.withSymbolConfiguration(config)
@@ -2210,23 +3230,40 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
     }
 
     private func setHovered(_ hovered: Bool) {
+        guard selectionState == .none else { return }
         guard hoverBorderEnabled else {
             view.layer?.borderWidth = 0
             view.layer?.borderColor = nil
             return
         }
         view.layer?.borderWidth = hovered ? 1.5 : 0
-        view.layer?.borderColor = hovered
-            ? NSColor.white.withAlphaComponent(0.95).cgColor
-            : nil
+        if hovered {
+            // Gallery mosaic uses a bright rim; Grid captions sit on a lighter plate —
+            // keep the same weight, adapt luminance so the ring stays visible.
+            let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let rim: NSColor
+            if showsTitle {
+                rim = isDark
+                    ? NSColor.white.withAlphaComponent(0.85)
+                    : NSColor.labelColor.withAlphaComponent(0.55)
+            } else {
+                rim = NSColor.white.withAlphaComponent(0.95)
+            }
+            view.layer?.borderColor = rim.cgColor
+        } else {
+            view.layer?.borderColor = nil
+        }
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
         loadToken = UUID()
-        thumbnailView.image = nil
+        hasPhoto = false
+        thumbnailView.clearImage()
         nameLabel.stringValue = ""
         view.toolTip = nil
+        onDeselectRequested = nil
+        applySelectionChrome(.none)
         setHovered(false)
         playButton.isHidden = true
     }
@@ -2235,20 +3272,20 @@ private final class LibraryMediaGridItem: NSCollectionViewItem {
         nameLabel.stringValue = name
         view.toolTip = nil
         playButton.isHidden = kind != .video
-        if thumbnailView.image == nil {
-            let symbol = kind == .video ? "film" : "photo"
-            if let placeholder = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-                let config = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-                thumbnailView.image = placeholder.withSymbolConfiguration(config)
-                thumbnailView.contentTintColor = .tertiaryLabelColor
+        guard !hasPhoto else { return }
+        let symbol = kind == .video ? "film" : "photo"
+        if let placeholder = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
+            if let configured = placeholder.withSymbolConfiguration(config) {
+                thumbnailView.setPlaceholderSymbol(configured, tint: .tertiaryLabelColor)
             }
         }
     }
 
     func setThumbnail(_ image: NSImage?) {
         guard let image else { return }
-        thumbnailView.contentTintColor = nil
-        thumbnailView.image = image
+        hasPhoto = true
+        thumbnailView.setPhoto(image)
     }
 
     func loadThumbnail(

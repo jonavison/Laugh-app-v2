@@ -14,6 +14,14 @@ enum LibraryBrowseViewMode: String, CaseIterable {
         }
     }
 
+    var symbolName: String {
+        switch self {
+        case .gallery: return "rectangle.grid.2x2"
+        case .grid: return "square.grid.3x3"
+        case .list: return "list.bullet"
+        }
+    }
+
     var isCollectionLayout: Bool {
         switch self {
         case .gallery, .grid: return true
@@ -64,6 +72,15 @@ enum LibraryKindFilter: String, CaseIterable {
         case .folders: return "Folders"
         }
     }
+
+    var symbolName: String {
+        switch self {
+        case .all: return "square.grid.2x2"
+        case .videos: return "film"
+        case .images: return "photo"
+        case .folders: return "folder"
+        }
+    }
 }
 
 /// Layout metrics for Gallery / Grid collection cells.
@@ -77,7 +94,10 @@ struct LibraryBrowseTileMetrics: Equatable {
     var thumbnailMaxSide: CGFloat
     /// When false, tiles are image-only (Gallery) — no caption under the preview.
     var showsTitle: Bool
+    /// Left / right / bottom inset inside the scroll document.
     var contentInset: CGFloat
+    /// Extra breathing room under the toolbar before the first row.
+    var contentTopInset: CGFloat
 
     static func metrics(
         mode: LibraryBrowseViewMode,
@@ -85,43 +105,46 @@ struct LibraryBrowseTileMetrics: Equatable {
     ) -> LibraryBrowseTileMetrics {
         switch mode {
         case .gallery:
-            // Square media mosaic; folder tiles share the same footprint with distinct chrome.
+            // Landscape mosaic (~16:9) — images full-bleed; folders sit smaller inside the cell.
             switch galleryScale {
             case .small:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 148, height: 148),
-                    maxItemSize: NSSize(width: 176, height: 176),
+                    minItemSize: NSSize(width: 176, height: 99),
+                    maxItemSize: NSSize(width: 208, height: 117),
                     interitemSpacing: 4,
                     lineSpacing: 4,
-                    thumbHeight: 176,
-                    folderIconPointSize: 48,
-                    thumbnailMaxSide: 280,
+                    thumbHeight: 117,
+                    folderIconPointSize: 40,
+                    thumbnailMaxSide: 320,
                     showsTitle: false,
-                    contentInset: 8
+                    contentInset: 10,
+                    contentTopInset: 20
                 )
             case .medium:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 184, height: 184),
-                    maxItemSize: NSSize(width: 220, height: 220),
+                    minItemSize: NSSize(width: 220, height: 124),
+                    maxItemSize: NSSize(width: 256, height: 144),
                     interitemSpacing: 5,
                     lineSpacing: 5,
-                    thumbHeight: 220,
-                    folderIconPointSize: 56,
-                    thumbnailMaxSide: 340,
+                    thumbHeight: 144,
+                    folderIconPointSize: 44,
+                    thumbnailMaxSide: 400,
                     showsTitle: false,
-                    contentInset: 8
+                    contentInset: 10,
+                    contentTopInset: 22
                 )
             case .large:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 220, height: 220),
-                    maxItemSize: NSSize(width: 280, height: 280),
+                    minItemSize: NSSize(width: 280, height: 158),
+                    maxItemSize: NSSize(width: 320, height: 180),
                     interitemSpacing: 6,
                     lineSpacing: 6,
-                    thumbHeight: 280,
-                    folderIconPointSize: 64,
-                    thumbnailMaxSide: 420,
+                    thumbHeight: 180,
+                    folderIconPointSize: 48,
+                    thumbnailMaxSide: 480,
                     showsTitle: false,
-                    contentInset: 8
+                    contentInset: 12,
+                    contentTopInset: 24
                 )
             }
         case .grid:
@@ -134,7 +157,8 @@ struct LibraryBrowseTileMetrics: Equatable {
                 folderIconPointSize: 52,
                 thumbnailMaxSide: 260,
                 showsTitle: true,
-                contentInset: 14
+                contentInset: 16,
+                contentTopInset: 24
             )
         case .list:
             return LibraryBrowseTileMetrics(
@@ -146,7 +170,8 @@ struct LibraryBrowseTileMetrics: Equatable {
                 folderIconPointSize: 46,
                 thumbnailMaxSide: 200,
                 showsTitle: true,
-                contentInset: 14
+                contentInset: 16,
+                contentTopInset: 20
             )
         }
     }

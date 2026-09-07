@@ -172,6 +172,19 @@ enum MediaLibraryScanner {
         return counts
     }
 
+    /// First N media files for folder-card collage previews (non-recursive, newest first).
+    static func previewMediaFiles(in directory: URL, limit: Int = 3) -> [LibraryMediaFile] {
+        guard limit > 0 else { return [] }
+        let media = browseEntries(in: directory).compactMap { entry -> (LibraryMediaFile, Date)? in
+            guard case .media(let file) = entry.kind else { return nil }
+            return (file, entry.dateModified ?? .distantPast)
+        }
+        return media
+            .sorted { $0.1 > $1.1 }
+            .prefix(limit)
+            .map(\.0)
+    }
+
     /// Backward-compatible entry for video-only callers.
     static func videoFiles(in directory: URL) -> [URL] {
         browseEntries(in: directory).compactMap { entry in

@@ -22,15 +22,15 @@ enum VideoAssetLoader {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return .failure(PlaybackErrorFormatter.openFailure(
                 url: url,
-                reason: "File not found.",
+                reason: "File not found",
                 probeDetails: "path missing"
             ))
         }
         guard FileManager.default.isReadableFile(atPath: url.path) else {
             return .failure(PlaybackErrorFormatter.openFailure(
                 url: url,
-                reason: "File is not readable (check volume permissions).",
-                probeDetails: "not readable"
+                reason: "File is not readable",
+                probeDetails: "not readable / permission denied"
             ))
         }
 

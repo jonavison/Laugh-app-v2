@@ -42,8 +42,14 @@ final class MediaLibraryController {
     private(set) var sourceEntries: [LibraryBrowseEntry] = []
     private(set) var displayedEntries: [LibraryBrowseEntry] = []
     private(set) var selectedEntryIndices: IndexSet = []
+    /// Anchor for Shift-click / Shift-arrow range selection (fixed end of the range).
+    private(set) var selectionAnchorIndex: Int?
+    /// Active end for keyboard range selection (moves with arrows while Shift is held).
+    private(set) var selectionFocusIndex: Int?
 
     var onChange: (() -> Void)?
+    /// Fired for multi-select updates without reloading browse content.
+    var onSelectionChange: (() -> Void)?
 
     init() {
         reloadRoots()
@@ -196,8 +202,52 @@ final class MediaLibraryController {
         if !query.isEmpty {
             entries = entries.filter { $0.name.localizedCaseInsensitiveContains(query) }
         }
+        let previouslySelectedURLs = Set(selectedEntryIndices.compactMap { index -> URL? in
+            guard index < displayedEntries.count else { return nil }
+            return Self.identityURL(for: displayedEntries[index])
+        })
+        let previousAnchorURL: URL? = {
+            guard let anchor = selectionAnchorIndex, anchor < displayedEntries.count else { return nil }
+            return Self.identityURL(for: displayedEntries[anchor])
+        }()
+        let previousFocusURL: URL? = {
+            guard let focus = selectionFocusIndex, focus < displayedEntries.count else { return nil }
+            return Self.identityURL(for: displayedEntries[focus])
+        }()
+
         displayedEntries = entries
-        selectedEntryIndices = selectedEntryIndices.filteredIndexSet { $0 < displayedEntries.count }
+        remapSelection(preserving: previouslySelectedURLs, anchorURL: previousAnchorURL, focusURL: previousFocusURL)
+    }
+
+    private static func identityURL(for entry: LibraryBrowseEntry) -> URL? {
+        LibraryBrowseFileActions.itemURL(for: entry)?.standardizedFileURL
+    }
+
+    private func remapSelection(preserving urls: Set<URL>, anchorURL: URL?, focusURL: URL?) {
+        guard !urls.isEmpty else {
+            selectedEntryIndices = []
+            selectionAnchorIndex = nil
+            selectionFocusIndex = nil
+            return
+        }
+        var next = IndexSet()
+        var newAnchor: Int?
+        var newFocus: Int?
+        for (index, entry) in displayedEntries.enumerated() {
+            guard let url = Self.identityURL(for: entry) else { continue }
+            if urls.contains(url) {
+                next.insert(index)
+            }
+            if let anchorURL, url == anchorURL {
+                newAnchor = index
+            }
+            if let focusURL, url == focusURL {
+                newFocus = index
+            }
+        }
+        selectedEntryIndices = next
+        selectionAnchorIndex = newAnchor ?? next.min()
+        selectionFocusIndex = newFocus ?? selectionAnchorIndex
     }
 
     private func recentBrowseEntries() -> [LibraryBrowseEntry] {
@@ -252,7 +302,6 @@ final class MediaLibraryController {
         let trimmed = query
         guard searchQuery != trimmed else { return }
         searchQuery = trimmed
-        clearMultiSelection(notify: false)
         applyDisplayFilters()
         onChange?()
     }
@@ -260,7 +309,6 @@ final class MediaLibraryController {
     func setKindFilter(_ filter: LibraryKindFilter) {
         guard kindFilter != filter else { return }
         kindFilter = filter
-        clearMultiSelection(notify: false)
         applyDisplayFilters()
         onChange?()
     }
@@ -351,16 +399,31 @@ final class MediaLibraryController {
     // MARK: - Multi-select
 
     func clearMultiSelection(notify: Bool = true) {
-        guard !selectedEntryIndices.isEmpty else { return }
+        guard !selectedEntryIndices.isEmpty || selectionAnchorIndex != nil || selectionFocusIndex != nil else { return }
         selectedEntryIndices = []
-        if notify { onChange?() }
+        selectionAnchorIndex = nil
+        selectionFocusIndex = nil
+        if notify { onSelectionChange?() }
     }
 
-    func setMultiSelection(_ indices: IndexSet) {
+    func setMultiSelection(_ indices: IndexSet, anchor: Int? = nil) {
         let filtered = indices.filteredIndexSet { $0 >= 0 && $0 < displayedEntries.count }
-        guard filtered != selectedEntryIndices else { return }
+        let nextAnchor = anchor.flatMap { filtered.contains($0) ? $0 : nil } ?? filtered.max() ?? filtered.min()
+        guard filtered != selectedEntryIndices
+            || nextAnchor != selectionAnchorIndex
+            || nextAnchor != selectionFocusIndex else { return }
         selectedEntryIndices = filtered
-        onChange?()
+        selectionAnchorIndex = nextAnchor
+        selectionFocusIndex = nextAnchor
+        onSelectionChange?()
+    }
+
+    func selectAllDisplayed() {
+        guard !displayedEntries.isEmpty else {
+            clearMultiSelection()
+            return
+        }
+        setMultiSelection(IndexSet(integersIn: 0..<displayedEntries.count), anchor: displayedEntries.count - 1)
     }
 
     func toggleMultiSelection(at index: Int) {
@@ -372,15 +435,59 @@ final class MediaLibraryController {
             next.insert(index)
         }
         selectedEntryIndices = next
-        onChange?()
+        selectionAnchorIndex = index
+        selectionFocusIndex = index
+        onSelectionChange?()
+    }
+
+    func removeFromMultiSelection(at index: Int) {
+        guard selectedEntryIndices.contains(index) else { return }
+        var next = selectedEntryIndices
+        next.remove(index)
+        selectedEntryIndices = next
+        if selectionAnchorIndex == index {
+            selectionAnchorIndex = next.max() ?? next.min()
+        }
+        if selectionFocusIndex == index {
+            selectionFocusIndex = selectionAnchorIndex
+        }
+        onSelectionChange?()
     }
 
     func extendMultiSelection(to index: Int) {
         guard index >= 0, index < displayedEntries.count else { return }
-        let anchor = selectedEntryIndices.min() ?? index
+        let anchor = selectionAnchorIndex ?? selectedEntryIndices.min() ?? index
         let range = IndexSet(integersIn: min(anchor, index)...max(anchor, index))
         selectedEntryIndices = range
-        onChange?()
+        selectionAnchorIndex = anchor
+        selectionFocusIndex = index
+        onSelectionChange?()
+    }
+
+    /// Move keyboard focus/selection by `delta` items. Shift extends from the selection anchor.
+    func moveSelection(by delta: Int, extending: Bool) {
+        guard !displayedEntries.isEmpty else { return }
+        let current = selectionFocusIndex
+            ?? selectionAnchorIndex
+            ?? selectedEntryIndices.max()
+            ?? selectedEntryIndices.min()
+            ?? -1
+        let nextIndex: Int
+        if current < 0 {
+            nextIndex = delta > 0 ? 0 : displayedEntries.count - 1
+        } else {
+            nextIndex = max(0, min(displayedEntries.count - 1, current + delta))
+        }
+        if extending {
+            let anchor = selectionAnchorIndex ?? (current >= 0 ? current : nextIndex)
+            selectionAnchorIndex = anchor
+            let range = IndexSet(integersIn: min(anchor, nextIndex)...max(anchor, nextIndex))
+            selectedEntryIndices = range
+            selectionFocusIndex = nextIndex
+            onSelectionChange?()
+            return
+        }
+        setMultiSelection(IndexSet(integer: nextIndex), anchor: nextIndex)
     }
 
     var selectedEntries: [LibraryBrowseEntry] {
@@ -437,7 +544,8 @@ final class MediaLibraryController {
     }
 
     var showsBrowseSearch: Bool {
-        showsFolderBrowseChrome || showsFavoritesList
+        // Temporarily hidden from the browse toolbar.
+        false
     }
 
     var showsKindFilter: Bool {

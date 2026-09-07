@@ -32,6 +32,39 @@ enum MediaThumbnailGenerator {
         return image
     }
 
+    /// Fast pixel size for gallery masonry (no full thumbnail decode when possible).
+    static func pixelSize(for url: URL, kind: DroppedMediaKind) -> NSSize? {
+        switch kind {
+        case .image:
+            return imagePixelSize(for: url)
+        case .video:
+            return NSSize(width: 16, height: 9)
+        case .unsupported:
+            return nil
+        }
+    }
+
+    private static func imagePixelSize(for url: URL) -> NSSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              CGImageSourceGetCount(source) > 0,
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else {
+            return nil
+        }
+        let width = props[kCGImagePropertyPixelWidth] as? CGFloat
+            ?? (props[kCGImagePropertyPixelWidth] as? NSNumber).map { CGFloat(truncating: $0) }
+        let height = props[kCGImagePropertyPixelHeight] as? CGFloat
+            ?? (props[kCGImagePropertyPixelHeight] as? NSNumber).map { CGFloat(truncating: $0) }
+        guard let width, let height, width > 1, height > 1 else { return nil }
+
+        // Honor EXIF orientation so portrait shots aren't laid out as landscape.
+        let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        if [5, 6, 7, 8].contains(orientation) {
+            return NSSize(width: height, height: width)
+        }
+        return NSSize(width: width, height: height)
+    }
+
     private static func imageThumbnail(for url: URL, maxSide: CGFloat, cacheKey: String) -> NSImage? {
         if let disk = loadDiskCache(cacheKey: cacheKey) {
             return disk

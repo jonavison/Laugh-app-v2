@@ -728,10 +728,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             hintLabel.centerXAnchor.constraint(equalTo: openButton.centerXAnchor),
 
             compatibilityBanner.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            compatibilityBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             compatibilityBanner.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
-            compatibilityBanner.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
-            compatibilityBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            compatibilityBanner.widthAnchor.constraint(lessThanOrEqualToConstant: 520),
+            compatibilityBanner.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
 
             controlsContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             playbackBarBottomConstraint!,
@@ -978,6 +977,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.libraryBrowse.refresh()
             self.syncPlaybackLibraryBrowseExpansion()
         }
+        mediaLibraryController.onSelectionChange = { [weak self] in
+            guard let self, self.libraryChromeInstalled else { return }
+            self.libraryBrowse.refreshSelection()
+        }
 
         librarySidebarWidthConstraint = librarySidebar.widthAnchor.constraint(equalToConstant: baseLibrarySidebarWidth)
         libraryBrowseTrailingToEdgeConstraint = libraryBrowse.trailingAnchor.constraint(equalTo: view.trailingAnchor)
@@ -1117,6 +1120,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             activeMediaKind = .video
         }
         if !isGeneratedFallbackURL(url) {
+            beginSecurityScopedAccess(for: url)
             playbackSourceURL = url
             cachedDiscoveredCompanions = CompanionSubtitleDiscovery.discover(for: url)
             syncSubtitleTrackPopUpsToCache()
@@ -1137,6 +1141,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         preparePlayerForVideoSwitch()
+
+        if !isGeneratedFallbackURL(url) {
+            if PlaybackErrorFormatter.matchesAccessProbe(url: url) {
+                showCompatibilityFailure(PlaybackErrorFormatter.accessDeniedNotice(for: url))
+                return
+            }
+            if PlaybackErrorFormatter.looksLikeMissingFile(url) {
+                showCompatibilityFailure(PlaybackErrorFormatter.missingFileNotice(for: url))
+                return
+            }
+        }
 
         if forceDirectMpv, MpvPlaybackController.isAvailable() {
             if isVideoFileURL(url) {
@@ -1494,7 +1509,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     self.attachResolvedVideo(asset: asset, url: url, generation: generation)
                 case .failure(let failure):
                     print("[DEBUG-playback] native open failed: \(failure.debugDetails)")
-                    self.handleNativePlaybackUnavailable(failure.userMessage)
+                    if failure.offersFileAccessSettings {
+                        self.showCompatibilityFailure(failure)
+                    } else {
+                        self.handleNativePlaybackUnavailable(failure.userMessage)
+                    }
                 }
             }
         }
@@ -2033,14 +2052,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             let details = PlaybackErrorFormatter.describe(item.error)
             print("[DEBUG-playback] AVPlayerItem.failed: \(details)")
             DispatchQueue.main.async {
-                let path = self.currentMediaURL?.path ?? "unknown"
-                let ext = (path as NSString).pathExtension.lowercased()
-                var message = "This video could not be played.\n\n\(item.error?.localizedDescription ?? "Playback failed.")"
-                message += "\n\n(\(details))"
-                if ext == "mkv" {
-                    message += "\n\nThis MKV may use a codec macOS cannot decode natively (common with HEVC 10-bit)."
+                let notice = PlaybackErrorFormatter.playbackItemFailedNotice(
+                    url: self.currentMediaURL ?? self.playbackSourceURL,
+                    error: item.error
+                )
+                if notice.offersFileAccessSettings {
+                    self.showCompatibilityFailure(notice)
+                } else {
+                    self.handleNativePlaybackUnavailable(notice.message)
                 }
-                self.handleNativePlaybackUnavailable(message)
             }
         case .unknown:
             break
@@ -3218,9 +3238,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 let tracks = try await asset.loadTracks(withMediaType: .video)
                 guard let track = tracks.first else {
                     await MainActor.run {
-                        self.showCompatibilityFailure(
-                            "This file has no readable video track.\n\nThe container or codec may not be supported by native macOS playback."
-                        )
+                        self.showCompatibilityFailure(PlaybackErrorFormatter.noVideoTrackMessage())
                     }
                     return
                 }
@@ -3415,8 +3433,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func showCompatibilityFailure(_ message: String) {
-        print("[DEBUG-playback] CompatibilityFailure: \(message)")
-        compatibilityBanner.show(message: message)
+        showCompatibilityFailure(PlaybackUserNotice(kind: .genericPlayback, message: message))
+    }
+
+    private func showCompatibilityFailure(_ failure: PlaybackOpenFailure) {
+        showCompatibilityFailure(
+            PlaybackUserNotice(kind: failure.kind, message: failure.userMessage)
+        )
+    }
+
+    private func showCompatibilityFailure(_ notice: PlaybackUserNotice) {
+        print("[DEBUG-playback] CompatibilityFailure: \(notice.message)")
+        compatibilityBanner.onAction = notice.offersFileAccessSettings
+            ? { MacPrivacySettings.openFilesAndFoldersPrivacy() }
+            : nil
+        compatibilityBanner.show(
+            message: notice.message,
+            actionTitle: notice.offersFileAccessSettings ? "Open Settings" : nil
+        )
         view.addSubview(compatibilityBanner, positioned: .above, relativeTo: rightSettingsSheet)
         raisePlaybackChromeToFront()
     }
@@ -3484,7 +3518,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 let lookup = BundledCodecTools.diagnosticSummary(for: "ffmpeg")
                 await MainActor.run {
                     self.showCompatibilityFailure(
-                        "Native playback failed for this codec.\n\nBundled compatibility decoder is not available in this build.\n\nFFmpeg lookup:\n\(lookup)"
+                        PlaybackErrorFormatter.decoderUnavailableMessage(lookup: lookup)
                     )
                 }
                 return
@@ -3537,7 +3571,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
             resolveAndAttach(playableURL: cachedURL, sourceURL: inputURL, generation: activeGeneration)
         case .failed:
-            showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
+            showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
         case .progressivePreview(let previewOutput, let fullTarget):
             startProgressivePreviewPlayback(
                 previewURL: previewOutput,
@@ -3671,7 +3705,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 guard let result else {
                     self.leavePlaybackPrepareUI()
                     if !plannedRoute {
-                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
+                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
                     }
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
@@ -3857,7 +3891,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 guard let result else {
                     self.leavePlaybackPrepareUI()
                     if !plannedRoute {
-                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedMessage(for: inputURL))
+                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
                     }
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
@@ -8899,8 +8933,7 @@ extension PlayerViewController {
             guard let self else { return event }
             guard event.clickCount == 2 else { return event }
 
-            if self.activeMediaKind == .image,
-               self.shouldZoomWindowForImageTitleBarDoubleClick(at: event.locationInWindow) {
+            if self.shouldZoomWindowForTitleBarDoubleClick(at: event.locationInWindow) {
                 self.zoomMainWindowToFillVisibleDesktop()
                 return event
             }
@@ -8922,19 +8955,50 @@ extension PlayerViewController {
         return !isPointOverVideoChrome(windowLocation)
     }
 
-    /// Image studio: double-click the title-bar band to zoom the window into the
-    /// visible desktop (menu bar + Dock stay — same idea as macOS title-bar zoom).
-    private func shouldZoomWindowForImageTitleBarDoubleClick(at windowLocation: NSPoint) -> Bool {
-        guard activeMediaKind == .image else { return false }
+    /// Double-click the immersive title-bar band to zoom the window (menu bar + Dock stay).
+    /// Works in image studio and folder/library view — the chrome strip is hit-through, so
+    /// library content underneath must not block this gesture.
+    private func shouldZoomWindowForTitleBarDoubleClick(at windowLocation: NSPoint) -> Bool {
+        let libraryOpen = playbackLibraryOverlay != .closed
+        let imageStudio = activeMediaKind == .image
+        let libraryHome = activeMediaKind == .empty
+        guard libraryOpen || imageStudio || libraryHome else { return false }
+
         let point = view.convert(windowLocation, from: nil)
         guard view.bounds.contains(point) else { return false }
-        if isPointOverVideoChrome(windowLocation) { return false }
         let titleHeight = max(
             ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window),
             titleBarChromeStrip.isHidden ? 28 : titleBarChromeStrip.bounds.height
         )
         // NSView: y=0 at bottom — title bar occupies the top strip.
-        return point.y >= (view.bounds.maxY - titleHeight - 2)
+        guard point.y >= (view.bounds.maxY - titleHeight - 2) else { return false }
+
+        // Ignore interactive chrome that can sit in/near the strip (settings, banners, etc.),
+        // but allow library sidebar/browse which intentionally extend under the title bar.
+        if isPointOverTitleBarBlockingChrome(windowLocation) { return false }
+        return true
+    }
+
+    private func isPointOverTitleBarBlockingChrome(_ windowLocation: NSPoint) -> Bool {
+        let blockers: [NSView] = [
+            controlsContainer,
+            imageControlsContainer,
+            imageFolderCarousel,
+            imageStudioMetaBar,
+            rightSettingsSheet,
+            compatibilityBanner,
+            queueDropZone,
+            openButton,
+            hintLabel,
+            playbackMiniPreview
+        ]
+        for chrome in blockers where !chrome.isHidden {
+            let local = chrome.convert(windowLocation, from: nil)
+            if chrome.bounds.contains(local) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Fill the screen’s visible frame (excludes menu bar / Dock). Toggles back via `zoom`.
