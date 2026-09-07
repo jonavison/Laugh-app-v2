@@ -85,6 +85,8 @@ struct SelectionRefineParameters: Equatable, Sendable {
     var contrast: Double = 0
     /// Contracts (−) or expands (+) the boundary (−1…1).
     var shiftEdge: Double = 0
+    /// Fringe color spill reduction on cutout export (0…1). Display preview optional.
+    var decontaminate: Double = 0
 
     static let identity = SelectionRefineParameters()
 
@@ -93,11 +95,17 @@ struct SelectionRefineParameters: Equatable, Sendable {
             && abs(feather) < 0.0005
             && abs(contrast) < 0.0005
             && abs(shiftEdge) < 0.0005
+            && abs(decontaminate) < 0.0005
     }
 
     /// Applies refine in Photoshop-ish order: Smooth → Feather → Contrast → Shift Edge.
+    /// Decontaminate is applied on the photo (cutout path), not the matte.
     func applying(to maskCI: CIImage, extent: CGRect) -> CIImage {
-        guard !isIdentity else { return maskCI.cropped(to: extent) }
+        let matteIdentity = abs(smooth) < 0.0005
+            && abs(feather) < 0.0005
+            && abs(contrast) < 0.0005
+            && abs(shiftEdge) < 0.0005
+        guard !matteIdentity else { return maskCI.cropped(to: extent) }
         var current = maskCI.clampedToExtent()
 
         if smooth > 0.0005 {
@@ -295,8 +303,14 @@ enum SelectionCompositor {
             to: mask.ciImageMatching(extent: extent),
             extent: extent
         )
+        let cleanedPhoto = SelectionDecontaminate.apply(
+            image: image,
+            mask: maskCI,
+            amount: refine.decontaminate,
+            extent: extent
+        )
         let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: extent)
-        return blend(foreground: image, background: clear, mask: maskCI, extent: extent) ?? image
+        return blend(foreground: cleanedPhoto, background: clear, mask: maskCI, extent: extent) ?? cleanedPhoto
     }
 
     private static func blend(

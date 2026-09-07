@@ -77,7 +77,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## SelectionRefineParameters
 
-`SelectionRefineParameters` is the class-blind edge refine model (Smooth / Feather / Contrast / Shift Edge today; brush / decontaminate later). It applies to any matte’s alpha the same way — sky, rock, hair, or unlabeled. Content-specific starting values come from `SelectionHint` / presets, not branches inside refine.
+`SelectionRefineParameters` is the class-blind edge refine model (Smooth / Feather / Contrast / Shift Edge / Decontaminate; brush modes are separate session state). It applies to any matte’s alpha the same way — sky, rock, hair, or unlabeled. Content-specific starting values come from `SelectionHint` / presets, not branches inside refine. Local Paint In / Paint Out / Refine Edge strokes live on `ImageSelectionSession` via `SelectionBrushEngine`.
 
 ## SelectionHint
 

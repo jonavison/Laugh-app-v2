@@ -150,12 +150,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subjectSelectFeatherSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let subjectSelectContrastSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let subjectSelectShiftSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectDecontamSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectBrushRadiusSlider = NSSlider(value: 24, minValue: 4, maxValue: 80, target: nil, action: nil)
+    private let subjectSelectBrushModeControl = NSSegmentedControl(
+        labels: SelectionBrushMode.allCases.map(\.menuTitle),
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     private let subjectSelectSmoothValue = NSTextField(labelWithString: "0")
     private let subjectSelectFeatherValue = NSTextField(labelWithString: "0")
     private let subjectSelectContrastValue = NSTextField(labelWithString: "0")
     private let subjectSelectShiftValue = NSTextField(labelWithString: "0")
+    private let subjectSelectDecontamValue = NSTextField(labelWithString: "0")
+    private let subjectSelectBrushRadiusValue = NSTextField(labelWithString: "24")
     private let subjectSelectStatusLabel = NSTextField(labelWithString: "")
     private var subjectSelectRefineSettleWork: DispatchWorkItem?
+    private var subjectSelectBrushEnabled = false
+    private let subjectSelectBrushToggle = NSButton(checkboxWithTitle: "Brush", target: nil, action: nil)
     private let imageStudioCommitFooter = ImageStudioCommitFooter()
     private var imageStudioCommitFooterHeightConstraint: NSLayoutConstraint?
     private var imageSavedPresetsHost = NSStackView()
@@ -531,6 +543,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageSelectionSession.onChromeChange = { [weak self] in
             self?.refreshSubjectSelectChrome()
             self?.updateImageStudioCommitFooter()
+        }
+        imageSurfaceView.onSelectionBrushStroke = { [weak self] point in
+            guard let self else { return }
+            _ = self.imageSelectionSession.applyBrush(at: point, preview: true)
+        }
+        imageSurfaceView.onSelectionBrushStrokeEnded = { [weak self] in
+            guard let self else { return }
+            self.imageSurfaceView.setSelectionPreview(
+                mask: self.imageSelectionSession.currentMask,
+                displayMode: self.imageSelectionSession.currentDisplayMode,
+                refine: self.imageSelectionSession.currentRefine,
+                quality: .full
+            )
         }
 
         mediaLibraryController.delegate = self
@@ -4998,11 +5023,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         configureSubjectSelectRefineSlider(subjectSelectFeatherSlider, action: #selector(subjectSelectRefineChanged))
         configureSubjectSelectRefineSlider(subjectSelectContrastSlider, action: #selector(subjectSelectRefineChanged))
         configureSubjectSelectRefineSlider(subjectSelectShiftSlider, action: #selector(subjectSelectRefineChanged))
+        configureSubjectSelectRefineSlider(subjectSelectDecontamSlider, action: #selector(subjectSelectRefineChanged))
+        configureSubjectSelectRefineSlider(subjectSelectBrushRadiusSlider, action: #selector(subjectSelectBrushRadiusChanged))
+        configureSettingsSegmentedControl(subjectSelectBrushModeControl, action: #selector(subjectSelectBrushModeChanged))
+        subjectSelectBrushModeControl.selectedSegment = SelectionBrushMode.allCases.firstIndex(of: .refineEdge) ?? 0
+        subjectSelectBrushToggle.target = self
+        subjectSelectBrushToggle.action = #selector(subjectSelectBrushToggleChanged)
+        subjectSelectBrushToggle.font = .systemFont(ofSize: 12)
+        subjectSelectBrushToggle.focusRingType = .none
         for label in [
             subjectSelectSmoothValue,
             subjectSelectFeatherValue,
             subjectSelectContrastValue,
-            subjectSelectShiftValue
+            subjectSelectShiftValue,
+            subjectSelectDecontamValue,
+            subjectSelectBrushRadiusValue
         ] {
             label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             label.textColor = .secondaryLabelColor
@@ -5043,6 +5078,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         ))
         card.addRow(SettingsRowFactory.fullWidthRow(
             makeSettingsSliderRow(title: "Shift Edge", slider: subjectSelectShiftSlider, valueLabel: subjectSelectShiftValue)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Decontaminate", slider: subjectSelectDecontamSlider, valueLabel: subjectSelectDecontamValue)
+        ))
+        let brushRow = NSStackView()
+        brushRow.orientation = .horizontal
+        brushRow.alignment = .centerY
+        brushRow.spacing = 8
+        brushRow.addArrangedSubview(subjectSelectBrushToggle)
+        brushRow.addArrangedSubview(subjectSelectBrushModeControl)
+        card.addRow(SettingsRowFactory.fullWidthRow(brushRow))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Brush Radius", slider: subjectSelectBrushRadiusSlider, valueLabel: subjectSelectBrushRadiusValue)
         ))
         card.addRow(SettingsRowFactory.fullWidthRow(subjectSelectStatusLabel))
         card.addFinalRow(SettingsRowFactory.fullWidthRow(subjectSelectExportButton))
@@ -5091,7 +5139,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             smooth: subjectSelectSmoothSlider.doubleValue,
             feather: subjectSelectFeatherSlider.doubleValue,
             contrast: subjectSelectContrastSlider.doubleValue,
-            shiftEdge: subjectSelectShiftSlider.doubleValue
+            shiftEdge: subjectSelectShiftSlider.doubleValue,
+            decontaminate: subjectSelectDecontamSlider.doubleValue
         )
         syncSubjectSelectRefineValueLabels(next)
         imageSelectionSession.setRefine(next, preview: true)
@@ -5107,6 +5156,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         subjectSelectRefineSettleWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
+    }
+
+    @objc private func subjectSelectBrushToggleChanged() {
+        subjectSelectBrushEnabled = subjectSelectBrushToggle.state == .on
+        imageSurfaceView.setSelectionBrushEnabled(subjectSelectBrushEnabled)
+        refreshSubjectSelectChrome()
+    }
+
+    @objc private func subjectSelectBrushModeChanged() {
+        let idx = subjectSelectBrushModeControl.selectedSegment
+        guard idx >= 0, idx < SelectionBrushMode.allCases.count else { return }
+        imageSelectionSession.setBrushMode(SelectionBrushMode.allCases[idx])
+        refreshSubjectSelectChrome()
+    }
+
+    @objc private func subjectSelectBrushRadiusChanged() {
+        let radius = CGFloat(subjectSelectBrushRadiusSlider.doubleValue)
+        imageSelectionSession.setBrushRadius(radius)
+        subjectSelectBrushRadiusValue.stringValue = String(format: "%.0f", radius)
+        imageSurfaceView.setSelectionBrushRadius(radius)
     }
 
     @objc private func subjectSelectQualityChanged() {
@@ -5129,6 +5198,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectFeatherValue.stringValue = String(format: "%.2f", refine.feather)
         subjectSelectContrastValue.stringValue = String(format: "%.2f", refine.contrast)
         subjectSelectShiftValue.stringValue = String(format: "%+.2f", refine.shiftEdge)
+        subjectSelectDecontamValue.stringValue = String(format: "%.2f", refine.decontaminate)
+        subjectSelectBrushRadiusValue.stringValue = String(
+            format: "%.0f",
+            imageSelectionSession.currentBrushRadius
+        )
     }
 
     private func refreshSubjectSelectChrome() {
@@ -5148,6 +5222,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectFeatherSlider.isEnabled = refineEnabled
         subjectSelectContrastSlider.isEnabled = refineEnabled
         subjectSelectShiftSlider.isEnabled = refineEnabled
+        subjectSelectDecontamSlider.isEnabled = refineEnabled
+        subjectSelectBrushToggle.isEnabled = hasMask && !loading
+        subjectSelectBrushModeControl.isEnabled = hasMask && !loading && subjectSelectBrushEnabled
+        subjectSelectBrushRadiusSlider.isEnabled = hasMask && !loading && subjectSelectBrushEnabled
+        if !hasMask, subjectSelectBrushEnabled {
+            subjectSelectBrushEnabled = false
+            subjectSelectBrushToggle.state = .off
+            imageSurfaceView.setSelectionBrushEnabled(false)
+        }
 
         let mode = imageSelectionSession.currentDisplayMode
         if let idx = SelectionDisplayMode.previewCycle.firstIndex(of: mode) {
@@ -5156,12 +5239,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             subjectSelectViewPopUp.selectItem(at: SelectionDisplayMode.previewCycle.firstIndex(of: .marchingAnts) ?? 0)
         }
         subjectSelectQualityControl.selectedSegment = imageSelectionSession.currentQuality == .accurate ? 1 : 0
+        if let brushIdx = SelectionBrushMode.allCases.firstIndex(of: imageSelectionSession.currentBrushMode) {
+            subjectSelectBrushModeControl.selectedSegment = brushIdx
+        }
+        subjectSelectBrushRadiusSlider.doubleValue = Double(imageSelectionSession.currentBrushRadius)
 
         let refine = imageSelectionSession.currentRefine
         subjectSelectSmoothSlider.doubleValue = refine.smooth
         subjectSelectFeatherSlider.doubleValue = refine.feather
         subjectSelectContrastSlider.doubleValue = refine.contrast
         subjectSelectShiftSlider.doubleValue = refine.shiftEdge
+        subjectSelectDecontamSlider.doubleValue = refine.decontaminate
         syncSubjectSelectRefineValueLabels(refine)
 
         if downloading {
@@ -5183,7 +5271,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 engineNote = ""
             }
-            subjectSelectStatusLabel.stringValue = "\(engineNote)\(mode.menuTitle) — press F to cycle views. Display-only."
+            let brushNote = subjectSelectBrushEnabled
+                ? " Brush: \(imageSelectionSession.currentBrushMode.menuTitle)."
+                : ""
+            subjectSelectStatusLabel.stringValue = "\(engineNote)\(mode.menuTitle) — press F to cycle views.\(brushNote) Display-only."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else {
             subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
@@ -10033,6 +10124,9 @@ final class ImageSurfaceView: NSView {
     var onZoomScaleChanged: (() -> Void)?
     /// Fired when applied crop changes (apply / clear).
     var onCropChanged: (() -> Void)?
+    /// Selection brush stroke in source pixel space (when brush enabled).
+    var onSelectionBrushStroke: ((CGPoint) -> Void)?
+    var onSelectionBrushStrokeEnded: (() -> Void)?
 
     private let imageView = NSImageView()
     private let cropOverlay = ImageCropOverlayView()
@@ -10062,6 +10156,10 @@ final class ImageSurfaceView: NSView {
     private var selectionRefine = SelectionRefineParameters.identity
     private var marchingAntsPhase: CGFloat = 0
     private var marchingAntsTimer: Timer?
+    private var selectionBrushEnabled = false
+    private var selectionBrushRadius: CGFloat = 24
+    private var isBrushing = false
+    private var lastBrushPixelPoint: CGPoint?
     /// Offset from centered fit frame while zoomed in (points).
     private var panOffset: CGPoint = .zero
     private var isPanning = false
@@ -10278,8 +10376,18 @@ final class ImageSurfaceView: NSView {
         if isCropMode { return }
         if event.clickCount == 2 {
             isPanning = false
+            isBrushing = false
             onDoubleClick?()
             return
+        }
+        if selectionBrushEnabled, selectionMask != nil {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if let pixel = selectionPixelPoint(fromViewPoint: viewPoint) {
+                isBrushing = true
+                lastBrushPixelPoint = pixel
+                onSelectionBrushStroke?(pixel)
+                return
+            }
         }
         if canPanImage {
             isPanning = true
@@ -10293,6 +10401,20 @@ final class ImageSurfaceView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if isBrushing {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            guard let pixel = selectionPixelPoint(fromViewPoint: viewPoint) else { return }
+            if let last = lastBrushPixelPoint {
+                let dx = pixel.x - last.x
+                let dy = pixel.y - last.y
+                let dist = hypot(dx, dy)
+                let step = max(2, selectionBrushRadius * 0.35)
+                if dist < step { return }
+            }
+            lastBrushPixelPoint = pixel
+            onSelectionBrushStroke?(pixel)
+            return
+        }
         guard isPanning else {
             super.mouseDragged(with: event)
             return
@@ -10309,6 +10431,12 @@ final class ImageSurfaceView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isBrushing {
+            isBrushing = false
+            lastBrushPixelPoint = nil
+            onSelectionBrushStrokeEnded?()
+            return
+        }
         if isPanning {
             isPanning = false
             window?.invalidateCursorRects(for: self)
@@ -10378,6 +10506,59 @@ final class ImageSurfaceView: NSView {
 
     /// Base CIImage in source pixel space for selection providers.
     var selectionSourceCIImage: CIImage? { baseCIImage }
+
+    func setSelectionBrushEnabled(_ enabled: Bool) {
+        selectionBrushEnabled = enabled
+        if !enabled {
+            isBrushing = false
+            lastBrushPixelPoint = nil
+        }
+        window?.invalidateCursorRects(for: self)
+    }
+
+    func setSelectionBrushRadius(_ radius: CGFloat) {
+        selectionBrushRadius = min(120, max(4, radius))
+    }
+
+    /// Map a view point onto source (base) pixel space. Best when orientation is identity.
+    func selectionPixelPoint(fromViewPoint viewPoint: CGPoint) -> CGPoint? {
+        guard let baseCIImage else { return nil }
+        let photo = photoFrameInOverlay()
+        guard photo.width > 1, photo.height > 1, photo.contains(viewPoint) else { return nil }
+        let nx = (viewPoint.x - photo.minX) / photo.width
+        let ny = (viewPoint.y - photo.minY) / photo.height
+        let oriented = orientedPixelSize
+        guard oriented.width > 1, oriented.height > 1 else { return nil }
+        var ox = nx * oriented.width
+        var oy = ny * oriented.height
+        // Undo flip (applied after rotate in the display pipeline).
+        if flipHorizontal { ox = oriented.width - ox }
+        if flipVertical { oy = oriented.height - oy }
+        // Undo quarter-turns (CI rotates CCW by turns * 90°).
+        let turns = ((rotationQuarterTurns % 4) + 4) % 4
+        let baseSize = naturalPixelSize
+        let bx: CGFloat
+        let by: CGFloat
+        switch turns {
+        case 1: // 90° CCW display ← inverse 90° CW
+            bx = oy
+            by = oriented.width - ox
+        case 2:
+            bx = oriented.width - ox
+            by = oriented.height - oy
+        case 3: // 270° CCW ← inverse 90° CCW
+            bx = oriented.height - oy
+            by = ox
+        default:
+            bx = ox
+            by = oy
+        }
+        let extent = baseCIImage.extent
+        return CGPoint(
+            x: extent.minX + min(max(bx, 0), baseSize.width - 0.5),
+            y: extent.minY + min(max(by, 0), baseSize.height - 0.5)
+        )
+    }
 
     func rotateLeft() {
         rotationQuarterTurns = (rotationQuarterTurns + 3) % 4

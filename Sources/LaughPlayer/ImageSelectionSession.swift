@@ -1,5 +1,6 @@
 import Foundation
 import CoreImage
+import Metal
 
 /// Source of truth for the current ImageMedia selection matte (ADR smart-selection).
 /// Separate from `ImageAdjustSession` — Face/Body tools will combine both later.
@@ -24,6 +25,9 @@ final class ImageSelectionSession {
     private var mask: SelectionMask?
     private var displayMode: SelectionDisplayMode = .marchingAnts
     private var refine = SelectionRefineParameters.identity
+    private var brushMode: SelectionBrushMode = .refineEdge
+    /// Brush radius in image pixels (clamped on apply).
+    private var brushRadius: CGFloat = 24
     private var quality: SelectionQuality = .accurate
     private var phase: Phase = .idle
     private var lastError: SelectionError?
@@ -37,6 +41,12 @@ final class ImageSelectionSession {
     private let cancelLock = NSLock()
     private var pendingImage: CIImage?
     private var lastSelectKind: SelectKind?
+    private let brushContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
 
     /// Fired when mask / display mode should update the surface.
     var onChange: ((_ quality: SelectionQuality) -> Void)?
@@ -73,6 +83,8 @@ final class ImageSelectionSession {
     var currentMask: SelectionMask? { mask }
     var currentDisplayMode: SelectionDisplayMode { displayMode }
     var currentRefine: SelectionRefineParameters { refine }
+    var currentBrushMode: SelectionBrushMode { brushMode }
+    var currentBrushRadius: CGFloat { brushRadius }
     var currentQuality: SelectionQuality { quality }
     var currentPhase: Phase { phase }
     var isSelecting: Bool {
@@ -112,6 +124,49 @@ final class ImageSelectionSession {
         refine = next
         notifyChrome()
         onChange?(preview ? .preview : .accurate)
+    }
+
+    func setBrushMode(_ mode: SelectionBrushMode) {
+        guard brushMode != mode else { return }
+        brushMode = mode
+        notifyChrome()
+    }
+
+    func setBrushRadius(_ radius: CGFloat) {
+        let clamped = min(120, max(4, radius))
+        guard abs(clamped - brushRadius) > 0.05 else { return }
+        brushRadius = clamped
+        notifyChrome()
+    }
+
+    /// Local brush stroke in source pixel space. Requires an active matte + pending photo.
+    @discardableResult
+    func applyBrush(at point: CGPoint, preview: Bool = true) -> Bool {
+        guard var current = mask, let photo = pendingImage else { return false }
+        let extent = photo.extent.integral
+        let maskCI = current.ciImageMatching(extent: extent)
+        let nextCI = SelectionBrushEngine.apply(
+            mask: maskCI,
+            photo: photo,
+            mode: brushMode,
+            center: point,
+            radius: brushRadius,
+            extent: extent
+        )
+        guard let cg = brushContext.createCGImage(nextCI, from: extent) else { return false }
+        current = SelectionMask(
+            cgImage: cg,
+            extent: extent,
+            confidence: current.confidence,
+            semanticClass: current.semanticClass,
+            source: current.source
+        )
+        mask = current
+        cachedMask = current
+        cacheKey = nil // brush invalidates select cache
+        notifyChrome()
+        onChange?(preview ? .preview : .accurate)
+        return true
     }
 
     func setQuality(_ next: SelectionQuality) {
@@ -180,6 +235,8 @@ final class ImageSelectionSession {
         lastSelectKind = nil
         phase = .idle
         refine = .identity
+        brushMode = .refineEdge
+        brushRadius = 24
         if notify {
             notifyChrome()
             onChange?(.accurate)
