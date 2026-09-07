@@ -228,6 +228,18 @@ protocol SelectionProvider: Sendable {
     ) async throws -> SelectionMask
 }
 
+/// Opt-in for engines that can amortise per-image setup (an encoder pass, typically)
+/// across several prompts. Optional refinement of `SelectionProvider`, not a replacement:
+/// callers must work when a provider only offers the one-prompt entry.
+protocol BatchPromptSelecting: AnyObject {
+    /// Positionally aligned with `prompts`; `nil` where the engine returned nothing usable.
+    func select(
+        in image: CIImage,
+        prompts: [SelectionPrompt],
+        quality: SelectionQuality
+    ) async throws -> [SelectionMask?]
+}
+
 /// Preview / export compositing for selection mattes (display-only; never mutates the file).
 enum SelectionCompositor {
     /// Classic Quick Mask / rubylith over the unselected area.
@@ -367,17 +379,22 @@ enum SelectionCompositor {
         return blend(foreground: white, background: black, mask: maskForBlend(mask, extent: extent), extent: extent) ?? black
     }
 
-    /// Binary plate from a soft matte. Threshold ~0.25 so soft MobileSAM interiors survive.
+    /// Binary plate cut at the matte's true 50% coverage.
+    ///
+    /// Core Image linearises a loaded matte as if its bytes were sRGB colour, so a 50%
+    /// coverage byte (128) arrives as ~0.216. Undoing that tone curve first is what makes
+    /// a 0.5 cut land on the real half-coverage iso-line instead of eating the soft edge.
     static func hardBinaryMatte(mask: CIImage, extent: CGRect) -> CIImage {
         mask
             .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+            .applyingFilter("CILinearToSRGBToneCurve")
             .applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: 20, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: 20, z: 0, w: 0),
                 "inputBVector": CIVector(x: 0, y: 0, z: 20, w: 0),
                 "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                // 20x - 5 → binary cut near 0.25 (soft SAM often sits below 0.5).
-                "inputBiasVector": CIVector(x: -5, y: -5, z: -5, w: 0)
+                // 20x - 10 → cut at 0.5 with a ~1px antialiased ramp.
+                "inputBiasVector": CIVector(x: -10, y: -10, z: -10, w: 0)
             ])
             .applyingFilter("CIColorClamp", parameters: [
                 "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
@@ -457,6 +474,10 @@ enum SelectionMatteNormalization {
 
 /// Builds a Vision contour path for view-space marching ants (exact subject outline).
 enum SelectionAntsContour {
+    /// Long-edge cap for the contour plate. Drives how finely the outline can follow the
+    /// matte — at 768 a 4K photo's silhouette visibly polygonises.
+    static let plateMaxEdge: CGFloat = 1536
+
     /// Normalized CGPath (0…1, Vision bottom-leading) for the hard matte silhouette.
     static func normalizedPath(
         mask: SelectionMask,
@@ -474,27 +495,24 @@ enum SelectionAntsContour {
         matte = SelectionCompositor.hardBinaryMatte(mask: matte, extent: extent)
 
         // Cap for Vision — contour quality stays high; overlay scales to the photo frame.
-        let maxEdge: CGFloat = 768
         let longEdge = max(extent.width, extent.height)
-        if longEdge > maxEdge {
-            let scale = maxEdge / longEdge
+        if longEdge > plateMaxEdge {
+            let scale = plateMaxEdge / longEdge
             matte = matte.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         }
         let plateExtent = matte.extent.integral
         matte = SelectionCompositor.hardBinaryMatte(mask: matte, extent: plateExtent)
-        matte = cleanedHardMatte(matte, extent: plateExtent)
         guard let cg = context.createCGImage(matte, from: plateExtent) else { return nil }
         return normalizedPath(fromHardMatte: cg)
     }
 
-    /// Morphological close → open. Fills pinholes and drops speckles that would otherwise
-    /// become dozens of tiny noise contours (scattered dashes instead of one outline).
+    /// Fills pinholes only. Radius stays at a single pixel because opening any wider
+    /// rounds real structure (hair strands, fingers) off the silhouette; stray blobs are
+    /// dropped later by contour size instead.
     static func cleanedHardMatte(_ hardMatte: CIImage, extent: CGRect) -> CIImage {
-        let radius = max(1.5, min(extent.width, extent.height) / 220.0)
-        return hardMatte.clampedToExtent()
-            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
-            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: radius * 2])
-            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
+        hardMatte.clampedToExtent()
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 1.0])
+            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: 1.0])
             .cropped(to: extent)
     }
 
@@ -503,7 +521,7 @@ enum SelectionAntsContour {
         let request = VNDetectContoursRequest()
         request.contrastAdjustment = 1.0
         request.detectsDarkOnLight = false
-        request.maximumImageDimension = 768
+        request.maximumImageDimension = Int(plateMaxEdge)
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         do {
             try handler.perform([request])
@@ -551,6 +569,75 @@ enum SelectionAntsContour {
     }
 }
 
+/// Keeps a class-blind SAM matte inside what the person segmenter recognised as a person.
+///
+/// Auto Select prompts SAM with a box around everyone in frame. SAM has no notion of
+/// "person", so an object inside that box — a plant in front of a group — reads as part of
+/// the same region and gets selected. Vision's rough matte does know the difference, so it
+/// becomes a veto: anything it never called a person is removed. The prior is dilated
+/// first, leaving SAM free to place the actual boundary more precisely than Vision could.
+enum SelectionPersonPriorGate {
+    /// Below this prior coverage the segmenter clearly failed (very dark or stylised
+    /// subjects), and gating would erase a good SAM matte — so the gate stands down.
+    static let minimumPriorCoverage = 0.01
+
+    static func apply(
+        sam: CIImage,
+        prior: CIImage,
+        extent: CGRect,
+        context: CIContext
+    ) -> CIImage {
+        guard coverage(of: prior, extent: extent, context: context) >= minimumPriorCoverage else {
+            return sam
+        }
+        let longEdge = max(extent.width, extent.height)
+        // Slack is a tradeoff measured on group photos: too little vetoes subject regions
+        // the segmenter missed (dark clothing), too much readmits the occluder. 5% keeps
+        // the subject whole while dropping occluder area that reaches beyond the envelope.
+        let slack = Float(max(4.0, longEdge * 0.05))
+        // Close before dilating: the prior is used as a silhouette envelope, and the
+        // segmenter routinely drops interior regions it cannot read (dark clothing against
+        // a dark background). Closing refills those without pushing the outer boundary
+        // outward — a blur would fill the holes but also readmit the occluder.
+        let closing = Float(max(6.0, longEdge * 0.04))
+        let envelope = prior
+            .clampedToExtent()
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: closing])
+            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: closing])
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: slack])
+            .cropped(to: extent)
+        let gate = SelectionMattePrecision.tightenedEdge(
+            envelope,
+            extent: extent,
+            slope: 20,
+            center: 0.05
+        )
+        guard let gated = CIFilter(name: "CIMultiplyCompositing", parameters: [
+            kCIInputImageKey: sam,
+            kCIInputBackgroundImageKey: gate
+        ])?.outputImage else {
+            return sam
+        }
+        return gated.cropped(to: extent)
+    }
+
+    private static func coverage(of matte: CIImage, extent: CGRect, context: CIContext) -> Double {
+        let average = matte.applyingFilter("CIAreaAverage", parameters: [
+            kCIInputExtentKey: CIVector(cgRect: extent)
+        ])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Double(pixel[0]) / 255.0
+    }
+}
+
 /// Photo-guided matte tightening for precision Auto Select (accurate path).
 enum SelectionMattePrecision {
     /// Snap soft Vision alpha to strong photo edges inside the uncertain boundary band.
@@ -572,6 +659,10 @@ enum SelectionMattePrecision {
             )
         }
         matte = matte.cropped(to: extent)
+        // Joint-bilateral pass: SAM's matte is an upsampled 256px prior, so its edge is a
+        // fuzzy band. Re-filtering it against the photo pulls that band onto real structure
+        // before the gate below decides where to harden.
+        matte = guidedByPhoto(matte: matte, photo: photo, extent: extent)
 
         // Scale band with image size so 4K gets a wider search than previews.
         let longEdge = max(extent.width, extent.height)
@@ -603,20 +694,8 @@ enum SelectionMattePrecision {
             return matte
         }
 
-        // Hard binary matte — preferred where photo edges are strong inside the band.
-        let hard = matte
-            .applyingFilter("CIColorMatrix", parameters: [
-                "inputRVector": CIVector(x: 20, y: 0, z: 0, w: 0),
-                "inputGVector": CIVector(x: 0, y: 20, z: 0, w: 0),
-                "inputBVector": CIVector(x: 0, y: 0, z: 20, w: 0),
-                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                "inputBiasVector": CIVector(x: -10, y: -10, z: -10, w: 0)
-            ])
-            .applyingFilter("CIColorClamp", parameters: [
-                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
-            ])
-            .cropped(to: extent)
+        // Near-binary candidate — preferred where photo edges are strong inside the band.
+        let hard = tightenedEdge(matte, extent: extent, slope: 20)
 
         // snapAmount = band * edges → only boundary pixels with photo structure.
         guard let snapGate = CIFilter(name: "CIMultiplyCompositing", parameters: [
@@ -626,7 +705,7 @@ enum SelectionMattePrecision {
             return matte
         }
 
-        // Mix soft Vision matte → hard edge-snapped matte where snapGate is high.
+        // Snap to binary where the photo justifies it; elsewhere keep the guided matte.
         guard let snapped = CIFilter(name: "CIBlendWithMask", parameters: [
             kCIInputImageKey: hard,
             kCIInputBackgroundImageKey: matte,
@@ -635,13 +714,65 @@ enum SelectionMattePrecision {
             return matte
         }
 
-        // Mild contrast recovery so hair/fringe stays soft where edges were weak.
-        return snapped
-            .applyingFilter("CIColorControls", parameters: [
-                kCIInputContrastKey: 1.15,
-                kCIInputBrightnessKey: 0.0,
-                kCIInputSaturationKey: 0.0
+        // SAM's 256px logits, upsampled, leave a fine checkerboard wherever the model is
+        // undecided — dark hair against a dark background. Steepening that directly turns it
+        // into salt-and-pepper, which then reads as sub-threshold contours and drops the
+        // hair from the outline entirely. Median rather than blur: it flattens the
+        // checkerboard without rounding a genuine step edge, so this costs almost nothing in
+        // boundary accuracy. Repeated because one 3×3 pass cannot span multi-pixel blocks.
+        let consolidated = snapped
+            .clampedToExtent()
+            .applyingFilter("CIMedianFilter")
+            .applyingFilter("CIMedianFilter")
+            .applyingFilter("CIMedianFilter")
+            .cropped(to: extent)
+
+        // Steepen what the gate left behind so the fringe reads as an edge rather than a
+        // wide band. The centre sits just below half so those flattened plateaus resolve
+        // as selected: on an ambiguous subject, keeping the hair beats shaving it off.
+        return tightenedEdge(consolidated, extent: extent, slope: 12, center: 0.48)
+    }
+
+    /// Joint-bilateral filter of the matte against the photo, so the matte's edge follows
+    /// luminance structure instead of the model's coarse upsample.
+    static func guidedByPhoto(matte: CIImage, photo: CIImage, extent: CGRect) -> CIImage {
+        let spatialSigma = Float(max(2.0, min(8.0, max(extent.width, extent.height) / 500.0)))
+        guard let guided = CIFilter(name: "CIEdgePreserveUpsampleFilter", parameters: [
+            kCIInputImageKey: photo.cropped(to: extent),
+            "inputSmallImage": matte,
+            "inputSpatialSigma": spatialSigma,
+            "inputLumaSigma": 0.15
+        ])?.outputImage else {
+            return matte
+        }
+        return guided.cropped(to: extent)
+    }
+
+    /// Steepens the coverage ramp around `center` without moving the boundary.
+    ///
+    /// Runs in the matte's semantic (byte) domain: Core Image treats matte values as sRGB
+    /// colour, so tightening in linear space would pull the edge inward as a side effect.
+    static func tightenedEdge(
+        _ matte: CIImage,
+        extent: CGRect,
+        slope: CGFloat,
+        center: CGFloat = 0.5
+    ) -> CIImage {
+        let bias = 0.5 - center * slope
+        return matte
+            .applyingFilter("CILinearToSRGBToneCurve")
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: slope, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: slope, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: slope, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: bias, y: bias, z: bias, w: 0)
             ])
+            .applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+            ])
+            .applyingFilter("CISRGBToneCurveToLinear")
             .cropped(to: extent)
     }
 }
@@ -889,6 +1020,85 @@ final class VisionPersonSelectionProvider: SelectionProvider, @unchecked Sendabl
         // Ultra-dim mats with weak mean are document / texture ghosts.
         if mean < 8 && coverage < 0.12 { return true }
         return false
+    }
+}
+
+extension VisionPersonSelectionProvider: PersonInstanceSegmenting {
+    /// One matte per detected person, so Auto Select can prompt SAM per person instead of
+    /// wrapping a whole group in one box. Returns `[]` on older systems or when Vision
+    /// finds nobody — callers fall back to the merged person matte.
+    func personInstanceMasks(in image: CIImage, quality: SelectionQuality) async throws -> [SelectionMask] {
+        guard #available(macOS 14.0, *) else { return [] }
+        let working = quality == .preview ? Self.scaledForPreview(image) : image
+        let workingExtent = working.extent.integral
+        guard workingExtent.width > 1, workingExtent.height > 1,
+              let cgImage = ciContext.createCGImage(working, from: workingExtent)
+        else { return [] }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                let request = VNGeneratePersonInstanceMaskRequest()
+                do {
+                    try handler.perform([request])
+                } catch {
+                    continuation.resume(returning: [])
+                    return
+                }
+                guard let observation = request.results?.first else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                var masks: [SelectionMask] = []
+                for instance in observation.allInstances {
+                    guard let buffer = try? observation.generateScaledMaskForImage(
+                        forInstances: IndexSet(integer: instance),
+                        from: handler
+                    ) else { continue }
+                    let maskCI = CIImage(cvPixelBuffer: buffer)
+                    let maskExtent = maskCI.extent.integral
+                    guard let cg = self.ciContext.createCGImage(maskCI, from: maskExtent),
+                          !Self.instanceIsNoise(cg)
+                    else { continue }
+                    masks.append(
+                        SelectionMask(
+                            cgImage: cg,
+                            extent: maskExtent,
+                            confidence: observation.confidence,
+                            semanticClass: .person,
+                            source: .visionPerson
+                        )
+                    )
+                }
+                continuation.resume(returning: masks)
+            }
+        }
+    }
+
+    /// A single person in a group shot can legitimately cover a fraction of the frame, so
+    /// the whole-image `minimumPersonCoverage` floor would discard real instances. Only
+    /// reject mattes too small to prompt from.
+    private static func instanceIsNoise(_ image: CGImage) -> Bool {
+        let width = min(image.width, 128)
+        let height = min(image.height, 128)
+        guard width > 0, height > 0 else { return true }
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return true }
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let data = context.data else { return true }
+        let buffer = data.bindMemory(to: UInt8.self, capacity: width * height)
+        var on = 0
+        for i in 0..<(width * height) where buffer[i] > 40 { on += 1 }
+        return Double(on) / Double(width * height) < 0.0015
     }
 }
 

@@ -36,6 +36,11 @@ final class ImageSelectionSession {
     private var settleWorkItem: DispatchWorkItem?
     private var cacheKey: String?
     private var cachedMask: SelectionMask?
+    /// Per-person mattes behind the current union, in precedence order (later wins
+    /// contested pixels). Kept addressable for per-person picking; `[]` when the selection
+    /// did not come from the person-instance route.
+    private var personInstances: [SelectionMask] = []
+    private var cachedInstances: [SelectionMask] = []
     private var sourceToken: String?
     private var cancelDownloadRequested = false
     private let cancelLock = NSLock()
@@ -83,6 +88,10 @@ final class ImageSelectionSession {
     }
 
     var currentMask: SelectionMask? { mask }
+    /// Individual people behind the current selection, nearest last. Empty unless the
+    /// selection came from Auto Select Person on a photo Vision could split per person.
+    var currentPersonInstances: [SelectionMask] { personInstances }
+    var personInstanceCount: Int { personInstances.count }
     var currentDisplayMode: SelectionDisplayMode { displayMode }
     var currentRefine: SelectionRefineParameters { refine }
     var currentBrushMode: SelectionBrushMode { brushMode }
@@ -167,6 +176,9 @@ final class ImageSelectionSession {
         mask = current
         cachedMask = current
         cacheKey = nil // brush invalidates select cache
+        // A stroke edits the union, so the per-person mattes no longer describe it.
+        personInstances = []
+        cachedInstances = []
         notifyChrome()
         onChange?(preview ? .preview : .accurate)
         return true
@@ -266,6 +278,8 @@ final class ImageSelectionSession {
         mask = nil
         cachedMask = nil
         cacheKey = nil
+        personInstances = []
+        cachedInstances = []
         lastError = nil
         usedVisionFallback = false
         lastSelectKind = nil
@@ -316,6 +330,7 @@ final class ImageSelectionSession {
         if let cachedMask, cacheKey == key {
             await MainActor.run {
                 self.mask = cachedMask
+                self.personInstances = self.cachedInstances
                 self.quality = requested
                 self.phase = .idle
                 self.notifyChrome()
@@ -333,6 +348,7 @@ final class ImageSelectionSession {
             self.phase = .selecting
             self.usedVisionFallback = false
             self.lastSelectKind = kind
+            self.personInstances = []
             self.notifyChrome()
             return self.generation
         }
@@ -341,8 +357,10 @@ final class ImageSelectionSession {
             let result = try await performSelect(kind: kind, image: image, quality: requested, generation: gen)
             await MainActor.run {
                 guard gen == self.generation else { return }
-                self.mask = result
-                self.cachedMask = result
+                self.mask = result.mask
+                self.cachedMask = result.mask
+                self.personInstances = result.instances
+                self.cachedInstances = result.instances
                 self.cacheKey = key
                 self.quality = requested
                 self.phase = .idle
@@ -370,14 +388,27 @@ final class ImageSelectionSession {
         }
     }
 
+    /// A selection plus, when Auto Select split a group, the people it is made of.
+    private struct SelectResult {
+        let mask: SelectionMask
+        let instances: [SelectionMask]
+
+        init(mask: SelectionMask, instances: [SelectionMask] = []) {
+            self.mask = mask
+            self.instances = instances
+        }
+    }
+
     private func performSelect(
         kind: SelectKind,
         image: CIImage,
         quality requested: SelectionQuality,
         generation gen: Int
-    ) async throws -> SelectionMask {
+    ) async throws -> SelectResult {
         if forceVisionOnly {
-            return try await visionOnlySelect(kind: kind, image: image, quality: requested)
+            return SelectResult(
+                mask: try await visionOnlySelect(kind: kind, image: image, quality: requested)
+            )
         }
 
         switch kind {
@@ -389,7 +420,9 @@ final class ImageSelectionSession {
                     generation: gen
                 )
             }
-            return try await visionProvider.selectClass(in: image, class: semanticClass, quality: requested)
+            return SelectResult(
+                mask: try await visionProvider.selectClass(in: image, class: semanticClass, quality: requested)
+            )
 
         case .prompt(let prompt):
             if requested == .accurate {
@@ -402,10 +435,14 @@ final class ImageSelectionSession {
                     self.phase = .selecting
                     self.notifyChrome()
                 }
-                return try await samProvider.select(in: image, prompt: prompt, quality: requested)
+                return SelectResult(
+                    mask: try await samProvider.select(in: image, prompt: prompt, quality: requested)
+                )
             }
             if let point = prompt.positivePoints.first {
-                return try await visionProvider.selectRegion(in: image, at: point, quality: requested)
+                return SelectResult(
+                    mask: try await visionProvider.selectRegion(in: image, at: point, quality: requested)
+                )
             }
             throw SelectionError.emptyResult
 
@@ -450,11 +487,13 @@ final class ImageSelectionSession {
         semanticClass: SemanticClass,
         image: CIImage,
         generation gen: Int
-    ) async throws -> SelectionMask {
+    ) async throws -> SelectResult {
         let ready = try await ensureModelIfNeeded(generation: gen)
         if !ready {
             await MainActor.run { self.usedVisionFallback = true }
-            return try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            return SelectResult(
+                mask: try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            )
         }
 
         await MainActor.run {
@@ -464,35 +503,121 @@ final class ImageSelectionSession {
         }
 
         let prompt: SelectionPrompt
+        var personPrior: SelectionMask?
         if semanticClass == .person {
+            // Prefer per-person prompting: Vision already separates individuals, so each
+            // person gets their own box/points instead of a group-wide box that invites SAM
+            // to merge people (and swallow whatever sits between them).
+            if let segmenter = visionProvider as? PersonInstanceSegmenting,
+               let result = await personInstanceSelect(using: segmenter, image: image)
+            {
+                return SelectResult(mask: result.combined, instances: result.instances)
+            }
             // Person specificity stays in the prompt-assist helper, not in refine/export.
-            prompt = try await SelectionPersonPromptAssist.buildPrompt(using: visionProvider, image: image)
+            let plan = try await SelectionPersonPromptAssist.buildPlan(using: visionProvider, image: image)
+            prompt = plan.prompt
+            personPrior = plan.rough
         } else {
             let center = CGPoint(x: image.extent.midX, y: image.extent.midY)
             prompt = .point(center)
         }
 
         do {
-            let mask = try await samProvider.select(in: image, prompt: prompt, quality: .accurate)
-            // Preserve caller-facing class metadata when provider returns `.unknown`.
-            if mask.semanticClass == .unknown, semanticClass != .unknown {
-                return SelectionMask(
-                    cgImage: mask.cgImage,
-                    extent: mask.extent,
-                    confidence: mask.confidence,
-                    semanticClass: semanticClass,
-                    source: mask.source
-                )
+            var mask = try await samProvider.select(in: image, prompt: prompt, quality: .accurate)
+            if let personPrior {
+                mask = Self.gated(mask: mask, prior: personPrior) ?? mask
             }
-            return mask
+            return SelectResult(mask: Self.labelled(mask, as: semanticClass))
         } catch SelectionError.modelNotReady, SelectionError.emptyResult {
             await MainActor.run { self.usedVisionFallback = true }
-            return try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            return SelectResult(
+                mask: try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            )
         } catch {
             await MainActor.run { self.usedVisionFallback = true }
-            return try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            return SelectResult(
+                mask: try await visionProvider.selectClass(in: image, class: semanticClass, quality: .accurate)
+            )
         }
     }
+
+    /// Per-person route: a prompt per Vision instance → one SAM decode each → per-person
+    /// occluder gate → matte → union. Nil when Vision sees nobody or SAM returns nothing,
+    /// which sends `accurateSelect` back to the single group-wide prompt.
+    private func personInstanceSelect(
+        using segmenter: PersonInstanceSegmenting,
+        image: CIImage
+    ) async -> SelectionPersonInstances? {
+        guard let plans = try? await SelectionPersonPromptAssist.buildInstancePlans(
+            using: segmenter,
+            image: image
+        ), !plans.isEmpty else { return nil }
+
+        let masks = await selectAll(prompts: plans.map(\.prompt), image: image)
+        var instances: [SelectionMask] = []
+        for (plan, mask) in zip(plans, masks) {
+            guard let mask else { continue }
+            // Gate against *this* person's Vision matte: SAM is class-blind, so a plant in
+            // front of one person is only excludable per person, not group-wide.
+            let gated = Self.gated(mask: mask, prior: plan.rough) ?? mask
+            instances.append(Self.labelled(gated, as: .person))
+        }
+        return SelectionPersonInstances.combining(instances, extent: image.extent.integral)
+    }
+
+    /// One image encode for N prompts when the engine offers it; otherwise a plain loop.
+    private func selectAll(prompts: [SelectionPrompt], image: CIImage) async -> [SelectionMask?] {
+        if let batching = samProvider as? BatchPromptSelecting,
+           let masks = try? await batching.select(in: image, prompts: prompts, quality: .accurate)
+        {
+            return masks
+        }
+        var masks: [SelectionMask?] = []
+        for prompt in prompts {
+            masks.append(try? await samProvider.select(in: image, prompt: prompt, quality: .accurate))
+        }
+        return masks
+    }
+
+    /// Providers hand back `.unknown`; the caller's requested class is the useful label.
+    private static func labelled(_ mask: SelectionMask, as semanticClass: SemanticClass) -> SelectionMask {
+        guard mask.semanticClass == .unknown, semanticClass != .unknown else { return mask }
+        return SelectionMask(
+            cgImage: mask.cgImage,
+            extent: mask.extent,
+            confidence: mask.confidence,
+            semanticClass: semanticClass,
+            source: mask.source
+        )
+    }
+
+    /// Removes SAM regions the person segmenter never called a person (occluders inside
+    /// the prompt box). Returns nil when the gated matte cannot be rendered.
+    private static func gated(mask: SelectionMask, prior: SelectionMask) -> SelectionMask? {
+        let extent = mask.extent.integral
+        guard extent.width > 1, extent.height > 1 else { return nil }
+        let gatedCI = SelectionPersonPriorGate.apply(
+            sam: mask.ciImageMatching(extent: extent),
+            prior: prior.ciImageMatching(extent: extent),
+            extent: extent,
+            context: gateContext
+        )
+        guard let cg = gateContext.createCGImage(gatedCI, from: extent) else { return nil }
+        return SelectionMask(
+            cgImage: cg,
+            extent: extent,
+            confidence: mask.confidence,
+            semanticClass: mask.semanticClass,
+            source: mask.source
+        )
+    }
+
+    private static let gateContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
 
     @discardableResult
     private func ensureModelIfNeeded(generation gen: Int) async throws -> Bool {

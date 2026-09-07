@@ -274,6 +274,81 @@ enum SelectionMeasurementHarness {
         return try await provider.select(in: image, prompt: .point(center), quality: quality)
     }
 
+    // MARK: - Accuracy against ground truth
+
+    /// Precision scores for a matte (or a rendered ants path) against a known silhouette.
+    struct AccuracyScore: Equatable, Sendable {
+        let iou: Double
+        /// Mean signed boundary offset in pixels. Positive = prediction sits *outside* truth,
+        /// which is what a matte thresholded below half-coverage looks like.
+        let boundaryOffsetPx: Double
+    }
+
+    static func accuracy(prediction: [UInt8], truth: [UInt8], width: Int, height: Int) -> AccuracyScore {
+        precondition(prediction.count == width * height && truth.count == width * height)
+        var intersection = 0
+        var union = 0
+        var predictedArea = 0
+        var truthArea = 0
+        for i in 0..<(width * height) {
+            let p = prediction[i] > 127
+            let t = truth[i] > 127
+            if p { predictedArea += 1 }
+            if t { truthArea += 1 }
+            if p && t { intersection += 1 }
+            if p || t { union += 1 }
+        }
+        let iou = union > 0 ? Double(intersection) / Double(union) : 0
+
+        // Area difference spread over the truth perimeter approximates a mean edge shift.
+        var perimeter = 0
+        for y in 0..<height {
+            for x in 0..<width where truth[y * width + x] > 127 {
+                let leftOff = x == 0 || truth[y * width + x - 1] <= 127
+                let rightOff = x == width - 1 || truth[y * width + x + 1] <= 127
+                let downOff = y == 0 || truth[(y - 1) * width + x] <= 127
+                let upOff = y == height - 1 || truth[(y + 1) * width + x] <= 127
+                if leftOff || rightOff || downOff || upOff { perimeter += 1 }
+            }
+        }
+        let offset = perimeter > 0 ? Double(predictedArea - truthArea) / Double(perimeter) : 0
+        return AccuracyScore(iou: iou, boundaryOffsetPx: offset)
+    }
+
+    /// Rasterises a matte to a binary L8 buffer at `extent` resolution.
+    static func binaryRaster(_ matte: CIImage, extent: CGRect, context: CIContext) -> [UInt8] {
+        let width = max(1, Int(extent.width.rounded()))
+        let height = max(1, Int(extent.height.rounded()))
+        var buf = [UInt8](repeating: 0, count: width * height)
+        context.render(
+            matte,
+            toBitmap: &buf,
+            rowBytes: width,
+            bounds: CGRect(x: 0, y: 0, width: width, height: height),
+            format: .L8,
+            colorSpace: CGColorSpaceCreateDeviceGray()
+        )
+        return buf
+    }
+
+    /// Rasterises a filled CGPath to a binary L8 buffer (bottom-left origin, like CIImage).
+    static func binaryRaster(path: CGPath, width: Int, height: Int) -> [UInt8] {
+        var buf = [UInt8](repeating: 0, count: width * height)
+        guard let ctx = CGContext(
+            data: &buf,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return buf }
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.addPath(path)
+        ctx.fillPath(using: .evenOdd)
+        return buf
+    }
+
     // MARK: - Metrics
 
     static func matteCoverage(_ mask: SelectionMask, threshold: UInt8 = 32) -> Double {
@@ -293,6 +368,43 @@ enum SelectionMeasurementHarness {
         var on = 0
         for value in buf where value > threshold { on += 1 }
         return Double(on) / Double(width * height)
+    }
+
+    /// Mean photo gradient magnitude along the matte boundary (0…1).
+    ///
+    /// No ground truth needed: a boundary that sits on real image structure scores high,
+    /// while one floating through flat colour (the fuzzy-upsample failure mode) scores low.
+    static func edgeAgreement(mask: SelectionMask, photo: CIImage) -> Double {
+        let extent = mask.extent.integral
+        let width = max(1, Int(extent.width.rounded()))
+        let height = max(1, Int(extent.height.rounded()))
+        let context = CIContext(options: [.cacheIntermediates: false])
+        let matte = mask.ciImageMatching(extent: extent)
+
+        let radius: Float = 2
+        let clamped = matte.clampedToExtent()
+        let band = clamped
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
+            .applyingFilter("CIDifferenceBlendMode", parameters: [
+                kCIInputBackgroundImageKey: clamped
+                    .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: radius])
+            ])
+            .cropped(to: extent)
+        let edges = photo
+            .cropped(to: extent)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+            .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 1.0])
+            .cropped(to: extent)
+
+        let bandBuf = binaryRaster(band, extent: extent, context: context)
+        let edgeBuf = binaryRaster(edges, extent: extent, context: context)
+        var sum = 0.0
+        var count = 0
+        for i in 0..<(width * height) where bandBuf[i] > 16 {
+            sum += Double(edgeBuf[i]) / 255.0
+            count += 1
+        }
+        return count > 0 ? sum / Double(count) : 0
     }
 
     /// Mean normalized alpha in the dilate−erode band (soft edges → mid values).

@@ -5260,6 +5260,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 engineNote = ""
             }
+            let people = imageSelectionSession.personInstanceCount
+            let peopleNote = people > 1 ? " \(people) people." : ""
             let brushNote: String
             if subjectSelectClickEnabled {
                 let draft = imageSelectionSession.currentPromptDraft
@@ -5269,7 +5271,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 brushNote = ""
             }
-            subjectSelectStatusLabel.stringValue = "\(engineNote)Marching ants.\(brushNote)"
+            subjectSelectStatusLabel.stringValue = "\(engineNote)Marching ants.\(peopleNote)\(brushNote)"
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else if subjectSelectClickEnabled {
             subjectSelectStatusLabel.stringValue = "Click Select: click object (+), ⌥-click (−), ⇧ to add; drag for box. Downloads MobileSAM if needed."
@@ -10674,15 +10676,14 @@ final class ImageSurfaceView: NSView {
         )
         plate = SelectionCompositor.hardBinaryMatte(mask: plate, extent: plateExtent)
 
-        let maxEdge: CGFloat = 768
         let longEdge = max(plateExtent.width, plateExtent.height)
-        if longEdge > maxEdge {
-            let scale = maxEdge / longEdge
+        if longEdge > SelectionAntsContour.plateMaxEdge {
+            let scale = SelectionAntsContour.plateMaxEdge / longEdge
             plate = plate.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         }
         let renderExtent = plate.extent.integral
-        // Re-threshold after downscale, then despeckle: stray blobs became dozens of
-        // tiny Vision contours, which drew as scattered dashes instead of one outline.
+        // Re-threshold after downscale so the boundary stays on the half-coverage line,
+        // then fill pinholes that would otherwise read as spurious interior contours.
         plate = SelectionCompositor.hardBinaryMatte(mask: plate, extent: renderExtent)
         plate = SelectionAntsContour.cleanedHardMatte(plate, extent: renderExtent)
         guard let cg = ciContext.createCGImage(plate, from: renderExtent) else {

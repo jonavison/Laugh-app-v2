@@ -5,7 +5,7 @@ import Metal
 
 /// Class-blind MobileSAM provider: prompt → coarse SAM mask → CI photo-edge polish (ADR 0005 / W3-08c).
 /// No `semanticClass` branching. Missing weights surface as `SelectionError.modelNotReady`.
-final class MobileSAMSelectionProvider: SelectionProvider, @unchecked Sendable {
+final class MobileSAMSelectionProvider: SelectionProvider, BatchPromptSelecting, @unchecked Sendable {
     static let id = "coreml.mobilesam"
     var providerID: String { Self.id }
 
@@ -52,6 +52,22 @@ final class MobileSAMSelectionProvider: SelectionProvider, @unchecked Sendable {
         quality: SelectionQuality
     ) async throws -> SelectionMask {
         guard !prompt.isEmpty else { throw SelectionError.emptyResult }
+        guard let mask = try await select(in: image, prompts: [prompt], quality: quality).first,
+              let mask
+        else { throw SelectionError.emptyResult }
+        return mask
+    }
+
+    /// Several prompts, one image encode. The encoder dominates MobileSAM's cost, so N
+    /// prompts (one per person) run as one encode plus N cheap decodes. Each mask is
+    /// matted individually — overlapping people never reach the boundary stage as a single
+    /// ambiguous edge.
+    func select(
+        in image: CIImage,
+        prompts: [SelectionPrompt],
+        quality: SelectionQuality
+    ) async throws -> [SelectionMask?] {
+        guard !prompts.isEmpty else { return [] }
 
         let extent = image.extent.integral
         guard extent.width > 1, extent.height > 1 else {
@@ -67,31 +83,45 @@ final class MobileSAMSelectionProvider: SelectionProvider, @unchecked Sendable {
         }
 
         let session = try loadSession()
-        let result: SamResult = try await withCheckedThrowingContinuation { continuation in
+        let results: [SamResult?] = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     try session.setImage(cgImage)
-                    let points = Self.samPoints(from: prompt)
-                    let box = prompt.box.flatMap(Self.samBox(from:))
                     let options = SamOptions(
                         multimaskOutput: quality == .accurate,
                         returnLogits: false,
                         maskThreshold: 0.0,
                         maxMasks: quality == .accurate ? 3 : 1
                     )
-                    let result = try session.predict(points: points, box: box, options: options)
-                    continuation.resume(returning: result)
+                    let results: [SamResult?] = prompts.map { prompt in
+                        guard !prompt.isEmpty else { return nil }
+                        return try? session.predict(
+                            points: Self.samPoints(from: prompt),
+                            box: prompt.box.flatMap(Self.samBox(from:)),
+                            options: options
+                        )
+                    }
+                    continuation.resume(returning: results)
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
         }
 
-        guard let best = result.masks.max(by: { $0.score < $1.score }) else {
-            throw SelectionError.emptyResult
+        return results.map { result in
+            guard let best = result?.masks.max(by: { $0.score < $1.score }) else { return nil }
+            return finish(rawMask: best.cgImage, score: best.score, photo: image, extent: extent)
         }
+    }
 
-        var maskCI = CIImage(cgImage: best.cgImage)
+    /// Scale → canonicalise → per-instance matting → `SelectionMask`.
+    private func finish(
+        rawMask: CGImage,
+        score: Float,
+        photo image: CIImage,
+        extent: CGRect
+    ) -> SelectionMask? {
+        var maskCI = CIImage(cgImage: rawMask)
         // SamKit often returns model-resolution mattes — scale to photo extent.
         if abs(maskCI.extent.width - extent.width) > 1
             || abs(maskCI.extent.height - extent.height) > 1
@@ -121,17 +151,13 @@ final class MobileSAMSelectionProvider: SelectionProvider, @unchecked Sendable {
             maskCI = SelectionMattePrecision.refine(mask: maskCI, photo: image, extent: extent)
         }
 
-        guard let outCG = ciContext.createCGImage(maskCI, from: extent) else {
-            throw SelectionError.emptyResult
-        }
-        if Self.isEffectivelyEmpty(outCG) {
-            throw SelectionError.emptyResult
-        }
+        guard let outCG = ciContext.createCGImage(maskCI, from: extent) else { return nil }
+        if Self.isEffectivelyEmpty(outCG) { return nil }
 
         return SelectionMask(
             cgImage: outCG,
             extent: extent,
-            confidence: best.score,
+            confidence: score,
             semanticClass: .unknown,
             source: .coreML(modelID: SelectionModelArtifact.mobileSAM.id)
         )
