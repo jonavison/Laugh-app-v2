@@ -96,7 +96,9 @@ enum SelectionBrushEngine {
 
 /// Fringe color spill reduction for cutouts (class-blind). Amount 0…1.
 enum SelectionDecontaminate {
-    /// Desaturates and pulls fringe pixels toward interior subject luminance under the edge band.
+    private static let sampleContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// Pulls fringe toward eroded-interior subject color and desaturates spill under the edge band.
     static func apply(
         image: CIImage,
         mask: CIImage,
@@ -109,13 +111,18 @@ enum SelectionDecontaminate {
         let photo = image.cropped(to: extent)
         let matte = mask.cropped(to: extent)
 
-        let bandRadius = Float(max(1.5, min(8, max(extent.width, extent.height) / 500.0)) * (0.5 + amount))
+        let longEdge = max(extent.width, extent.height)
+        let bandRadius = Float(max(1.5, min(10, longEdge / 450.0)) * (0.5 + amount))
+        let interiorRadius = bandRadius * (1.2 + Float(amount))
         let clamped = matte.clampedToExtent()
         let dilated = clamped
             .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: bandRadius])
             .cropped(to: extent)
         let eroded = clamped
             .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: bandRadius])
+            .cropped(to: extent)
+        let deepInterior = clamped
+            .applyingFilter("CIMorphologyMinimum", parameters: [kCIInputRadiusKey: interiorRadius])
             .cropped(to: extent)
         guard let band = CIFilter(name: "CIDifferenceBlendMode", parameters: [
             kCIInputImageKey: dilated,
@@ -124,14 +131,27 @@ enum SelectionDecontaminate {
             return photo
         }
 
-        // Desaturated / slightly darkened fringe candidate.
-        let cleaned = photo.applyingFilter("CIColorControls", parameters: [
-            kCIInputSaturationKey: max(0, 1.0 - amount * 0.95),
-            kCIInputBrightnessKey: -0.02 * amount,
+        // Interior subject color (eroded core) — spill is pulled toward this.
+        let interiorColor = averageColor(of: photo, weightedBy: deepInterior, extent: extent)
+            ?? CIColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1)
+        let solid = CIImage(color: interiorColor).cropped(to: extent)
+
+        // Desaturated fringe + mix toward interior color.
+        let desat = photo.applyingFilter("CIColorControls", parameters: [
+            kCIInputSaturationKey: max(0, 1.0 - amount * 0.85),
+            kCIInputBrightnessKey: -0.015 * amount,
             kCIInputContrastKey: 1.0
         ]).cropped(to: extent)
 
-        // Gate: only replace inside the edge band, scaled by amount.
+        guard let pulled = CIFilter(name: "CIBlendWithMask", parameters: [
+            kCIInputImageKey: solid,
+            kCIInputBackgroundImageKey: desat,
+            kCIInputMaskImageKey: CIImage(color: CIColor(red: amount * 0.65, green: amount * 0.65, blue: amount * 0.65, alpha: 1))
+                .cropped(to: extent)
+        ])?.outputImage?.cropped(to: extent) else {
+            return photo
+        }
+
         let gate = band.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: amount, y: 0, z: 0, w: 0),
             "inputGVector": CIVector(x: 0, y: amount, z: 0, w: 0),
@@ -141,12 +161,43 @@ enum SelectionDecontaminate {
         ]).cropped(to: extent)
 
         guard let mixed = CIFilter(name: "CIBlendWithMask", parameters: [
-            kCIInputImageKey: cleaned,
+            kCIInputImageKey: pulled,
             kCIInputBackgroundImageKey: photo,
             kCIInputMaskImageKey: gate
         ])?.outputImage else {
             return photo
         }
         return mixed.cropped(to: extent)
+    }
+
+    /// Weighted mean RGB of `image` where `weight` is bright.
+    private static func averageColor(of image: CIImage, weightedBy weight: CIImage, extent: CGRect) -> CIColor? {
+        guard let masked = CIFilter(name: "CIMultiplyCompositing", parameters: [
+            kCIInputImageKey: image,
+            kCIInputBackgroundImageKey: weight
+        ])?.outputImage?.cropped(to: extent) else {
+            return nil
+        }
+        guard let avg = CIFilter(name: "CIAreaAverage", parameters: [
+            kCIInputImageKey: masked,
+            kCIInputExtentKey: CIVector(cgRect: extent)
+        ])?.outputImage else {
+            return nil
+        }
+        var pixel = [Float](repeating: 0, count: 4)
+        sampleContext.render(
+            avg,
+            toBitmap: &pixel,
+            rowBytes: 16,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBAf,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        // Guard empty interior (all-zero weight → black average).
+        let luma = 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2]
+        if luma < 0.002 && pixel[0] + pixel[1] + pixel[2] < 0.01 {
+            return nil
+        }
+        return CIColor(red: CGFloat(pixel[0]), green: CGFloat(pixel[1]), blue: CGFloat(pixel[2]), alpha: 1)
     }
 }

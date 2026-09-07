@@ -4,6 +4,7 @@ import AVFoundation
 import CoreMedia
 import CoreImage
 import Metal
+import QuartzCore
 import UniformTypeIdentifiers
 
 protocol PlayerViewControllerDelegate: AnyObject {
@@ -10160,6 +10161,9 @@ final class ImageSurfaceView: NSView {
     private var selectionBrushRadius: CGFloat = 24
     private var isBrushing = false
     private var lastBrushPixelPoint: CGPoint?
+    private var brushCursorViewPoint: CGPoint?
+    private var brushTrackingArea: NSTrackingArea?
+    private let brushRingLayer = CAShapeLayer()
     /// Offset from centered fit frame while zoomed in (points).
     private var panOffset: CGPoint = .zero
     private var isPanning = false
@@ -10189,6 +10193,13 @@ final class ImageSurfaceView: NSView {
             imageView.layer?.contentsGravity = .resizeAspect
         }
         addSubview(imageView)
+
+        brushRingLayer.fillColor = NSColor.clear.cgColor
+        brushRingLayer.strokeColor = LaughTheme.interactiveAccent.withAlphaComponent(0.9).cgColor
+        brushRingLayer.lineWidth = 1.25
+        brushRingLayer.isHidden = true
+        brushRingLayer.zPosition = 50
+        layer?.addSublayer(brushRingLayer)
 
         cropOverlay.translatesAutoresizingMaskIntoConstraints = false
         cropOverlay.isHidden = true
@@ -10345,9 +10356,52 @@ final class ImageSurfaceView: NSView {
     }
 
     override func resetCursorRects() {
+        if selectionBrushEnabled, selectionMask != nil {
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if canPanImage {
             addCursorRect(bounds, cursor: isPanning ? .closedHand : .openHand)
         }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let brushTrackingArea {
+            removeTrackingArea(brushTrackingArea)
+            self.brushTrackingArea = nil
+        }
+        guard selectionBrushEnabled else { return }
+        let options: NSTrackingArea.Options = [
+            .mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect
+        ]
+        let area = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(area)
+        brushTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if selectionBrushEnabled, selectionMask != nil {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            brushCursorViewPoint = viewPoint
+            updateBrushRing()
+            return
+        }
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if selectionBrushEnabled {
+            brushRingLayer.isHidden = false
+            updateBrushRing()
+        }
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        brushCursorViewPoint = nil
+        brushRingLayer.isHidden = true
+        super.mouseExited(with: event)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -10382,6 +10436,8 @@ final class ImageSurfaceView: NSView {
         }
         if selectionBrushEnabled, selectionMask != nil {
             let viewPoint = convert(event.locationInWindow, from: nil)
+            brushCursorViewPoint = viewPoint
+            updateBrushRing()
             if let pixel = selectionPixelPoint(fromViewPoint: viewPoint) {
                 isBrushing = true
                 lastBrushPixelPoint = pixel
@@ -10403,6 +10459,8 @@ final class ImageSurfaceView: NSView {
     override func mouseDragged(with event: NSEvent) {
         if isBrushing {
             let viewPoint = convert(event.locationInWindow, from: nil)
+            brushCursorViewPoint = viewPoint
+            updateBrushRing()
             guard let pixel = selectionPixelPoint(fromViewPoint: viewPoint) else { return }
             if let last = lastBrushPixelPoint {
                 let dx = pixel.x - last.x
@@ -10512,12 +10570,47 @@ final class ImageSurfaceView: NSView {
         if !enabled {
             isBrushing = false
             lastBrushPixelPoint = nil
+            brushCursorViewPoint = nil
+            brushRingLayer.isHidden = true
+        } else {
+            brushRingLayer.isHidden = brushCursorViewPoint == nil
+            updateBrushRing()
         }
+        updateTrackingAreas()
         window?.invalidateCursorRects(for: self)
     }
 
     func setSelectionBrushRadius(_ radius: CGFloat) {
         selectionBrushRadius = min(120, max(4, radius))
+        updateBrushRing()
+    }
+
+    /// View-space radius matching `selectionBrushRadius` image pixels on the fitted photo.
+    private func brushRadiusInViewPoints() -> CGFloat {
+        let photo = photoFrameInOverlay()
+        let pixelW = max(orientedPixelSize.width, 1)
+        return selectionBrushRadius * (photo.width / pixelW)
+    }
+
+    private func updateBrushRing() {
+        guard selectionBrushEnabled, selectionMask != nil, let point = brushCursorViewPoint else {
+            brushRingLayer.isHidden = true
+            return
+        }
+        let photo = photoFrameInOverlay()
+        guard photo.contains(point) else {
+            brushRingLayer.isHidden = true
+            return
+        }
+        let r = brushRadiusInViewPoints()
+        // Layer-backed NSView geometry matches view coords (origin bottom-left).
+        let path = CGPath(
+            ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2),
+            transform: nil
+        )
+        brushRingLayer.path = path
+        brushRingLayer.strokeColor = LaughTheme.interactiveAccent.withAlphaComponent(0.95).cgColor
+        brushRingLayer.isHidden = false
     }
 
     /// Map a view point onto source (base) pixel space. Best when orientation is identity.
@@ -10767,6 +10860,7 @@ final class ImageSurfaceView: NSView {
         if isCropMode {
             layoutCropOverlay()
         }
+        updateBrushRing()
     }
 
     private var canPanImage: Bool {

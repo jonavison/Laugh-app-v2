@@ -79,7 +79,7 @@ New interaction models, RAW pipeline, or ML.
 | W3-07 | Selection foundation | Portrait / Select | M | done | `SelectionProvider` + `SelectionMask` + `ImageSelectionSession` (ADR 0005) |
 | W3-08 | Vision person select | Portrait | M | done | Baseline UI: views + F + global refine + cutout export. Vision is fallback only — not the precision ceiling |
 | W3-08a | Selection edge refine | Portrait | M | done | Smooth / Feather / Contrast / Shift Edge (polish after a strong matte) |
-| W3-08b | Local refine + decontam | Portrait | L | partial | Paint In/Out/Refine Edge brush + Decontaminate slider shipped; cursor ring + stronger decontam later |
+| W3-08b | Local refine + decontam | Portrait | L | done | Paint In/Out/Refine Edge + radius cursor ring + interior-pull decontam on cutout |
 | W3-08c | SAM-class CoreML auto engine | Portrait / Select | L | done | **PR 1:** MobileSAM (SamKit) + Vision→+/−/box prompt + CI edge polish. Blocking download; cancel→Vision fallback. Quarterly watch: EfficientSAM3 CoreML, SAM2 CoreML |
 | W3-08e | Measurement harness | Select | S | done | `SelectionMeasurementTests` + `scripts/measure-selection.sh` — `[SEL-MEASURE]` coverage/softness/timing; MobileSAM when cached |
 | W3-11 | Point-prompt / text-prompt select | Select | L | edge bet | Same SAM conformer; real differentiation — schedule after still Auto Select is solid, before gold-plating parity polish |

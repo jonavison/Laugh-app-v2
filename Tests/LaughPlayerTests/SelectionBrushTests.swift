@@ -74,7 +74,6 @@ final class SelectionBrushTests: XCTestCase {
             .cropped(to: CGRect(x: 12, y: 12, width: 24, height: 24))
             .composited(over: CIImage(color: .black).cropped(to: extent))
             .cropped(to: extent)
-        // Magenta fringe subject.
         let photo = CIImage(color: CIColor(red: 1, green: 0, blue: 1, alpha: 1)).cropped(to: extent)
         let plain = SelectionCompositor.cutoutWithAlpha(
             image: photo,
@@ -107,6 +106,30 @@ final class SelectionBrushTests: XCTestCase {
             return XCTFail("render")
         }
         XCTAssertNotEqual(fingerprint(a), fingerprint(b))
+    }
+
+    func testDecontaminatePullsTowardInteriorColor() {
+        let extent = CGRect(x: 0, y: 0, width: 64, height: 64)
+        let core = CIImage(color: CIColor(red: 0, green: 1, blue: 0, alpha: 1))
+            .cropped(to: CGRect(x: 20, y: 20, width: 24, height: 24))
+        let fringe = CIImage(color: CIColor(red: 1, green: 0, blue: 1, alpha: 1))
+            .cropped(to: CGRect(x: 16, y: 16, width: 32, height: 32))
+        let photo = core.composited(over: fringe.composited(over: CIImage(color: .black).cropped(to: extent)))
+            .cropped(to: extent)
+        let mask = CIImage(color: .white)
+            .cropped(to: CGRect(x: 16, y: 16, width: 32, height: 32))
+            .composited(over: CIImage(color: .black).cropped(to: extent))
+            .cropped(to: extent)
+
+        let cleaned = SelectionDecontaminate.apply(image: photo, mask: mask, amount: 1, extent: extent)
+        let ctx = CIContext(options: [.cacheIntermediates: false])
+        var before = [Float](repeating: 0, count: 4)
+        var after = [Float](repeating: 0, count: 4)
+        let sample = CGRect(x: 17, y: 32, width: 1, height: 1)
+        ctx.render(photo, toBitmap: &before, rowBytes: 16, bounds: sample, format: .RGBAf, colorSpace: CGColorSpaceCreateDeviceRGB())
+        ctx.render(cleaned, toBitmap: &after, rowBytes: 16, bounds: sample, format: .RGBAf, colorSpace: CGColorSpaceCreateDeviceRGB())
+        XCTAssertGreaterThan(after[1], before[1] - 0.05, "green channel should rise toward interior")
+        XCTAssertLessThan(after[0] + after[2], before[0] + before[2] + 0.05, "magenta spill should drop")
     }
 
     private func coverage(_ image: CIImage, extent: CGRect) -> Double {
