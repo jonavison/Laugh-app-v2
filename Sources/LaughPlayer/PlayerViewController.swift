@@ -136,7 +136,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let imageAdjustControls = ImageAdjustControls()
     private var imageSectionHeaders: [ImageAdjustSection: CollapsibleSettingsSectionView] = [:]
     private var imageSubjectSelectHeader: CollapsibleSettingsSectionView?
-    private let subjectSelectAutoButton = NSButton(title: "Auto Select Person", target: nil, action: nil)
+    private let subjectSelectAutoButton = NSButton(title: "Auto Select", target: nil, action: nil)
     private let subjectSelectClearButton = NSButton(title: "Clear", target: nil, action: nil)
     private let subjectSelectCancelDownloadButton = NSButton(title: "Cancel Download", target: nil, action: nil)
     private let subjectSelectExportButton = NSButton(title: "Export Cutout…", target: nil, action: nil)
@@ -165,12 +165,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subjectSelectShiftValue = NSTextField(labelWithString: "0")
     private let subjectSelectDecontamValue = NSTextField(labelWithString: "0")
     private let subjectSelectBrushRadiusValue = NSTextField(labelWithString: "24")
-    private let subjectSelectStatusLabel = NSTextField(labelWithString: "")
+    private let subjectSelectStatusLabel = NSTextField(wrappingLabelWithString: "")
     private var subjectSelectRefineSettleWork: DispatchWorkItem?
     private var subjectSelectBrushEnabled = false
     private var subjectSelectClickEnabled = false
-    private let subjectSelectBrushToggle = NSButton(checkboxWithTitle: "Brush", target: nil, action: nil)
-    private let subjectSelectClickToggle = NSButton(checkboxWithTitle: "Click Select", target: nil, action: nil)
+    private let subjectSelectBrushToggle = CompactTealToggle()
+    private let subjectSelectClickToggle = CompactTealToggle()
     private let imageStudioCommitFooter = ImageStudioCommitFooter()
     private var imageStudioCommitFooterHeightConstraint: NSLayoutConstraint?
     private var imageSavedPresetsHost = NSStackView()
@@ -5011,6 +5011,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         styleSubjectSelectButton(subjectSelectClearButton)
         styleSubjectSelectButton(subjectSelectCancelDownloadButton)
         styleSubjectSelectButton(subjectSelectExportButton)
+        subjectSelectAutoButton.setAccessibilityLabel("Auto Select Person")
+        subjectSelectAutoButton.toolTip = "Auto Select Person"
         subjectSelectAutoButton.target = self
         subjectSelectAutoButton.action = #selector(subjectSelectAutoPressed)
         subjectSelectClearButton.target = self
@@ -5043,75 +5045,65 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         configureSubjectSelectRefineSlider(subjectSelectBrushRadiusSlider, action: #selector(subjectSelectBrushRadiusChanged))
         configureSettingsSegmentedControl(subjectSelectBrushModeControl, action: #selector(subjectSelectBrushModeChanged))
         subjectSelectBrushModeControl.selectedSegment = SelectionBrushMode.allCases.firstIndex(of: .refineEdge) ?? 0
-        subjectSelectBrushToggle.target = self
-        subjectSelectBrushToggle.action = #selector(subjectSelectBrushToggleChanged)
-        subjectSelectBrushToggle.font = .systemFont(ofSize: 12)
-        subjectSelectBrushToggle.focusRingType = .none
+
         subjectSelectClickToggle.target = self
         subjectSelectClickToggle.action = #selector(subjectSelectClickToggleChanged)
-        subjectSelectClickToggle.font = .systemFont(ofSize: 12)
-        subjectSelectClickToggle.focusRingType = .none
-        for label in [
-            subjectSelectSmoothValue,
-            subjectSelectFeatherValue,
-            subjectSelectContrastValue,
-            subjectSelectShiftValue,
-            subjectSelectDecontamValue,
-            subjectSelectBrushRadiusValue
-        ] {
-            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.alignment = .right
-            label.setContentHuggingPriority(.required, for: .horizontal)
-        }
+        subjectSelectBrushToggle.target = self
+        subjectSelectBrushToggle.action = #selector(subjectSelectBrushToggleChanged)
 
         subjectSelectStatusLabel.font = .systemFont(ofSize: 11, weight: .regular)
         subjectSelectStatusLabel.textColor = .secondaryLabelColor
-        subjectSelectStatusLabel.lineBreakMode = .byWordWrapping
-        subjectSelectStatusLabel.maximumNumberOfLines = 2
-        subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
+        subjectSelectStatusLabel.maximumNumberOfLines = 3
+        subjectSelectStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subjectSelectStatusLabel.stringValue = "Auto-select a person, or turn on Click Select to pick any object."
 
+        // Primary actions — Cancel Download swaps in for Clear while downloading.
         let actions = NSStackView()
         actions.orientation = .horizontal
         actions.alignment = .centerY
         actions.spacing = 8
         actions.distribution = .fillEqually
+        actions.translatesAutoresizingMaskIntoConstraints = false
         actions.addArrangedSubview(subjectSelectAutoButton)
         actions.addArrangedSubview(subjectSelectClearButton)
         actions.addArrangedSubview(subjectSelectCancelDownloadButton)
+        subjectSelectAutoButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
 
         card.addRow(SettingsRowFactory.fullWidthRow(actions))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsPopUpRow(title: "View", popUp: subjectSelectViewPopUp)
+        card.addRow(SettingsRowFactory.stackedRow(title: "View", control: subjectSelectViewPopUp))
+        card.addRow(SettingsRowFactory.stackedRow(title: "Quality", control: subjectSelectQualityControl))
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Smooth",
+            slider: subjectSelectSmoothSlider,
+            valueLabel: subjectSelectSmoothValue
         ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSegmentedRow(title: "Quality", control: subjectSelectQualityControl)
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Feather",
+            slider: subjectSelectFeatherSlider,
+            valueLabel: subjectSelectFeatherValue
         ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Smooth", slider: subjectSelectSmoothSlider, valueLabel: subjectSelectSmoothValue)
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Contrast",
+            slider: subjectSelectContrastSlider,
+            valueLabel: subjectSelectContrastValue
         ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Feather", slider: subjectSelectFeatherSlider, valueLabel: subjectSelectFeatherValue)
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Shift Edge",
+            slider: subjectSelectShiftSlider,
+            valueLabel: subjectSelectShiftValue
         ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Contrast", slider: subjectSelectContrastSlider, valueLabel: subjectSelectContrastValue)
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Decontaminate",
+            slider: subjectSelectDecontamSlider,
+            valueLabel: subjectSelectDecontamValue
         ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Shift Edge", slider: subjectSelectShiftSlider, valueLabel: subjectSelectShiftValue)
-        ))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Decontaminate", slider: subjectSelectDecontamSlider, valueLabel: subjectSelectDecontamValue)
-        ))
-        let brushRow = NSStackView()
-        brushRow.orientation = .horizontal
-        brushRow.alignment = .centerY
-        brushRow.spacing = 8
-        brushRow.addArrangedSubview(subjectSelectClickToggle)
-        brushRow.addArrangedSubview(subjectSelectBrushToggle)
-        brushRow.addArrangedSubview(subjectSelectBrushModeControl)
-        card.addRow(SettingsRowFactory.fullWidthRow(brushRow))
-        card.addRow(SettingsRowFactory.fullWidthRow(
-            makeSettingsSliderRow(title: "Brush Radius", slider: subjectSelectBrushRadiusSlider, valueLabel: subjectSelectBrushRadiusValue)
+        card.addRow(SettingsRowFactory.toggleRow(title: "Click Select", control: subjectSelectClickToggle))
+        card.addRow(SettingsRowFactory.toggleRow(title: "Brush", control: subjectSelectBrushToggle))
+        card.addRow(SettingsRowFactory.stackedRow(title: "Brush Mode", control: subjectSelectBrushModeControl))
+        card.addRow(SettingsRowFactory.sliderRow(
+            title: "Brush Radius",
+            slider: subjectSelectBrushRadiusSlider,
+            valueLabel: subjectSelectBrushRadiusValue
         ))
         card.addRow(SettingsRowFactory.fullWidthRow(subjectSelectStatusLabel))
         card.addFinalRow(SettingsRowFactory.fullWidthRow(subjectSelectExportButton))
@@ -5180,10 +5172,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc private func subjectSelectBrushToggleChanged() {
-        subjectSelectBrushEnabled = subjectSelectBrushToggle.state == .on
+        subjectSelectBrushEnabled = subjectSelectBrushToggle.isOn
         if subjectSelectBrushEnabled {
             subjectSelectClickEnabled = false
-            subjectSelectClickToggle.state = .off
+            subjectSelectClickToggle.applySwitchState(false)
             imageSurfaceView.setSelectionClickEnabled(false)
         }
         imageSurfaceView.setSelectionBrushEnabled(subjectSelectBrushEnabled)
@@ -5191,10 +5183,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc private func subjectSelectClickToggleChanged() {
-        subjectSelectClickEnabled = subjectSelectClickToggle.state == .on
+        subjectSelectClickEnabled = subjectSelectClickToggle.isOn
         if subjectSelectClickEnabled {
             subjectSelectBrushEnabled = false
-            subjectSelectBrushToggle.state = .off
+            subjectSelectBrushToggle.applySwitchState(false)
             imageSurfaceView.setSelectionBrushEnabled(false)
         }
         imageSurfaceView.setSelectionClickEnabled(subjectSelectClickEnabled)
@@ -5266,9 +5258,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectBrushRadiusSlider.isEnabled = !loading && subjectSelectBrushEnabled
         if !hasMask, subjectSelectBrushEnabled {
             subjectSelectBrushEnabled = false
-            subjectSelectBrushToggle.state = .off
+            subjectSelectBrushToggle.applySwitchState(false)
             imageSurfaceView.setSelectionBrushEnabled(false)
         }
+        subjectSelectClickToggle.applySwitchState(subjectSelectClickEnabled)
+        subjectSelectBrushToggle.applySwitchState(subjectSelectBrushEnabled)
 
         let mode = imageSelectionSession.currentDisplayMode
         if let idx = SelectionDisplayMode.previewCycle.firstIndex(of: mode) {
@@ -5324,7 +5318,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             subjectSelectStatusLabel.stringValue = "Click Select: click object (+), ⌥-click (−), ⇧ to add; drag for box. Downloads MobileSAM if needed."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else {
-            subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
+            subjectSelectStatusLabel.stringValue = "Auto-select a person, or turn on Click Select to pick any object."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         }
     }
