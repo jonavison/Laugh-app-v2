@@ -57,19 +57,43 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 Opening **ImageMedia** hides the left **MediaLibraryPanel** / folders and docks a full-height right edit column beside a content column of photo + meta bar + **ImageFolderCarousel** (carousel does not extend under the sidebar). Opening Library during **ImageMedia** mirrors video: full folder management fills the window and the current photo moves to the bottom-right mini preview until the panel is closed or expanded.
 
-Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`. Policy: ADR `0004-image-studio-develop-display-only.md`.
+Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`. Policy: ADR `0004-image-studio-develop-display-only.md`. Selection stack: ADR `0005-smart-selection-protocol.md`.
 
 ## ImageAdjustSession
 
 `ImageAdjustSession` is the source of truth for the current **ImageMedia** develop state: raw `ImageAdjustParameters`, which **ImageAdjustSection**s are bypassed, preview→full settle timing, and Before/After presentation (Before exposes identity without clearing edits). Sliders, Presets, and the surface read/write this session; they do not own the parameter values.
 
+## SelectionMask
+
+`SelectionMask` is an on-device selection matte in image pixel space: a single-channel / alpha `CGImage`, extent, confidence, optional `SemanticClass` (person, sky, rock, unknown, …), and `SelectionSource` (Vision / CoreML / point-prompt / brush). It feeds overlay / cutout preview, mask-scoped adjusts, and optional cutout export; it never rewrites the source file. Shared pipelines treat it as an alpha buffer — class labels are advisory metadata, never required for refine / compose / export to run (ADR 0005).
+
+## SelectionProvider
+
+`SelectionProvider` is the protocol for producing a `SelectionMask`. Callers use `selectClass`, `selectRegion(at:)`, or `select(prompt:)` without depending on Vision or CoreML. Accurate path **PR 1 pin:** **MobileSAM** via `MobileSAMSelectionProvider` + SamKit (`SelectionModelStore` download-once cache of encoder/decoder + prompt weights) — chosen for readiness/maturity, not ultimate quality lock. EfficientSAM/SAM2 reconsidered after measurement. Vision person remains fallback / person-tool prompt assist (ADR 0005).
+
+## SelectionPrompt
+
+`SelectionPrompt` is the class-blind point/box input for SAM-class providers (positive/negative points + optional box). Person Auto Select builds it in the tool layer via `SelectionPromptBuilder` from a rough Vision matte; the shared provider must not require Vision types.
+
+## SelectionRefineParameters
+
+`SelectionRefineParameters` is the class-blind edge refine model (Smooth / Feather / Contrast / Shift Edge today; brush / decontaminate later). It applies to any matte’s alpha the same way — sky, rock, hair, or unlabeled. Content-specific starting values come from `SelectionHint` / presets, not branches inside refine.
+
+## SelectionHint
+
+`SelectionHint` is an optional, advisory suggestion attached to a mask or select result (for example “likely sky → higher feather + graduated tone”). It is the only sanctioned place for content-aware defaults. It must not be required by refine, compositing, or export.
+
+## ImageSelectionSession
+
+`ImageSelectionSession` is the source of truth for the current **ImageMedia** selection matte: loading/error/download phase, display mode (Onion Skin / Marching Ants / Overlay / On Black / On White / Black & White / On Layers), `SelectionRefineParameters`, and cache invalidation on image change. It is separate from `ImageAdjustSession`. **Accurate Auto Select Person:** Vision rough matte → `SelectionPrompt` → MobileSAM matte; cancel download or CoreML miss → Vision matte fallback for that attempt. **Debt:** session still hardcodes person — clear in **W3-08d / PR 2**. Brush/decontam (**W3-08b**) waits until SAM edges exist. With a matte active, **F** cycles view modes (video still uses **F** for Fit/Fill). Default view is Marching Ants.
+
 ## ImageDevelopTool
 
-`ImageDevelopTool` is one display-only adjust capability in **ImageAdjustSettings** (for example Develop, Vignette, or Color). Each tool is a row under an outline group (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**), expands into controls when implemented, and extends the shared parameter/CI graph. Unfinished tools remain listed but not expandable (“Coming soon”).
+`ImageDevelopTool` is one display-only adjust capability in **ImageAdjustSettings** (for example Develop, Vignette, or Color). Each tool is a row under an outline group (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**), expands into controls when implemented, and extends the shared parameter/CI graph. Unfinished tools remain listed but not expandable (“Coming soon”). **Subject Select** expands into selection controls via `ImageSelectionSession` rather than an `ImageAdjustSection`.
 
 ## ImageStudioCommitFooter
 
-`ImageStudioCommitFooter` is the bottom bar of the right **edit sidebar** during **ImageMedia**. It appears while **ImageAdjustParameters** differ from identity or display geometry (crop / straighten / rotation) is active, and holds **Reset All** above **ImageUserPreset** save and **ImageExport**. **Reset All** clears develop adjusts and display geometry (crop, straighten, rotation).
+`ImageStudioCommitFooter` is the bottom bar of the right **edit sidebar** during **ImageMedia**. It appears while **ImageAdjustParameters** differ from identity, display geometry (crop / straighten / rotation) is active, or a **SelectionMask** is present, and holds **Reset All** above **ImageUserPreset** save and **ImageExport**. **Reset All** clears develop adjusts and the current selection matte (crop / straighten / rotation stay with their own Cancel).
 
 ## ImageCrop
 
@@ -77,7 +101,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## ImageExport
 
-`ImageExport` writes a new still of the current **ImageMedia** with the active **ImageAdjustParameters**, display rotation, and **ImageCrop** applied. It never replaces the source file.
+`ImageExport` writes a new still of the current **ImageMedia** with the active **ImageAdjustParameters**, display rotation, and **ImageCrop** applied. It never replaces the source file. When a **SelectionMask** exists, **Export Cutout** writes a separate transparent PNG of the subject matte (also never overwrites the source).
 
 ## ImageUserPreset
 

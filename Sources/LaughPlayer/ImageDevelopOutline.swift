@@ -19,15 +19,32 @@ enum ImageDevelopGroupID: String, CaseIterable, Hashable {
     }
 }
 
-/// One row under an outline group. `adjustSection` is set only for v1 expandable tools.
+/// One row under an outline group. `adjustSection` is set only for develop tools;
+/// `isSubjectSelect` marks the selection-session row (not an `ImageAdjustSection`).
 struct ImageDevelopToolDescriptor: Hashable {
     let id: String
     let title: String
     let symbolName: String
     /// When non-`nil`, the row expands into adjust controls for this section.
     let adjustSection: ImageAdjustSection?
+    /// When true, expands into Subject Select controls (`ImageSelectionSession`).
+    let isSubjectSelect: Bool
 
-    var isAvailable: Bool { adjustSection != nil }
+    init(
+        id: String,
+        title: String,
+        symbolName: String,
+        adjustSection: ImageAdjustSection? = nil,
+        isSubjectSelect: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.symbolName = symbolName
+        self.adjustSection = adjustSection
+        self.isSubjectSelect = isSubjectSelect
+    }
+
+    var isAvailable: Bool { adjustSection != nil || isSubjectSelect }
 }
 
 /// Static catalog for the Edits outline. Unfinished tools stay listed as Coming soon.
@@ -62,6 +79,12 @@ enum ImageDevelopOutline {
             .init(id: "filmGrain", title: "Film Grain", symbolName: "film", adjustSection: .filmGrain)
         ]),
         (.portrait, [
+            .init(
+                id: "subjectSelect",
+                title: "Subject Select",
+                symbolName: "person.crop.rectangle",
+                isSubjectSelect: true
+            ),
             .init(id: "portraitBokeh", title: "Portrait Bokeh (AI)", symbolName: "person.fill", adjustSection: nil),
             .init(id: "face", title: "Face (AI)", symbolName: "face.smiling", adjustSection: nil),
             .init(id: "skin", title: "Skin (AI)", symbolName: "hand.raised.fill", adjustSection: nil),

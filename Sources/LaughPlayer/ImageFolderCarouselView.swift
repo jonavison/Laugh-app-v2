@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import QuartzCore
 
 /// Bottom filmstrip of sibling images in the same folder as the open **ImageMedia**.
@@ -168,10 +167,11 @@ final class ImageFolderCarouselView: NSView {
             button.bezelStyle = .regularSquare
             button.isBordered = false
             button.imagePosition = .imageOnly
-            button.imageScaling = .scaleAxesIndependently
+            button.imageScaling = .scaleProportionallyUpOrDown
             button.wantsLayer = true
             button.layer?.cornerRadius = 7
             button.layer?.masksToBounds = true
+            // Muted plate so transparent PNGs read correctly through the shared crop-fill path.
             button.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
             button.toolTip = url.lastPathComponent
             button.identifier = NSUserInterfaceItemIdentifier(url.path)
@@ -230,10 +230,20 @@ final class ImageFolderCarouselView: NSView {
         loadGeneration += 1
         let generation = loadGeneration
         let targets = urls
-        let maxSide = Self.thumbSide * 2
+        // Use the real display scale — hardcoding *2 goes soft on any screen above 2x.
+        let scale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? MediaThumbnailGenerator.defaultScreenScale()
+        let pointSide = Self.thumbSide
         DispatchQueue.global(qos: .utility).async { [weak self] in
             for url in targets {
-                let image = Self.makeThumbnail(at: url, maxSide: maxSide)
+                let kind = MediaKindDetector.kind(for: url)
+                let image = MediaThumbnailGenerator.squareThumbnail(
+                    for: url,
+                    kind: kind,
+                    pointSide: pointSide,
+                    screenScale: scale
+                )
                 DispatchQueue.main.async {
                     guard let self, self.loadGeneration == generation else { return }
                     guard let button = self.thumbnailButtons[url.standardizedFileURL] else { return }
@@ -312,43 +322,6 @@ final class ImageFolderCarouselView: NSView {
         guard let path = sender.identifier?.rawValue else { return }
         let url = URL(fileURLWithPath: path)
         onSelect?(url)
-    }
-
-    private static func makeThumbnail(at url: URL, maxSide: CGFloat) -> NSImage? {
-        let target = NSSize(width: thumbSide, height: thumbSide)
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return NSImage(contentsOf: url).flatMap { cropFill($0, size: target) }
-        }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxSide,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return nil
-        }
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        return cropFill(image, size: target)
-    }
-
-    private static func cropFill(_ image: NSImage, size: NSSize) -> NSImage {
-        let output = NSImage(size: size)
-        output.lockFocus()
-        let src = image.size
-        let scale = max(size.width / max(src.width, 1), size.height / max(src.height, 1))
-        let drawSize = NSSize(width: src.width * scale, height: src.height * scale)
-        let origin = NSPoint(
-            x: (size.width - drawSize.width) / 2,
-            y: (size.height - drawSize.height) / 2
-        )
-        image.draw(
-            in: NSRect(origin: origin, size: drawSize),
-            from: .zero,
-            operation: .copy,
-            fraction: 1
-        )
-        output.unlockFocus()
-        return output
     }
 }
 

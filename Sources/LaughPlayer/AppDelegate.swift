@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SubtitleFont.registerIfNeeded()
         FFmpegVideoFallback.warmAvailabilityCache()
         MpvPlaybackController.warmAvailabilityCache()
+        MediaThumbnailGenerator.performLaunchMigrations()
         LaunchLog.emit("applicationWillFinishLaunching")
     }
 

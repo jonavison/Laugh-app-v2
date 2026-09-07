@@ -56,7 +56,7 @@ final class LibraryPillButton: NSButton {
 
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
         iconView.contentTintColor = .labelColor
         titleLabel.textColor = .labelColor
     }
@@ -183,7 +183,7 @@ final class LibraryPillPopUp: NSButton {
 
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
         iconView.contentTintColor = .labelColor
         applyIcon()
     }
@@ -292,7 +292,7 @@ final class LibraryLabeledPillMenu: NSButton {
 
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
         iconView.contentTintColor = .labelColor
         chevronView.contentTintColor = .secondaryLabelColor
         titleLabel.textColor = .labelColor

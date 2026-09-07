@@ -123,7 +123,7 @@ final class LibraryLayoutModeSwitcher: NSView {
 
     private func refreshChrome() {
         let appearance = effectiveAppearance
-        trackView.layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: appearance).cgColor
+        trackView.layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
         selectionPill.layer?.backgroundColor = LaughTheme.chromeActiveFill(appearance: appearance).cgColor
         for (index, button) in buttons.enumerated() {
             let selected = modes[index] == selectedMode

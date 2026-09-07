@@ -34,3 +34,4 @@ Sources/LaughPlayer/codec-tools/lib/
 *.tmp
 *.swp
 *~
+.tmp/

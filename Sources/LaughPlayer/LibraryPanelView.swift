@@ -1038,6 +1038,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             case .media(let file):
                 guard let item = collectionView.item(at: path) as? LibraryMediaGridItem else { continue }
                 item.applyMetrics(metrics)
+                item.configure(name: entry.name, kind: file.kind, fileSize: entry.size, url: file.url)
                 item.loadThumbnail(for: file.url, kind: file.kind, maxSide: metrics.thumbnailMaxSide, indexPath: path) { [weak self, weak item] image, indexPath in
                     guard let self, let item, self.thumbnailTasks[indexPath] == file.url else { return }
                     item.setThumbnail(image)
@@ -1425,7 +1426,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         searchField.focusRingType = .none
         searchField.heightAnchor.constraint(equalToConstant: 30).isActive = true
         searchField.layer?.cornerRadius = 15
-        searchField.layer?.backgroundColor = LaughTheme.chromeHoverFill(appearance: searchField.effectiveAppearance).cgColor
+        searchField.layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: searchField.effectiveAppearance).cgColor
     }
 
     private func refreshBrowseToolbarPillChrome() {
@@ -2012,7 +2013,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         case .media(let file):
             let item = collectionView.makeItem(withIdentifier: LibraryMediaGridItem.reuseID, for: indexPath) as! LibraryMediaGridItem
             item.applyMetrics(metrics)
-            item.configure(name: entry.name, kind: file.kind)
+            item.configure(name: entry.name, kind: file.kind, fileSize: entry.size, url: file.url)
             item.loadThumbnail(for: file.url, kind: file.kind, maxSide: metrics.thumbnailMaxSide, indexPath: indexPath) { [weak self, weak item] image, path in
                 guard let self, let item, self.thumbnailTasks[path] == file.url else { return }
                 item.setThumbnail(image)
@@ -2380,6 +2381,112 @@ private func configureLibraryGridNameLabel(_ label: NSTextField, fontSize: CGFlo
     label.translatesAutoresizingMaskIntoConstraints = false
 }
 
+private enum LibraryGridCardLayout {
+    static let previewInset: CGFloat = 6
+    /// Match Gallery caption breathing room (not flush to card edges).
+    static let previewTop: CGFloat = 6
+    static let nameTop: CGFloat = 6
+    static let nameMetaSpacing: CGFloat = 2
+    static let metaBottom: CGFloat = 6
+    static let labelInset: CGFloat = 8
+}
+
+/// Colored status dot + format label (`● JPEG` / `● RAW` / `● MP4`) ahead of file size.
+private final class LibraryMediaKindDotLabel: NSView {
+    private let dotView = NSView()
+    private let label = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        dotView.wantsLayer = true
+        dotView.layer?.masksToBounds = true
+        dotView.translatesAutoresizingMaskIntoConstraints = false
+
+        label.isEditable = false
+        label.isBordered = false
+        label.isBezeled = false
+        label.drawsBackground = false
+        label.font = .systemFont(ofSize: 11, weight: .regular)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .left
+        label.lineBreakMode = .byClipping
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        addSubview(dotView)
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            dotView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dotView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dotView.widthAnchor.constraint(equalToConstant: 6),
+            dotView.heightAnchor.constraint(equalToConstant: 6),
+
+            label.leadingAnchor.constraint(equalTo: dotView.trailingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.topAnchor.constraint(equalTo: topAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        dotView.layer?.cornerRadius = dotView.bounds.height / 2
+    }
+
+    func apply(badge: LibraryMediaFormatBadge, appearance: NSAppearance) {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        label.stringValue = badge.title
+        label.textColor = .secondaryLabelColor
+        dotView.layer?.backgroundColor = Self.dotColor(for: badge.family, isDark: isDark).cgColor
+    }
+
+    private static func dotColor(for family: LibraryMediaFormatFamily, isDark: Bool) -> NSColor {
+        switch family {
+        case .photo:
+            // Teal brand — not system blue.
+            return LaughTheme.accent
+        case .gif:
+            return isDark
+                ? NSColor(srgbRed: 0.95, green: 0.45, blue: 0.75, alpha: 1)
+                : NSColor(srgbRed: 0.82, green: 0.28, blue: 0.58, alpha: 1)
+        case .raw:
+            return isDark
+                ? NSColor(srgbRed: 0.55, green: 0.78, blue: 0.42, alpha: 1)
+                : NSColor(srgbRed: 0.35, green: 0.58, blue: 0.22, alpha: 1)
+        case .video:
+            return isDark
+                ? NSColor(srgbRed: 0.78, green: 0.55, blue: 0.98, alpha: 1)
+                : NSColor(srgbRed: 0.58, green: 0.32, blue: 0.86, alpha: 1)
+        case .other:
+            return .tertiaryLabelColor
+        }
+    }
+}
+
+private enum LibraryMediaMetaFormatting {
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false
+        return formatter
+    }()
+
+    static func sizeLabel(_ bytes: Int64?) -> String {
+        guard let bytes, bytes >= 0 else { return "—" }
+        return sizeFormatter.string(fromByteCount: bytes)
+    }
+}
+
 private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectableGridItem {
     static let reuseID = NSUserInterfaceItemIdentifier("LibraryFolderGridItem")
 
@@ -2399,6 +2506,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     var onDeselectRequested: (() -> Void)?
 
     private var previewHeightConstraint: NSLayoutConstraint?
+    private var previewAspectConstraint: NSLayoutConstraint?
     private var previewTopConstraint: NSLayoutConstraint?
     private var rightColumnWidthConstraint: NSLayoutConstraint?
     private var leftTrailingToRightConstraint: NSLayoutConstraint?
@@ -2452,7 +2560,8 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         folderGlyphView.imageScaling = .scaleProportionallyUpOrDown
         folderGlyphView.translatesAutoresizingMaskIntoConstraints = false
         folderGlyphView.isHidden = true
-        cardView.addSubview(folderGlyphView)
+        // Inside the preview container (above title/count) — not behind previewHost on the card.
+        previewHost.addSubview(folderGlyphView)
 
         badgeView.wantsLayer = true
         badgeView.layer?.cornerRadius = 6
@@ -2473,6 +2582,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         nameLabel.cell?.usesSingleLineMode = true
         nameLabel.cell?.truncatesLastVisibleLine = true
         nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        nameLabel.setContentHuggingPriority(.required, for: .vertical)
 
         metaLabel.isEditable = false
         metaLabel.isBordered = false
@@ -2484,6 +2594,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         metaLabel.maximumNumberOfLines = 1
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
         metaLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        metaLabel.setContentHuggingPriority(.required, for: .vertical)
 
         selectionChrome.translatesAutoresizingMaskIntoConstraints = false
         selectionChrome.onDeselect = { [weak self] in
@@ -2499,15 +2610,21 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         cardView.addSubview(metaLabel)
         view.addSubview(selectionChrome)
 
-        let previewTop = previewHost.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 6)
+        let previewTop = previewHost.topAnchor.constraint(equalTo: cardView.topAnchor, constant: LibraryGridCardLayout.previewTop)
         let previewHeight = previewHost.heightAnchor.constraint(equalToConstant: 112)
         previewHeight.priority = .defaultHigh
+        let previewAspect = previewHost.heightAnchor.constraint(equalTo: previewHost.widthAnchor)
+        previewAspect.priority = .required
         let rightWidth = rightTopThumb.widthAnchor.constraint(equalTo: previewHost.widthAnchor, multiplier: 1.0 / 3.0)
         let leftToRight = leftThumb.trailingAnchor.constraint(equalTo: rightTopThumb.leadingAnchor, constant: -collageGap)
         let leftToPreview = leftThumb.trailingAnchor.constraint(equalTo: previewHost.trailingAnchor)
-        let nameTop = nameLabel.topAnchor.constraint(equalTo: previewHost.bottomAnchor, constant: 8)
-        let nameMetaSpacing = metaLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 3)
-        let metaBottom = metaLabel.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -6)
+        let nameTop = nameLabel.topAnchor.constraint(equalTo: previewHost.bottomAnchor, constant: LibraryGridCardLayout.nameTop)
+        let nameMetaSpacing = metaLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: LibraryGridCardLayout.nameMetaSpacing)
+        // Grid pins caption to the card bottom so height matches content (no tall empty band).
+        let metaBottom = metaLabel.bottomAnchor.constraint(
+            equalTo: cardView.bottomAnchor,
+            constant: -LibraryGridCardLayout.metaBottom
+        )
         let cardTop = cardView.topAnchor.constraint(equalTo: view.topAnchor)
         let cardLeading = cardView.leadingAnchor.constraint(equalTo: view.leadingAnchor)
         let cardTrailing = cardView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
@@ -2515,6 +2632,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         let glyphSide = folderGlyphView.widthAnchor.constraint(equalToConstant: 52)
         previewTopConstraint = previewTop
         previewHeightConstraint = previewHeight
+        previewAspectConstraint = previewAspect
         rightColumnWidthConstraint = rightWidth
         leftTrailingToRightConstraint = leftToRight
         leftTrailingToPreviewConstraint = leftToPreview
@@ -2527,6 +2645,7 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         cardBottomConstraint = cardBottom
         folderGlyphSideConstraint = glyphSide
         leftToPreview.isActive = false
+        previewAspect.isActive = false
 
         NSLayoutConstraint.activate([
             cardTop,
@@ -2535,8 +2654,8 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
             cardBottom,
 
             previewTop,
-            previewHost.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 6),
-            previewHost.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -6),
+            previewHost.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: LibraryGridCardLayout.previewInset),
+            previewHost.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -LibraryGridCardLayout.previewInset),
             previewHeight,
 
             leftThumb.leadingAnchor.constraint(equalTo: previewHost.leadingAnchor),
@@ -2575,8 +2694,8 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
             badgeIconView.heightAnchor.constraint(equalToConstant: 14),
 
             nameTop,
-            nameLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 8),
-            nameLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -8),
+            nameLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: LibraryGridCardLayout.labelInset),
+            nameLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -LibraryGridCardLayout.labelInset),
 
             nameMetaSpacing,
             metaLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
@@ -2600,18 +2719,27 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
 
     func applyMetrics(_ metrics: LibraryBrowseTileMetrics) {
         if metrics.showsTitle {
-            // Grid: classic folder glyph only — no media collage previews.
+            // Grid: square preview well + title/count — shared layout with media cards.
             usesIconOnlyLayout = true
             setCardInset(0)
-            previewTopConstraint?.constant = 10
-            nameTopConstraint?.constant = 8
-            nameMetaSpacingConstraint?.constant = 3
-            metaBottomConstraint?.constant = -8
+            previewTopConstraint?.constant = LibraryGridCardLayout.previewTop
+            nameTopConstraint?.constant = LibraryGridCardLayout.nameTop
+            nameMetaSpacingConstraint?.constant = LibraryGridCardLayout.nameMetaSpacing
+            metaBottomConstraint?.constant = -LibraryGridCardLayout.metaBottom
+            metaBottomConstraint?.isActive = true
             nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
             nameLabel.alignment = .center
+            nameLabel.maximumNumberOfLines = 1
+            nameLabel.lineBreakMode = .byTruncatingTail
+            nameLabel.cell?.wraps = false
+            nameLabel.cell?.usesSingleLineMode = true
+            nameLabel.cell?.truncatesLastVisibleLine = true
             metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
             metaLabel.alignment = .center
-            previewHeightConstraint?.constant = max(88, metrics.thumbHeight * 0.78)
+            metaLabel.maximumNumberOfLines = 1
+            metaLabel.isHidden = false
+            previewHeightConstraint?.isActive = false
+            previewAspectConstraint?.isActive = true
             folderGlyphSideConstraint?.constant = metrics.folderIconPointSize
             applyFolderGlyph(pointSize: metrics.folderIconPointSize)
             setCollageHidden(true)
@@ -2627,12 +2755,17 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
             let captionBand: CGFloat = 44
             previewTopConstraint?.constant = previewTopInset
             nameTopConstraint?.constant = 6
-            nameMetaSpacingConstraint?.constant = 3
+            nameMetaSpacingConstraint?.constant = 1
             metaBottomConstraint?.constant = -6
+            metaBottomConstraint?.isActive = true
             nameLabel.font = .systemFont(ofSize: 11, weight: .medium)
             nameLabel.alignment = .left
+            nameLabel.maximumNumberOfLines = 1
             metaLabel.font = .systemFont(ofSize: 10, weight: .regular)
             metaLabel.alignment = .left
+            metaLabel.isHidden = false
+            previewAspectConstraint?.isActive = false
+            previewHeightConstraint?.isActive = true
             let cellHeight = metrics.minItemSize.height
             previewHeightConstraint?.constant = max(40, cellHeight - previewTopInset - captionBand)
             setCollageHidden(false)
@@ -2654,16 +2787,19 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         leftThumb.isHidden = hidden
         rightTopThumb.isHidden = hidden
         rightBottomThumb.isHidden = hidden
-        emptyIconView.isHidden = hidden
+        // Empty outline placeholder is gallery-only; grid uses folderGlyphView instead.
+        if hidden {
+            emptyIconView.isHidden = true
+        }
     }
 
     private func applyFolderGlyph(pointSize: CGFloat) {
         if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
-            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             let configured = folder.withSymbolConfiguration(config)
             configured?.isTemplate = true
             folderGlyphView.image = configured
-            folderGlyphView.contentTintColor = .tertiaryLabelColor
+            folderGlyphView.contentTintColor = .secondaryLabelColor
         }
     }
 
@@ -2714,10 +2850,18 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         clearThumbs()
         showEmptyPreview()
 
+        let scale = view.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? MediaThumbnailGenerator.defaultScreenScale()
         DispatchQueue.global(qos: .userInitiated).async {
             let files = MediaLibraryScanner.previewMediaFiles(in: folderURL, limit: 3)
             let images: [NSImage?] = files.map { file in
-                MediaThumbnailGenerator.thumbnail(for: file.url, kind: file.kind, maxSide: maxSide)
+                MediaThumbnailGenerator.thumbnail(
+                    for: file.url,
+                    kind: file.kind,
+                    maxSide: maxSide,
+                    screenScale: scale
+                )
             }
             DispatchQueue.main.async {
                 completion(images, indexPath)
@@ -2791,12 +2935,12 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         leftTrailingToPreviewConstraint?.isActive = false
         leftTrailingToRightConstraint?.isActive = true
         rightColumnWidthConstraint?.isActive = true
-        if let folder = NSImage(systemSymbolName: "folder", accessibilityDescription: nil) {
+        if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: nil) {
             let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
             let configured = folder.withSymbolConfiguration(config)
             configured?.isTemplate = true
             emptyIconView.image = configured
-            emptyIconView.contentTintColor = .tertiaryLabelColor
+            emptyIconView.contentTintColor = .secondaryLabelColor
         }
         previewHost.layer?.backgroundColor = mutedPreviewFill().cgColor
     }
@@ -3106,21 +3250,32 @@ private final class LibraryCoverImageView: NSView {
 private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectableGridItem {
     static let reuseID = NSUserInterfaceItemIdentifier("LibraryMediaGridItem")
 
+    private let cardView = LibraryFolderCardChromeView()
     private let thumbnailView = LibraryCoverImageView()
     private let playButton = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
+    private let metaRow = NSStackView()
+    private let kindDotLabel = LibraryMediaKindDotLabel()
+    private let metaLabel = NSTextField(labelWithString: "")
     private let selectionChrome = LibraryTileSelectionChromeView()
     var onDeselectRequested: (() -> Void)?
     private var thumbHeightConstraint: NSLayoutConstraint?
+    private var thumbAspectConstraint: NSLayoutConstraint?
     private var thumbBottomConstraint: NSLayoutConstraint?
+    private var thumbTopConstraint: NSLayoutConstraint?
+    private var thumbLeadingConstraint: NSLayoutConstraint?
+    private var thumbTrailingConstraint: NSLayoutConstraint?
     private var nameTopConstraint: NSLayoutConstraint?
-    private var nameBottomConstraint: NSLayoutConstraint?
+    private var nameMetaSpacingConstraint: NSLayoutConstraint?
+    private var metaBottomConstraint: NSLayoutConstraint?
+    private var nameLeadingConstraint: NSLayoutConstraint?
+    private var nameTrailingConstraint: NSLayoutConstraint?
     private var showsTitle = true
     private var hoverBorderEnabled = false
     private var selectionState: LibraryTileSelectionChrome = .none
     private var loadToken = UUID()
     private var hasPhoto = false
-
+    private var configuredFormat = LibraryMediaFormatBadge(title: "Image", family: .photo)
     override func loadView() {
         let host = LibraryMediaTileHostView()
         host.onHoverChange = { [weak self] hovered in
@@ -3128,12 +3283,22 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         }
         view = host
         view.wantsLayer = true
-        view.layer?.cornerRadius = 8
-        view.layer?.masksToBounds = true
+        view.layer?.masksToBounds = false
         view.layer?.borderWidth = 0
 
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 6
+        cardView.layer?.masksToBounds = true
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        cardView.onAppearanceChange = { [weak self] in
+            self?.applyCardChrome()
+        }
+
         thumbnailView.translatesAutoresizingMaskIntoConstraints = false
-        thumbnailView.setFillMode(false, placeholderBackground: NSColor.quaternaryLabelColor)
+        thumbnailView.wantsLayer = true
+        thumbnailView.layer?.masksToBounds = true
+        thumbnailView.layer?.cornerRadius = 4
+        thumbnailView.setFillMode(true, placeholderBackground: NSColor.quaternaryLabelColor)
 
         if let play = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "Play") {
             let config = NSImage.SymbolConfiguration(pointSize: 30, weight: .regular)
@@ -3142,7 +3307,38 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         }
         playButton.translatesAutoresizingMaskIntoConstraints = false
 
-        configureLibraryGridNameLabel(nameLabel, fontSize: 10)
+        configureLibraryGridNameLabel(nameLabel, fontSize: 12)
+        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        nameLabel.alignment = .center
+        nameLabel.maximumNumberOfLines = 1
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        nameLabel.setContentHuggingPriority(.required, for: .vertical)
+
+        kindDotLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        metaLabel.isEditable = false
+        metaLabel.isBordered = false
+        metaLabel.isBezeled = false
+        metaLabel.drawsBackground = false
+        metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        metaLabel.textColor = .tertiaryLabelColor
+        metaLabel.alignment = .left
+        metaLabel.lineBreakMode = .byTruncatingTail
+        metaLabel.maximumNumberOfLines = 1
+        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        metaLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        metaLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        metaLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        metaLabel.setContentHuggingPriority(.required, for: .vertical)
+
+        metaRow.orientation = .horizontal
+        metaRow.alignment = .centerY
+        metaRow.spacing = 6
+        metaRow.translatesAutoresizingMaskIntoConstraints = false
+        metaRow.setViews([kindDotLabel, metaLabel], in: .leading)
+        metaRow.setHuggingPriority(.required, for: .vertical)
+        metaRow.setContentHuggingPriority(.required, for: .vertical)
 
         selectionChrome.translatesAutoresizingMaskIntoConstraints = false
         selectionChrome.onDeselect = { [weak self] in
@@ -3152,46 +3348,107 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             selectionChrome?.hitTest(local)
         }
 
-        view.addSubview(thumbnailView)
-        view.addSubview(playButton)
-        view.addSubview(nameLabel)
+        view.addSubview(cardView)
+        cardView.addSubview(thumbnailView)
+        cardView.addSubview(playButton)
+        cardView.addSubview(nameLabel)
+        cardView.addSubview(metaRow)
         view.addSubview(selectionChrome)
 
         let thumbHeight = thumbnailView.heightAnchor.constraint(equalToConstant: 84)
-        let thumbBottom = thumbnailView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        let nameTop = nameLabel.topAnchor.constraint(equalTo: thumbnailView.bottomAnchor, constant: 4)
-        let nameBottom = nameLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4)
+        let thumbAspect = thumbnailView.heightAnchor.constraint(equalTo: thumbnailView.widthAnchor)
+        let thumbTop = thumbnailView.topAnchor.constraint(
+            equalTo: cardView.topAnchor,
+            constant: LibraryGridCardLayout.previewTop
+        )
+        let thumbLeading = thumbnailView.leadingAnchor.constraint(
+            equalTo: cardView.leadingAnchor,
+            constant: LibraryGridCardLayout.previewInset
+        )
+        let thumbTrailing = thumbnailView.trailingAnchor.constraint(
+            equalTo: cardView.trailingAnchor,
+            constant: -LibraryGridCardLayout.previewInset
+        )
+        let thumbBottom = thumbnailView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor)
+        let nameTop = nameLabel.topAnchor.constraint(
+            equalTo: thumbnailView.bottomAnchor,
+            constant: LibraryGridCardLayout.nameTop
+        )
+        let nameMetaSpacing = metaRow.topAnchor.constraint(
+            equalTo: nameLabel.bottomAnchor,
+            constant: LibraryGridCardLayout.nameMetaSpacing
+        )
+        let metaBottom = metaRow.bottomAnchor.constraint(
+            equalTo: cardView.bottomAnchor,
+            constant: -LibraryGridCardLayout.metaBottom
+        )
+        let nameLeading = nameLabel.leadingAnchor.constraint(
+            equalTo: cardView.leadingAnchor,
+            constant: LibraryGridCardLayout.labelInset
+        )
+        let nameTrailing = nameLabel.trailingAnchor.constraint(
+            equalTo: cardView.trailingAnchor,
+            constant: -LibraryGridCardLayout.labelInset
+        )
         thumbHeightConstraint = thumbHeight
+        thumbAspectConstraint = thumbAspect
+        thumbTopConstraint = thumbTop
+        thumbLeadingConstraint = thumbLeading
+        thumbTrailingConstraint = thumbTrailing
         thumbBottomConstraint = thumbBottom
         nameTopConstraint = nameTop
-        nameBottomConstraint = nameBottom
+        nameMetaSpacingConstraint = nameMetaSpacing
+        metaBottomConstraint = metaBottom
+        nameLeadingConstraint = nameLeading
+        nameTrailingConstraint = nameTrailing
         thumbBottom.isActive = false
-        nameBottom.isActive = false
+        thumbHeight.isActive = false
+        thumbAspect.isActive = true
 
         NSLayoutConstraint.activate([
-            thumbnailView.topAnchor.constraint(equalTo: view.topAnchor),
-            thumbnailView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            thumbnailView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            thumbHeight,
+            cardView.topAnchor.constraint(equalTo: view.topAnchor),
+            cardView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            cardView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            cardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            thumbTop,
+            thumbLeading,
+            thumbTrailing,
+            thumbAspect,
             playButton.centerXAnchor.constraint(equalTo: thumbnailView.centerXAnchor),
             playButton.centerYAnchor.constraint(equalTo: thumbnailView.centerYAnchor),
             nameTop,
-            nameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
-            nameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
+            nameLeading,
+            nameTrailing,
+            nameMetaSpacing,
+            metaRow.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
+            metaRow.leadingAnchor.constraint(
+                greaterThanOrEqualTo: cardView.leadingAnchor,
+                constant: LibraryGridCardLayout.labelInset
+            ),
+            metaRow.trailingAnchor.constraint(
+                lessThanOrEqualTo: cardView.trailingAnchor,
+                constant: -LibraryGridCardLayout.labelInset
+            ),
+            metaBottom,
 
             selectionChrome.topAnchor.constraint(equalTo: view.topAnchor),
             selectionChrome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             selectionChrome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             selectionChrome.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        applyCardChrome()
     }
 
     func applySelectionChrome(_ chrome: LibraryTileSelectionChrome) {
         selectionState = chrome
-        selectionChrome.apply(chrome, appearance: view.effectiveAppearance, cornerRadius: view.layer?.cornerRadius ?? 8)
+        let radius = showsTitle ? (cardView.layer?.cornerRadius ?? 6) : 4
+        selectionChrome.apply(chrome, appearance: view.effectiveAppearance, cornerRadius: radius)
         if chrome != .none {
             view.layer?.borderWidth = 0
             view.layer?.borderColor = nil
+            cardView.layer?.borderWidth = showsTitle ? 1 : 0
         }
     }
 
@@ -3199,33 +3456,89 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         showsTitle = metrics.showsTitle
         hoverBorderEnabled = true
         nameLabel.isHidden = !metrics.showsTitle
+        metaRow.isHidden = !metrics.showsTitle
         setHovered(false)
         if metrics.showsTitle {
-            // Uniform Grid: fixed thumb well + caption.
-            thumbHeightConstraint?.isActive = true
-            thumbHeightConstraint?.constant = metrics.thumbHeight
+            // Grid: square preview + title/meta — same card behaviour as folders.
+            thumbHeightConstraint?.isActive = false
+            thumbAspectConstraint?.isActive = true
             thumbBottomConstraint?.isActive = false
+            thumbTopConstraint?.constant = LibraryGridCardLayout.previewTop
+            thumbLeadingConstraint?.constant = LibraryGridCardLayout.previewInset
+            thumbTrailingConstraint?.constant = -LibraryGridCardLayout.previewInset
             nameTopConstraint?.isActive = true
-            nameBottomConstraint?.isActive = true
+            nameTopConstraint?.constant = LibraryGridCardLayout.nameTop
+            nameMetaSpacingConstraint?.isActive = true
+            nameMetaSpacingConstraint?.constant = LibraryGridCardLayout.nameMetaSpacing
+            metaBottomConstraint?.isActive = true
+            metaBottomConstraint?.constant = -LibraryGridCardLayout.metaBottom
+            nameLeadingConstraint?.constant = LibraryGridCardLayout.labelInset
+            nameTrailingConstraint?.constant = -LibraryGridCardLayout.labelInset
             nameLabel.alignment = .center
-            nameLabel.maximumNumberOfLines = 2
+            nameLabel.maximumNumberOfLines = 1
             nameLabel.lineBreakMode = .byTruncatingTail
-            view.layer?.cornerRadius = 8
-            thumbnailView.setFillMode(false, placeholderBackground: NSColor.quaternaryLabelColor)
+            nameLabel.cell?.wraps = false
+            nameLabel.cell?.usesSingleLineMode = true
+            nameLabel.cell?.truncatesLastVisibleLine = true
+            nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+            metaLabel.alignment = .center
+            metaLabel.maximumNumberOfLines = 1
+            metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            cardView.layer?.cornerRadius = 6
+            cardView.layer?.masksToBounds = true
+            thumbnailView.layer?.cornerRadius = 4
+            thumbnailView.setFillMode(
+                true,
+                placeholderBackground: LaughTheme.libraryContentBackground(appearance: view.effectiveAppearance)
+            )
         } else {
             // Gallery (~16:9): image covers the whole tile.
+            thumbAspectConstraint?.isActive = false
             thumbHeightConstraint?.isActive = false
             thumbBottomConstraint?.isActive = true
+            thumbTopConstraint?.constant = 0
+            thumbLeadingConstraint?.constant = 0
+            thumbTrailingConstraint?.constant = 0
             nameTopConstraint?.isActive = false
-            nameBottomConstraint?.isActive = false
-            view.layer?.cornerRadius = 4
-            thumbnailView.setFillMode(true, placeholderBackground: nil)
+            nameMetaSpacingConstraint?.isActive = false
+            metaBottomConstraint?.isActive = false
+            cardView.layer?.cornerRadius = 4
+            cardView.layer?.masksToBounds = true
+            thumbnailView.layer?.cornerRadius = 4
+            thumbnailView.setFillMode(
+                true,
+                placeholderBackground: LaughTheme.libraryContentBackground(appearance: view.effectiveAppearance)
+            )
         }
+        applyCardChrome()
         let playSize = max(26, min(metrics.thumbHeight * 0.22, 42))
         if let play = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "Play") {
             let config = NSImage.SymbolConfiguration(pointSize: playSize, weight: .regular)
             playButton.image = play.withSymbolConfiguration(config)
             playButton.contentTintColor = .white
+        }
+    }
+
+    private func applyCardChrome() {
+        let appearance = view.effectiveAppearance
+        if showsTitle {
+            let card = LaughTheme.librarySidebarBackground(appearance: appearance)
+            let content = LaughTheme.libraryContentBackground(appearance: appearance)
+            cardView.layer?.backgroundColor = card.cgColor
+            cardView.layer?.borderWidth = 1
+            cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+            thumbnailView.layer?.borderWidth = 1
+            thumbnailView.layer?.borderColor = NSColor.separatorColor.cgColor
+            thumbnailView.layer?.backgroundColor = content.cgColor
+            nameLabel.textColor = .labelColor
+            metaLabel.textColor = .tertiaryLabelColor
+            kindDotLabel.apply(badge: configuredFormat, appearance: appearance)
+        } else {
+            cardView.layer?.backgroundColor = NSColor.clear.cgColor
+            cardView.layer?.borderWidth = 0
+            cardView.layer?.borderColor = nil
+            thumbnailView.layer?.borderWidth = 0
+            thumbnailView.layer?.borderColor = nil
         }
     }
 
@@ -3236,20 +3549,25 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             view.layer?.borderColor = nil
             return
         }
+        if showsTitle {
+            view.layer?.borderWidth = 0
+            view.layer?.borderColor = nil
+            let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            if hovered {
+                cardView.layer?.borderWidth = 1.5
+                cardView.layer?.borderColor = (isDark
+                    ? NSColor.white.withAlphaComponent(0.85)
+                    : NSColor.labelColor.withAlphaComponent(0.55)).cgColor
+            } else {
+                cardView.layer?.borderWidth = 1
+                cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+            }
+            return
+        }
+
         view.layer?.borderWidth = hovered ? 1.5 : 0
         if hovered {
-            // Gallery mosaic uses a bright rim; Grid captions sit on a lighter plate —
-            // keep the same weight, adapt luminance so the ring stays visible.
-            let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let rim: NSColor
-            if showsTitle {
-                rim = isDark
-                    ? NSColor.white.withAlphaComponent(0.85)
-                    : NSColor.labelColor.withAlphaComponent(0.55)
-            } else {
-                rim = NSColor.white.withAlphaComponent(0.95)
-            }
-            view.layer?.borderColor = rim.cgColor
+            view.layer?.borderColor = NSColor.white.withAlphaComponent(0.95).cgColor
         } else {
             view.layer?.borderColor = nil
         }
@@ -3261,6 +3579,8 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         hasPhoto = false
         thumbnailView.clearImage()
         nameLabel.stringValue = ""
+        metaLabel.stringValue = ""
+        configuredFormat = LibraryMediaFormatBadge(title: "Image", family: .photo)
         view.toolTip = nil
         onDeselectRequested = nil
         applySelectionChrome(.none)
@@ -3268,10 +3588,13 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         playButton.isHidden = true
     }
 
-    func configure(name: String, kind: DroppedMediaKind) {
+    func configure(name: String, kind: DroppedMediaKind, fileSize: Int64?, url: URL) {
         nameLabel.stringValue = name
         view.toolTip = nil
         playButton.isHidden = kind != .video
+        configuredFormat = MediaKindDetector.formatBadge(for: url)
+        kindDotLabel.apply(badge: configuredFormat, appearance: view.effectiveAppearance)
+        metaLabel.stringValue = LibraryMediaMetaFormatting.sizeLabel(fileSize)
         guard !hasPhoto else { return }
         let symbol = kind == .video ? "film" : "photo"
         if let placeholder = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
@@ -3296,8 +3619,16 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         completion: @escaping (NSImage?, IndexPath) -> Void
     ) {
         let token = loadToken
+        let scale = view.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? MediaThumbnailGenerator.defaultScreenScale()
         DispatchQueue.global(qos: .utility).async {
-            let image = MediaThumbnailGenerator.thumbnail(for: url, kind: kind, maxSide: maxSide)
+            let image = MediaThumbnailGenerator.thumbnail(
+                for: url,
+                kind: kind,
+                maxSide: maxSide,
+                screenScale: scale
+            )
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.loadToken == token else { return }
                 completion(image, indexPath)

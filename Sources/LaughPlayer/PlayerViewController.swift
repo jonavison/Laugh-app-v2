@@ -131,8 +131,31 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let imageTabView = NSStackView()
     private let imageFitTabView = NSStackView()
     private let imageAdjustSession = ImageAdjustSession()
+    private let imageSelectionSession = ImageSelectionSession()
     private let imageAdjustControls = ImageAdjustControls()
     private var imageSectionHeaders: [ImageAdjustSection: CollapsibleSettingsSectionView] = [:]
+    private var imageSubjectSelectHeader: CollapsibleSettingsSectionView?
+    private let subjectSelectAutoButton = NSButton(title: "Auto Select Person", target: nil, action: nil)
+    private let subjectSelectClearButton = NSButton(title: "Clear", target: nil, action: nil)
+    private let subjectSelectCancelDownloadButton = NSButton(title: "Cancel Download", target: nil, action: nil)
+    private let subjectSelectExportButton = NSButton(title: "Export Cutout…", target: nil, action: nil)
+    private let subjectSelectViewPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let subjectSelectQualityControl = NSSegmentedControl(
+        labels: ["Preview", "Accurate"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    private let subjectSelectSmoothSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectFeatherSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectContrastSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectShiftSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    private let subjectSelectSmoothValue = NSTextField(labelWithString: "0")
+    private let subjectSelectFeatherValue = NSTextField(labelWithString: "0")
+    private let subjectSelectContrastValue = NSTextField(labelWithString: "0")
+    private let subjectSelectShiftValue = NSTextField(labelWithString: "0")
+    private let subjectSelectStatusLabel = NSTextField(labelWithString: "")
+    private var subjectSelectRefineSettleWork: DispatchWorkItem?
     private let imageStudioCommitFooter = ImageStudioCommitFooter()
     private var imageStudioCommitFooterHeightConstraint: NSLayoutConstraint?
     private var imageSavedPresetsHost = NSStackView()
@@ -491,6 +514,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         imageAdjustSession.onChromeChange = { [weak self] in
             self?.refreshImageSectionEditChrome()
+            self?.updateImageStudioCommitFooter()
+        }
+        imageSelectionSession.onChange = { [weak self] quality in
+            guard let self else { return }
+            let renderQuality: ImageAdjustRenderQuality = quality == .accurate ? .full : .preview
+            self.imageSurfaceView.setSelectionPreview(
+                mask: self.imageSelectionSession.currentMask,
+                displayMode: self.imageSelectionSession.currentDisplayMode,
+                refine: self.imageSelectionSession.currentRefine,
+                quality: renderQuality
+            )
+            self.refreshSubjectSelectChrome()
+            self.updateImageStudioCommitFooter()
+        }
+        imageSelectionSession.onChromeChange = { [weak self] in
+            self?.refreshSubjectSelectChrome()
             self?.updateImageStudioCommitFooter()
         }
 
@@ -1881,8 +1920,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastVideoTrackSummary = "Unknown"
         updateVideoInfoLabels()
         cancelImageCropMode()
+        imageSelectionSession.setSourceToken(url.path)
         imageSurfaceView.setImage(loaded.image, naturalSize: loaded.pixelSize)
         imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        refreshSubjectSelectChrome()
         // Already browsing photos in studio: swap the image without forcing the edit column open.
         let stayingInImageStudio = activeMediaKind == .image
             && playbackLibraryOverlay == .closed
@@ -4256,7 +4297,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             toolsColumn.widthAnchor.constraint(equalTo: groupColumn.widthAnchor).isActive = true
 
             for tool in tools {
-                if let section = tool.adjustSection {
+                if tool.isSubjectSelect {
+                    addSubjectSelectSection(
+                        to: toolsColumn,
+                        symbolName: tool.symbolName,
+                        leadingGap: 0
+                    )
+                } else if let section = tool.adjustSection {
                     addImageAdjustSection(
                         section,
                         to: toolsColumn,
@@ -4887,6 +4934,343 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         block.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
+    private func addSubjectSelectSection(
+        to stack: NSStackView,
+        symbolName: String,
+        leadingGap: CGFloat = 0
+    ) {
+        let accentIndex = max(0, imageSectionHeaders.count)
+        let (block, header) = SettingsSectionBuilder.sectionBlock(
+            title: "Subject Select",
+            symbolName: symbolName,
+            accentIndex: accentIndex,
+            isFirst: true,
+            showsSectionEditActions: false,
+            leadingGap: leadingGap
+        ) { card in
+            self.configureSubjectSelectCard(card)
+        }
+        header.onExpandedChange = { [weak self] expanded in
+            guard expanded else { return }
+            self?.collapseOtherImageAdjustSectionsForSubjectSelect()
+        }
+        imageSubjectSelectHeader = header
+        stack.addArrangedSubview(block)
+        block.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func collapseOtherImageAdjustSectionsForSubjectSelect() {
+        for (_, header) in imageSectionHeaders {
+            header.setExpanded(false, animated: true)
+        }
+    }
+
+    private func configureSubjectSelectCard(_ card: SettingsSectionCard) {
+        styleSubjectSelectButton(subjectSelectAutoButton)
+        styleSubjectSelectButton(subjectSelectClearButton)
+        styleSubjectSelectButton(subjectSelectCancelDownloadButton)
+        styleSubjectSelectButton(subjectSelectExportButton)
+        subjectSelectAutoButton.target = self
+        subjectSelectAutoButton.action = #selector(subjectSelectAutoPressed)
+        subjectSelectClearButton.target = self
+        subjectSelectClearButton.action = #selector(subjectSelectClearPressed)
+        subjectSelectCancelDownloadButton.target = self
+        subjectSelectCancelDownloadButton.action = #selector(subjectSelectCancelDownloadPressed)
+        subjectSelectCancelDownloadButton.isHidden = true
+        subjectSelectExportButton.target = self
+        subjectSelectExportButton.action = #selector(subjectSelectExportPressed)
+
+        subjectSelectViewPopUp.removeAllItems()
+        for mode in SelectionDisplayMode.previewCycle {
+            subjectSelectViewPopUp.addItem(withTitle: mode.menuTitle)
+            subjectSelectViewPopUp.lastItem?.representedObject = mode.rawValue
+        }
+        subjectSelectViewPopUp.target = self
+        subjectSelectViewPopUp.action = #selector(subjectSelectViewChanged)
+        subjectSelectViewPopUp.controlSize = .small
+        subjectSelectViewPopUp.font = .systemFont(ofSize: 12)
+        subjectSelectViewPopUp.focusRingType = .none
+
+        configureSettingsSegmentedControl(subjectSelectQualityControl, action: #selector(subjectSelectQualityChanged))
+        subjectSelectQualityControl.selectedSegment = 1
+
+        configureSubjectSelectRefineSlider(subjectSelectSmoothSlider, action: #selector(subjectSelectRefineChanged))
+        configureSubjectSelectRefineSlider(subjectSelectFeatherSlider, action: #selector(subjectSelectRefineChanged))
+        configureSubjectSelectRefineSlider(subjectSelectContrastSlider, action: #selector(subjectSelectRefineChanged))
+        configureSubjectSelectRefineSlider(subjectSelectShiftSlider, action: #selector(subjectSelectRefineChanged))
+        for label in [
+            subjectSelectSmoothValue,
+            subjectSelectFeatherValue,
+            subjectSelectContrastValue,
+            subjectSelectShiftValue
+        ] {
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.setContentHuggingPriority(.required, for: .horizontal)
+        }
+
+        subjectSelectStatusLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        subjectSelectStatusLabel.lineBreakMode = .byWordWrapping
+        subjectSelectStatusLabel.maximumNumberOfLines = 2
+        subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
+
+        let actions = NSStackView()
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = 8
+        actions.distribution = .fillEqually
+        actions.addArrangedSubview(subjectSelectAutoButton)
+        actions.addArrangedSubview(subjectSelectClearButton)
+        actions.addArrangedSubview(subjectSelectCancelDownloadButton)
+
+        card.addRow(SettingsRowFactory.fullWidthRow(actions))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsPopUpRow(title: "View", popUp: subjectSelectViewPopUp)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSegmentedRow(title: "Quality", control: subjectSelectQualityControl)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Smooth", slider: subjectSelectSmoothSlider, valueLabel: subjectSelectSmoothValue)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Feather", slider: subjectSelectFeatherSlider, valueLabel: subjectSelectFeatherValue)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Contrast", slider: subjectSelectContrastSlider, valueLabel: subjectSelectContrastValue)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(
+            makeSettingsSliderRow(title: "Shift Edge", slider: subjectSelectShiftSlider, valueLabel: subjectSelectShiftValue)
+        ))
+        card.addRow(SettingsRowFactory.fullWidthRow(subjectSelectStatusLabel))
+        card.addFinalRow(SettingsRowFactory.fullWidthRow(subjectSelectExportButton))
+        refreshSubjectSelectChrome()
+    }
+
+    private func configureSubjectSelectRefineSlider(_ slider: NSSlider, action: Selector) {
+        slider.target = self
+        slider.action = action
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.focusRingType = .none
+        slider.useFlatBarAppearance(trackHeight: 3, filledColor: LaughTheme.interactiveAccent, showsKnob: true)
+    }
+
+    private func styleSubjectSelectButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.focusRingType = .none
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    }
+
+    @objc private func subjectSelectAutoPressed() {
+        guard let image = imageSurfaceView.selectionSourceCIImage else { return }
+        imageSelectionSession.selectPerson(in: image)
+    }
+
+    @objc private func subjectSelectClearPressed() {
+        imageSelectionSession.clearSelection()
+        imageSurfaceView.setSelectionPreview(mask: nil, displayMode: .none, refine: .identity, quality: .full)
+    }
+
+    @objc private func subjectSelectCancelDownloadPressed() {
+        imageSelectionSession.cancelModelDownload()
+    }
+
+    @objc private func subjectSelectViewChanged() {
+        guard let raw = subjectSelectViewPopUp.selectedItem?.representedObject as? String,
+              let mode = SelectionDisplayMode(rawValue: raw)
+        else { return }
+        imageSelectionSession.setDisplayMode(mode)
+    }
+
+    @objc private func subjectSelectRefineChanged() {
+        let next = SelectionRefineParameters(
+            smooth: subjectSelectSmoothSlider.doubleValue,
+            feather: subjectSelectFeatherSlider.doubleValue,
+            contrast: subjectSelectContrastSlider.doubleValue,
+            shiftEdge: subjectSelectShiftSlider.doubleValue
+        )
+        syncSubjectSelectRefineValueLabels(next)
+        imageSelectionSession.setRefine(next, preview: true)
+        subjectSelectRefineSettleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.imageSurfaceView.setSelectionPreview(
+                mask: self.imageSelectionSession.currentMask,
+                displayMode: self.imageSelectionSession.currentDisplayMode,
+                refine: self.imageSelectionSession.currentRefine,
+                quality: .full
+            )
+        }
+        subjectSelectRefineSettleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
+    }
+
+    @objc private func subjectSelectQualityChanged() {
+        let quality: SelectionQuality = subjectSelectQualityControl.selectedSegment == 1 ? .accurate : .preview
+        imageSelectionSession.setQuality(quality)
+    }
+
+    @objc private func subjectSelectExportPressed() {
+        exportSubjectCutout()
+    }
+
+    private func cycleSubjectSelectViewMode() {
+        guard imageSelectionSession.hasSelection else { return }
+        let next = imageSelectionSession.currentDisplayMode.nextInPreviewCycle()
+        imageSelectionSession.setDisplayMode(next)
+    }
+
+    private func syncSubjectSelectRefineValueLabels(_ refine: SelectionRefineParameters) {
+        subjectSelectSmoothValue.stringValue = String(format: "%.2f", refine.smooth)
+        subjectSelectFeatherValue.stringValue = String(format: "%.2f", refine.feather)
+        subjectSelectContrastValue.stringValue = String(format: "%.2f", refine.contrast)
+        subjectSelectShiftValue.stringValue = String(format: "%+.2f", refine.shiftEdge)
+    }
+
+    private func refreshSubjectSelectChrome() {
+        let hasMask = imageSelectionSession.hasSelection
+        let loading = imageSelectionSession.isSelecting
+        let downloading = imageSelectionSession.isDownloadingModel
+        subjectSelectClearButton.isEnabled = hasMask || imageSelectionSession.error != nil
+        subjectSelectClearButton.isHidden = downloading
+        subjectSelectCancelDownloadButton.isHidden = !downloading
+        subjectSelectCancelDownloadButton.isEnabled = downloading
+        subjectSelectExportButton.isEnabled = hasMask && !loading
+        subjectSelectAutoButton.isEnabled = !loading
+        subjectSelectViewPopUp.isEnabled = hasMask
+        subjectSelectQualityControl.isEnabled = hasMask || loading
+        let refineEnabled = hasMask && !loading
+        subjectSelectSmoothSlider.isEnabled = refineEnabled
+        subjectSelectFeatherSlider.isEnabled = refineEnabled
+        subjectSelectContrastSlider.isEnabled = refineEnabled
+        subjectSelectShiftSlider.isEnabled = refineEnabled
+
+        let mode = imageSelectionSession.currentDisplayMode
+        if let idx = SelectionDisplayMode.previewCycle.firstIndex(of: mode) {
+            subjectSelectViewPopUp.selectItem(at: idx)
+        } else if hasMask {
+            subjectSelectViewPopUp.selectItem(at: SelectionDisplayMode.previewCycle.firstIndex(of: .marchingAnts) ?? 0)
+        }
+        subjectSelectQualityControl.selectedSegment = imageSelectionSession.currentQuality == .accurate ? 1 : 0
+
+        let refine = imageSelectionSession.currentRefine
+        subjectSelectSmoothSlider.doubleValue = refine.smooth
+        subjectSelectFeatherSlider.doubleValue = refine.feather
+        subjectSelectContrastSlider.doubleValue = refine.contrast
+        subjectSelectShiftSlider.doubleValue = refine.shiftEdge
+        syncSubjectSelectRefineValueLabels(refine)
+
+        if downloading {
+            let pct = Int(((imageSelectionSession.downloadProgress ?? 0) * 100).rounded())
+            subjectSelectStatusLabel.stringValue = "Downloading MobileSAM… \(pct)% — cancel uses Vision fallback."
+            subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        } else if loading {
+            subjectSelectStatusLabel.stringValue = "Precision select (MobileSAM)…"
+            subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        } else if let error = imageSelectionSession.error {
+            subjectSelectStatusLabel.stringValue = subjectSelectErrorMessage(error)
+            subjectSelectStatusLabel.textColor = .systemOrange
+        } else if hasMask {
+            let engineNote: String
+            if imageSelectionSession.didUseVisionFallback {
+                engineNote = "Vision fallback. "
+            } else if case .coreML = imageSelectionSession.currentMask?.source {
+                engineNote = "MobileSAM. "
+            } else {
+                engineNote = ""
+            }
+            subjectSelectStatusLabel.stringValue = "\(engineNote)\(mode.menuTitle) — press F to cycle views. Display-only."
+            subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        } else {
+            subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
+            subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        }
+    }
+
+    private func subjectSelectErrorMessage(_ error: SelectionError) -> String {
+        switch error {
+        case .emptyResult:
+            return "No person found in this image."
+        case .pointMiss:
+            return "That point is not on a person."
+        case .invalidImage:
+            return "Could not read this image for selection."
+        case .unsupportedClass(let cls):
+            return "“\(cls.rawValue)” is not available yet."
+        case .modelNotReady:
+            return "Selection model isn’t downloaded yet."
+        }
+    }
+
+    private func exportSubjectCutout() {
+        guard activeMediaKind == .image,
+              let source = currentMediaURL,
+              let mask = imageSelectionSession.currentMask
+        else { return }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = ImageExportWriter.suggestedCutoutFileName(for: source)
+        panel.title = "Export Cutout"
+        panel.message = "Writes a transparent PNG. The original stays unchanged."
+        panel.prompt = "Export"
+        guard let window = view.window else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let dest = panel.url else { return }
+            self?.performCutoutExport(source: source, destination: dest, mask: mask)
+        }
+    }
+
+    private func performCutoutExport(source: URL, destination: URL, mask: SelectionMask) {
+        if destination.standardizedFileURL == source.standardizedFileURL {
+            presentImageExportAlert(title: "Choose a new file", message: "Export never overwrites the original.")
+            return
+        }
+        let parameters = imageAdjustSession.effectiveParameters
+        let turns = imageSurfaceView.rotationQuarterTurns
+        let crop = imageSurfaceView.appliedCropNormalized
+        let straighten = imageSurfaceView.appliedStraightenRadians
+        let flipH = imageSurfaceView.flipHorizontal
+        let flipV = imageSurfaceView.flipVertical
+        let refine = imageSelectionSession.currentRefine
+        subjectSelectExportButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let image = ImageExportWriter.renderCutoutCGImage(
+                sourceURL: source,
+                parameters: parameters,
+                selectionMask: mask,
+                quarterTurns: turns,
+                cropNormalized: crop,
+                straightenRadians: straighten,
+                flipHorizontal: flipH,
+                flipVertical: flipV,
+                refine: refine
+            )
+            var writeError: Error?
+            if let image {
+                do {
+                    try ImageExportWriter.write(image, to: destination, format: .png)
+                } catch {
+                    writeError = error
+                }
+            }
+            DispatchQueue.main.async {
+                self?.subjectSelectExportButton.isEnabled = self?.imageSelectionSession.hasSelection == true
+                if image == nil {
+                    self?.presentImageExportAlert(title: "Export failed", message: "Could not render the cutout.")
+                } else if let writeError {
+                    self?.presentImageExportAlert(title: "Export failed", message: writeError.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func addImageDevelopComingSoonRow(
         title: String,
         symbolName: String,
@@ -4919,6 +5303,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         for (section, header) in imageSectionHeaders where section != open {
             header.setExpanded(false, animated: true)
         }
+        imageSubjectSelectHeader?.setExpanded(false, animated: true)
     }
 
     private func configureImageAdjustCard(_ card: SettingsSectionCard, for section: ImageAdjustSection) {
@@ -5231,14 +5616,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let geometryDirty = imageSurfaceView.hasNonIdentityCrop
             || imageSurfaceView.rotationQuarterTurns != 0
         let developDirty = imageAdjustSession.isDirty
+        let selectionDirty = imageSelectionSession.hasSelection
         let show = activeMediaKind == .image
-            && (developDirty || geometryDirty)
+            && (developDirty || geometryDirty || selectionDirty)
             && playbackLibraryOverlay == .closed
             && !isImageCropMode
         imageStudioCommitFooter.isHidden = !show
-        imageStudioCommitFooter.setShowsResetAll(developDirty)
+        imageStudioCommitFooter.setShowsResetAll(developDirty || selectionDirty)
         imageStudioCommitFooterHeightConstraint?.constant = show
-            ? (developDirty
+            ? (developDirty || selectionDirty
                 ? ImageStudioCommitFooter.preferredHeight
                 : ImageStudioCommitFooter.preferredHeightActionsOnly)
             : 0
@@ -5252,6 +5638,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         // Develop adjusts only — crop / straighten / rotate / flip are framing tools
         // with their own Cancel; Reset All must not wipe an applied crop.
         imageAdjustSession.resetAll()
+        imageSelectionSession.resetAll()
+        imageSurfaceView.setSelectionPreview(mask: nil, displayMode: .none, refine: .identity, quality: .full)
+        refreshSubjectSelectChrome()
         updateImageStudioCommitFooter()
         updateImageZoomPercentLabel()
     }
@@ -6810,6 +7199,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         control.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.addArrangedSubview(label)
         row.addArrangedSubview(control)
+        return row
+    }
+
+    private func makeSettingsPopUpRow(title: String, popUp: NSPopUpButton) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.spacing = 8
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .labelColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+
+        popUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        popUp.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(popUp)
         return row
     }
 
@@ -9573,6 +9981,10 @@ extension PlayerViewController {
                     return true
                 }
             case 3:
+                if activeMediaKind == .image, imageSelectionSession.hasSelection {
+                    cycleSubjectSelectViewMode()
+                    return true
+                }
                 if activeMediaKind == .video {
                     commandToggleVideoFitMode()
                     return true
@@ -9645,6 +10057,11 @@ final class ImageSurfaceView: NSView {
     private var cropSessionFlipHorizontal = false
     private var cropSessionFlipVertical = false
     private var adjustParameters = ImageAdjustParameters.identity
+    private var selectionMask: SelectionMask?
+    private var selectionDisplayMode: SelectionDisplayMode = .none
+    private var selectionRefine = SelectionRefineParameters.identity
+    private var marchingAntsPhase: CGFloat = 0
+    private var marchingAntsTimer: Timer?
     /// Offset from centered fit frame while zoomed in (points).
     private var panOffset: CGPoint = .zero
     private var isPanning = false
@@ -9771,6 +10188,9 @@ final class ImageSurfaceView: NSView {
         exitCropMode(apply: false)
         zoomScale = 1.0
         panOffset = .zero
+        selectionMask = nil
+        selectionDisplayMode = .none
+        syncMarchingAntsAnimation()
         rebuildSourceCIImages(from: image)
         refreshDisplayedImage(quality: .full)
         needsLayout = true
@@ -9797,6 +10217,9 @@ final class ImageSurfaceView: NSView {
         draftStraightenRadians = 0
         exitCropMode(apply: false)
         adjustParameters = .identity
+        selectionMask = nil
+        selectionDisplayMode = .none
+        syncMarchingAntsAnimation()
         needsLayout = true
         window?.invalidateCursorRects(for: self)
         onZoomScaleChanged?()
@@ -9921,6 +10344,40 @@ final class ImageSurfaceView: NSView {
         guard paramsChanged || quality == .full else { return }
         refreshDisplayedImage(quality: quality)
     }
+
+    func setSelectionPreview(
+        mask: SelectionMask?,
+        displayMode: SelectionDisplayMode,
+        refine: SelectionRefineParameters = .identity,
+        quality: ImageAdjustRenderQuality = .full
+    ) {
+        selectionMask = mask
+        selectionDisplayMode = displayMode
+        selectionRefine = refine
+        syncMarchingAntsAnimation()
+        refreshDisplayedImage(quality: quality)
+    }
+
+    private func syncMarchingAntsAnimation() {
+        let shouldAnimate = selectionMask != nil && selectionDisplayMode == .marchingAnts
+        if shouldAnimate {
+            guard marchingAntsTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.marchingAntsPhase += 3.0
+                self.refreshDisplayedImage(quality: .preview)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            marchingAntsTimer = timer
+        } else {
+            marchingAntsTimer?.invalidate()
+            marchingAntsTimer = nil
+            marchingAntsPhase = 0
+        }
+    }
+
+    /// Base CIImage in source pixel space for selection providers.
+    var selectionSourceCIImage: CIImage? { baseCIImage }
 
     func rotateLeft() {
         rotationQuarterTurns = (rotationQuarterTurns + 3) % 4
@@ -10196,12 +10653,14 @@ final class ImageSurfaceView: NSView {
 
         let crop = effectiveCropForDisplay()
         let straighten = effectiveStraightenForDisplay()
+        let hasSelectionPreview = selectionMask != nil && selectionDisplayMode != .none
         let needsPipeline = !adjustParameters.isIdentity
             || crop != nil
             || rotationQuarterTurns != 0
             || flipHorizontal
             || flipVertical
             || !ImageCropGeometry.isIdentityStraighten(straighten)
+            || hasSelectionPreview
 
         if !needsPipeline {
             imageView.image = baseImage
@@ -10317,10 +10776,37 @@ final class ImageSurfaceView: NSView {
                 )
             }
         }
-        guard let output = parameters.applying(to: current) else {
-            return nsImage(from: current)
+        if let output = parameters.applying(to: current) {
+            current = output
         }
-        return nsImage(from: output)
+        if let selectionMask, selectionDisplayMode != .none {
+            // Mask is in source pixel space; transform like the photo into the display frame.
+            let pipelineSource = quality == .preview ? (previewCIImage ?? baseCIImage) : baseCIImage
+            var maskCI = selectionMask.ciImageMatching(extent: pipelineSource.extent)
+            maskCI = Self.rotatedCIImage(maskCI, quarterTurns: quarterTurns)
+            maskCI = Self.flippedCIImage(maskCI, horizontal: flipHorizontal, vertical: flipVertical)
+            maskCI = Self.straightenedCIImage(maskCI, radians: straightenRadians)
+            if let cropNormalized, !ImageCropGeometry.isIdentity(cropNormalized) {
+                let size = CGSize(width: maskCI.extent.width, height: maskCI.extent.height)
+                let pixel = ImageCropGeometry.pixelRect(normalized: cropNormalized, imageSize: size)
+                let cropInExtent = pixel.offsetBy(dx: maskCI.extent.minX, dy: maskCI.extent.minY)
+                maskCI = maskCI.cropped(to: cropInExtent)
+                if maskCI.extent.origin != .zero {
+                    maskCI = maskCI.transformed(
+                        by: CGAffineTransform(translationX: -maskCI.extent.minX, y: -maskCI.extent.minY)
+                    )
+                }
+            }
+            current = SelectionCompositor.apply(
+                image: current,
+                maskCI: maskCI,
+                mode: selectionDisplayMode,
+                appearance: effectiveAppearance,
+                refine: selectionRefine,
+                antsPhase: marchingAntsPhase
+            )
+        }
+        return nsImage(from: current)
     }
 
     private func nsImage(from ciImage: CIImage) -> NSImage? {

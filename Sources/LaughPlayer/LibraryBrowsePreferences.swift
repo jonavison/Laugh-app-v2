@@ -148,14 +148,27 @@ struct LibraryBrowseTileMetrics: Equatable {
                 )
             }
         case .grid:
+            // Fixed size: GridLayout otherwise pairs narrow width with max height.
+            // Caption py matches Gallery (nameTop/metaBottom 6).
+            // Insets must match LibraryGridCardLayout in LibraryPanelView.
+            let previewInset: CGFloat = 6
+            let previewTop: CGFloat = 6
+            let nameTop: CGFloat = 6
+            let nameMetaSpacing: CGFloat = 2
+            let metaBottom: CGFloat = 6
+            let nameLine: CGFloat = 15
+            let metaLine: CGFloat = 13
+            let width: CGFloat = 172
+            let previewSide = width - previewInset * 2
+            let height = previewTop + previewSide + nameTop + nameLine + nameMetaSpacing + metaLine + metaBottom
             return LibraryBrowseTileMetrics(
-                minItemSize: NSSize(width: 160, height: 176),
-                maxItemSize: NSSize(width: 196, height: 200),
+                minItemSize: NSSize(width: width, height: height),
+                maxItemSize: NSSize(width: width, height: height),
                 interitemSpacing: 12,
                 lineSpacing: 12,
-                thumbHeight: 120,
-                folderIconPointSize: 52,
-                thumbnailMaxSide: 260,
+                thumbHeight: previewSide,
+                folderIconPointSize: 48,
+                thumbnailMaxSide: 320,
                 showsTitle: true,
                 contentInset: 16,
                 contentTopInset: 24

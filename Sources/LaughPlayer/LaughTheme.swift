@@ -89,6 +89,11 @@ enum LaughTheme {
         return blend(base, over: lift)
     }
 
+    /// Browse toolbar pills (Open, Play All, tabs, sort, search) — same plate as the left sidebar.
+    static func libraryToolbarPillFill(appearance: NSAppearance = NSApp.effectiveAppearance) -> NSColor {
+        librarySidebarBackground(appearance: appearance)
+    }
+
     /// Tailwind teal-400 — start of sidebar Recents/Library divider gradient.
     static var sidebarSeparatorGradientStart: NSColor {
         NSColor(calibratedRed: 45 / 255, green: 212 / 255, blue: 191 / 255, alpha: 1)

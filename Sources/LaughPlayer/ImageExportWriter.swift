@@ -36,6 +36,12 @@ enum ImageExportWriter {
         return "\(stem).jpg"
     }
 
+    static func suggestedCutoutFileName(for source: URL) -> String {
+        let base = source.deletingPathExtension().lastPathComponent
+        let stem = base.hasSuffix("-cutout") ? base : "\(base)-cutout"
+        return "\(stem).png"
+    }
+
     static func renderCGImage(
         sourceURL: URL,
         parameters: ImageAdjustParameters,
@@ -80,6 +86,90 @@ enum ImageExportWriter {
         let extent = ciImage.extent.integral
         guard extent.width > 1, extent.height > 1 else { return nil }
         return context.createCGImage(ciImage, from: extent)
+    }
+
+    /// Alpha PNG cutout of the subject matte. Writes a new file only — never overwrites the source.
+    static func renderCutoutCGImage(
+        sourceURL: URL,
+        parameters: ImageAdjustParameters,
+        selectionMask: SelectionMask,
+        quarterTurns: Int,
+        cropNormalized: CGRect? = nil,
+        straightenRadians: CGFloat = 0,
+        flipHorizontal: Bool = false,
+        flipVertical: Bool = false,
+        refine: SelectionRefineParameters = .identity
+    ) -> CGImage? {
+        let loaded = ImageDisplayLoader.loadDisplayImage(at: sourceURL, maxPixelSize: 16_000)
+        guard let nsImage = loaded?.image,
+              let tiff = nsImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let cgSource = bitmap.cgImage
+        else { return nil }
+
+        var ciImage = CIImage(cgImage: cgSource)
+        let sourceExtent = ciImage.extent
+        var maskCI = selectionMask.ciImageMatching(extent: sourceExtent)
+
+        ciImage = rotated(ciImage, quarterTurns: quarterTurns)
+        maskCI = rotated(maskCI, quarterTurns: quarterTurns)
+        ciImage = flipped(ciImage, horizontal: flipHorizontal, vertical: flipVertical)
+        maskCI = flipped(maskCI, horizontal: flipHorizontal, vertical: flipVertical)
+        ciImage = straightened(ciImage, radians: straightenRadians)
+        maskCI = straightened(maskCI, radians: straightenRadians)
+        if let cropNormalized, !ImageCropGeometry.isIdentity(cropNormalized) {
+            let size = CGSize(width: ciImage.extent.width, height: ciImage.extent.height)
+            let pixel = ImageCropGeometry.pixelRect(normalized: cropNormalized, imageSize: size)
+            let cropInExtent = pixel.offsetBy(dx: ciImage.extent.minX, dy: ciImage.extent.minY)
+            ciImage = ciImage.cropped(to: cropInExtent)
+            maskCI = maskCI.cropped(to: cropInExtent)
+            if ciImage.extent.origin != .zero {
+                let t = CGAffineTransform(
+                    translationX: -ciImage.extent.minX,
+                    y: -ciImage.extent.minY
+                )
+                ciImage = ciImage.transformed(by: t)
+                maskCI = maskCI.transformed(by: t)
+            }
+        }
+        if let adjusted = parameters.applying(to: ciImage) {
+            ciImage = adjusted
+        }
+
+        let cutoutMask = SelectionMask(
+            cgImage: selectionMask.cgImage,
+            extent: maskCI.extent,
+            confidence: selectionMask.confidence,
+            semanticClass: selectionMask.semanticClass,
+            source: selectionMask.source
+        )
+        // Use the already-transformed mask CI directly via a temporary CG render.
+        let context: CIContext
+        if let device = MTLCreateSystemDefaultDevice() {
+            context = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+        } else {
+            context = CIContext(options: [.cacheIntermediates: false])
+        }
+        let maskExtent = maskCI.extent.integral
+        guard let maskCG = context.createCGImage(maskCI, from: maskExtent) else { return nil }
+        let alignedMask = SelectionMask(
+            cgImage: maskCG,
+            extent: maskExtent,
+            confidence: cutoutMask.confidence,
+            semanticClass: cutoutMask.semanticClass,
+            source: cutoutMask.source
+        )
+        ciImage = SelectionCompositor.cutoutWithAlpha(image: ciImage, mask: alignedMask, refine: refine)
+
+        let extent = ciImage.extent.integral
+        guard extent.width > 1, extent.height > 1 else { return nil }
+        return context.createCGImage(
+            ciImage,
+            from: extent,
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB(),
+            deferred: false
+        )
     }
 
     static func write(_ image: CGImage, to url: URL, format: Format) throws {

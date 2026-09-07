@@ -12,6 +12,10 @@ let package = Package(
             targets: ["LaughPlayer"]
         )
     ],
+    dependencies: [
+        // MobileSAM CoreML runtime (Apache-2.0). Used by MobileSAMSelectionProvider.
+        .package(url: "https://github.com/john-rocky/SamKit.git", from: "1.0.0")
+    ],
     targets: [
         .target(
             name: "LibmpvEmbed",
@@ -27,7 +31,8 @@ let package = Package(
         .executableTarget(
             name: "LaughPlayer",
             dependencies: [
-                "LibmpvEmbed"
+                "LibmpvEmbed",
+                .product(name: "SAMKit", package: "SamKit")
             ],
             resources: [
                 .copy("Resources"),
@@ -42,7 +47,10 @@ let package = Package(
         ),
         .testTarget(
             name: "LaughPlayerTests",
-            dependencies: ["LaughPlayer"]
+            dependencies: ["LaughPlayer"],
+            exclude: [
+                "Fixtures"
+            ]
         )
     ]
 )

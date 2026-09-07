@@ -76,6 +76,18 @@ New interaction models, RAW pipeline, or ML.
 | W3-04 | Crop AI compositions | Crop | L | later | Depends on W3-03 + vision heuristics/ML |
 | W3-05 | Dodge & Burn | Retouch | L | partial | v1 = luminosity-range Amount/Range/Softness (no brush yet); painted D&B later |
 | W3-06 | Full Develop (whites/blacks + WB + optics as suite) | Develop | L | later | Bundle after Waves 1–2; not a single filter |
+| W3-07 | Selection foundation | Portrait / Select | M | done | `SelectionProvider` + `SelectionMask` + `ImageSelectionSession` (ADR 0005) |
+| W3-08 | Vision person select | Portrait | M | done | Baseline UI: views + F + global refine + cutout export. Vision is fallback only — not the precision ceiling |
+| W3-08a | Selection edge refine | Portrait | M | done | Smooth / Feather / Contrast / Shift Edge (polish after a strong matte) |
+| W3-08b | Local refine + decontam | Portrait | L | after 08c | Radius / Refine Edge brush / Decontaminate Colors — tune against SAM+boundary edges, not Vision |
+| W3-08c | SAM-class CoreML auto engine | Portrait / Select | L | next | **PR 1:** MobileSAM CoreML + Vision→+/−/box prompt + CI edge polish (no 2nd neural head). Blocking download; optional Wi‑Fi prefetch. Quarterly watch: EfficientSAM3 CoreML, SAM2 CoreML |
+| W3-08e | Measurement harness | Select | S | with 08c | Checked-in fixture eval so MobileSAM→EfficientSAM3/SAM2 swaps are an afternoon, not a project |
+| W3-11 | Point-prompt / text-prompt select | Select | L | edge bet | Same SAM conformer; real differentiation — schedule after still Auto Select is solid, before gold-plating parity polish |
+| W3-12 | Temporal / video matting | Select | L | later edge | SAM2-class when CoreML temporal is real; Mac differentiator |
+| W3-08d | Deperson session | Select | S | next (PR 2) | **PR 2 (immediately after 08c):** Remove person-hardcoding from `ImageSelectionSession`; bisectable from model integration |
+| W3-09 | Face / Body AI tools | Portrait | L | later | Consume `SelectionMask` where `class == .person` (and face subregions when available) |
+| W3-10 | CoreML semantic classes | Select | L | later | Optional class labels / hints only — not required for mask pipeline |
+| W3-11 | Point-prompt select | Select | L | later | Same SAM conformer; click/box prompt — no second model |
 
 ---
 
@@ -108,7 +120,7 @@ New interaction models, RAW pipeline, or ML.
 | Vignette | `circle.dashed` | Amount + midpoint |
 | Dodge & Burn | `paintbrush.pointed` | Amount (−dodge/+burn) + tonal range + softness |
 
-Coming-soon rows (Erase, Structure AI, Relight AI, Twilight/Atmosphere/Water AI, Portrait AI tools, Clone, etc.) reserve IA slots without controls yet.
+Coming-soon rows (Erase, Structure AI, Relight AI, Twilight/Atmosphere/Water AI, Portrait Face/Body/Bokeh AI, Clone, etc.) reserve IA slots without controls yet. **Subject Select** (Portrait) is available: Vision person matte, Select-and-Mask view modes (default Marching Ants + **F** cycle), edge refine (Smooth/Feather/Contrast/Shift Edge), and optional cutout PNG export.
 
 **Presets** tab: Looks / Mood / Film / Saved — only recipes over `ImageAdjustParameters`, no separate engine. **ImageUserPreset**s are named snapshots from the sidebar footer.
 
