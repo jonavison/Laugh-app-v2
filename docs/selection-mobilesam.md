@@ -26,3 +26,13 @@
 
 - EfficientSAM3 when CoreML export ships
 - SAM2 CoreML if MobileSAM measurement disappoints
+
+## Measurement
+
+```bash
+./scripts/measure-selection.sh           # Vision baseline
+./scripts/measure-selection.sh mobilesam # requires cached weights (no download in harness)
+```
+
+Swap providers by adding a `SelectionMeasurementTests` case; diff `[SEL-MEASURE] summary` lines.
+

@@ -85,7 +85,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## ImageSelectionSession
 
-`ImageSelectionSession` is the source of truth for the current **ImageMedia** selection matte: loading/error/download phase, display mode (Onion Skin / Marching Ants / Overlay / On Black / On White / Black & White / On Layers), `SelectionRefineParameters`, and cache invalidation on image change. It is separate from `ImageAdjustSession`. **Accurate Auto Select Person:** Vision rough matte → `SelectionPrompt` → MobileSAM matte; cancel download or CoreML miss → Vision matte fallback for that attempt. **Debt:** session still hardcodes person — clear in **W3-08d / PR 2**. Brush/decontam (**W3-08b**) waits until SAM edges exist. With a matte active, **F** cycles view modes (video still uses **F** for Fit/Fill). Default view is Marching Ants.
+`ImageSelectionSession` is the source of truth for the current **ImageMedia** selection matte: loading/error/download phase, display mode (Onion Skin / Marching Ants / Overlay / On Black / On White / Black & White / On Layers), `SelectionRefineParameters`, and cache invalidation on image change. It is separate from `ImageAdjustSession`. Session APIs are class-agnostic (`select(class:)`, `select(prompt:)`, `selectRegion`); **Auto Select Person** is a thin tool wrapper. Accurate person path: `SelectionPersonPromptAssist` (Vision rough → prompt) → MobileSAM; cancel/miss → Vision fallback. Brush/decontam (**W3-08b**) waits until SAM edges exist. With a matte active, **F** cycles view modes (video still uses **F** for Fit/Fill). Default view is Marching Ants.
 
 ## ImageDevelopTool
 
