@@ -82,12 +82,12 @@ New interaction models, RAW pipeline, or ML.
 | W3-08b | Local refine + decontam | Portrait | L | done | Paint In/Out/Refine Edge + radius cursor ring + interior-pull decontam on cutout |
 | W3-08c | SAM-class CoreML auto engine | Portrait / Select | L | done | **PR 1:** MobileSAM (SamKit) + Vision→+/−/box prompt + CI edge polish. Blocking download; cancel→Vision fallback. Quarterly watch: EfficientSAM3 CoreML, SAM2 CoreML |
 | W3-08e | Measurement harness | Select | S | done | `SelectionMeasurementTests` + `scripts/measure-selection.sh` — `[SEL-MEASURE]` coverage/softness/timing; MobileSAM when cached |
-| W3-11 | Point-prompt / text-prompt select | Select | L | edge bet | Same SAM conformer; real differentiation — schedule after still Auto Select is solid, before gold-plating parity polish |
+| W3-11 | Point-prompt / text-prompt select | Select | L | partial | Click/box point-prompt shipped (Click Select); text-prompt later |
 | W3-12 | Temporal / video matting | Select | L | later edge | SAM2-class when CoreML temporal is real; Mac differentiator |
 | W3-08d | Deperson session | Select | S | done | Session APIs class-agnostic; person prompt assist at tool layer (`SelectionPersonPromptAssist`) |
 | W3-09 | Face / Body AI tools | Portrait | L | later | Consume `SelectionMask` where `class == .person` (and face subregions when available) |
 | W3-10 | CoreML semantic classes | Select | L | later | Optional class labels / hints only — not required for mask pipeline |
-| W3-11 | Point-prompt select | Select | L | later | Same SAM conformer; click/box prompt — no second model |
+| W3-11 | Point-prompt select | Select | L | partial | Click Select (+/−/box) on MobileSAM; text later |
 
 ---
 

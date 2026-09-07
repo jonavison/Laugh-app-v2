@@ -41,6 +41,8 @@ final class ImageSelectionSession {
     private let cancelLock = NSLock()
     private var pendingImage: CIImage?
     private var lastSelectKind: SelectKind?
+    /// Accumulated click/box prompt for Click Select mode (cleared on Clear / Auto Select).
+    private var promptDraft = SelectionPrompt.empty
     private let brushContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
@@ -85,6 +87,7 @@ final class ImageSelectionSession {
     var currentRefine: SelectionRefineParameters { refine }
     var currentBrushMode: SelectionBrushMode { brushMode }
     var currentBrushRadius: CGFloat { brushRadius }
+    var currentPromptDraft: SelectionPrompt { promptDraft }
     var currentQuality: SelectionQuality { quality }
     var currentPhase: Phase { phase }
     var isSelecting: Bool {
@@ -192,6 +195,7 @@ final class ImageSelectionSession {
         pendingImage = image
         lastError = nil
         usedVisionFallback = false
+        promptDraft = prompt
         lastSelectKind = .prompt(prompt)
         notifyChrome()
         Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
@@ -199,17 +203,48 @@ final class ImageSelectionSession {
 
     /// Tool-layer convenience for Subject Select → Auto Select Person.
     func selectPerson(in image: CIImage) {
+        promptDraft = .empty
         select(in: image, class: .person)
     }
 
-    /// Point select — SAM when ready, else Vision region (person-capable providers).
+    /// Point select — SAM when ready (downloads if needed).
     func selectRegion(in image: CIImage, at point: CGPoint) {
+        clickSelect(in: image, at: point, negative: false, additive: false)
+    }
+
+    /// Click Select: positive/negative points with optional additive prompting.
+    func clickSelect(in image: CIImage, at point: CGPoint, negative: Bool, additive: Bool) {
         pendingImage = image
         lastError = nil
         usedVisionFallback = false
-        lastSelectKind = .region(point)
+        if !additive {
+            promptDraft = .empty
+        }
+        if negative {
+            promptDraft.negativePoints.append(point)
+        } else {
+            promptDraft.positivePoints.append(point)
+        }
+        let prompt = promptDraft
+        lastSelectKind = .prompt(prompt)
         notifyChrome()
-        Task { await runSelect(kind: .region(point), in: image, quality: .accurate, settleAccurate: false) }
+        Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
+    }
+
+    /// Box Select: axis-aligned box in source pixels (replaces draft unless additive).
+    func boxSelect(in image: CIImage, box: CGRect, additive: Bool) {
+        pendingImage = image
+        lastError = nil
+        usedVisionFallback = false
+        if !additive {
+            promptDraft = SelectionPrompt(positivePoints: [], negativePoints: [], box: box)
+        } else {
+            promptDraft.box = box
+        }
+        let prompt = promptDraft
+        lastSelectKind = .prompt(prompt)
+        notifyChrome()
+        Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
     }
 
     /// Cancel in-flight model download (triggers Vision matte fallback for person attempts).
@@ -237,6 +272,7 @@ final class ImageSelectionSession {
         refine = .identity
         brushMode = .refineEdge
         brushRadius = 24
+        promptDraft = .empty
         if notify {
             notifyChrome()
             onChange?(.accurate)
@@ -355,17 +391,17 @@ final class ImageSelectionSession {
             return try await visionProvider.selectClass(in: image, class: semanticClass, quality: requested)
 
         case .prompt(let prompt):
-            if requested == .accurate, modelStore.isReady(SelectionModelArtifact.mobileSAM) || allowsModelDownload {
-                _ = try await ensureModelIfNeeded(generation: gen)
-                do {
-                    return try await samProvider.select(in: image, prompt: prompt, quality: requested)
-                } catch {
-                    await MainActor.run { self.usedVisionFallback = true }
-                    if let point = prompt.positivePoints.first {
-                        return try await visionProvider.selectRegion(in: image, at: point, quality: requested)
-                    }
-                    throw error
+            if requested == .accurate {
+                let ready = try await ensureModelIfNeeded(generation: gen)
+                guard ready || modelStore.isReady(SelectionModelArtifact.mobileSAM) else {
+                    throw SelectionError.modelNotReady
                 }
+                await MainActor.run {
+                    guard gen == self.generation else { return }
+                    self.phase = .selecting
+                    self.notifyChrome()
+                }
+                return try await samProvider.select(in: image, prompt: prompt, quality: requested)
             }
             if let point = prompt.positivePoints.first {
                 return try await visionProvider.selectRegion(in: image, at: point, quality: requested)
@@ -373,15 +409,13 @@ final class ImageSelectionSession {
             throw SelectionError.emptyResult
 
         case .region(let point):
-            if requested == .accurate, modelStore.isReady(SelectionModelArtifact.mobileSAM) {
-                do {
-                    return try await samProvider.select(in: image, prompt: .point(point), quality: requested)
-                } catch {
-                    await MainActor.run { self.usedVisionFallback = true }
-                    return try await visionProvider.selectRegion(in: image, at: point, quality: requested)
-                }
-            }
-            return try await visionProvider.selectRegion(in: image, at: point, quality: requested)
+            // Prefer prompt path (downloads + SAM).
+            return try await performSelect(
+                kind: .prompt(.point(point)),
+                image: image,
+                quality: requested,
+                generation: gen
+            )
         }
     }
 

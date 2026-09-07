@@ -168,7 +168,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subjectSelectStatusLabel = NSTextField(labelWithString: "")
     private var subjectSelectRefineSettleWork: DispatchWorkItem?
     private var subjectSelectBrushEnabled = false
+    private var subjectSelectClickEnabled = false
     private let subjectSelectBrushToggle = NSButton(checkboxWithTitle: "Brush", target: nil, action: nil)
+    private let subjectSelectClickToggle = NSButton(checkboxWithTitle: "Click Select", target: nil, action: nil)
     private let imageStudioCommitFooter = ImageStudioCommitFooter()
     private var imageStudioCommitFooterHeightConstraint: NSLayoutConstraint?
     private var imageSavedPresetsHost = NSStackView()
@@ -557,6 +559,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 refine: self.imageSelectionSession.currentRefine,
                 quality: .full
             )
+        }
+        imageSurfaceView.onSelectionClick = { [weak self] point, negative, additive in
+            guard let self, let image = self.imageSurfaceView.selectionSourceCIImage else { return }
+            self.imageSelectionSession.clickSelect(
+                in: image,
+                at: point,
+                negative: negative,
+                additive: additive
+            )
+        }
+        imageSurfaceView.onSelectionBox = { [weak self] box, additive in
+            guard let self, let image = self.imageSurfaceView.selectionSourceCIImage else { return }
+            self.imageSelectionSession.boxSelect(in: image, box: box, additive: additive)
         }
 
         mediaLibraryController.delegate = self
@@ -5032,6 +5047,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectBrushToggle.action = #selector(subjectSelectBrushToggleChanged)
         subjectSelectBrushToggle.font = .systemFont(ofSize: 12)
         subjectSelectBrushToggle.focusRingType = .none
+        subjectSelectClickToggle.target = self
+        subjectSelectClickToggle.action = #selector(subjectSelectClickToggleChanged)
+        subjectSelectClickToggle.font = .systemFont(ofSize: 12)
+        subjectSelectClickToggle.focusRingType = .none
         for label in [
             subjectSelectSmoothValue,
             subjectSelectFeatherValue,
@@ -5087,6 +5106,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         brushRow.orientation = .horizontal
         brushRow.alignment = .centerY
         brushRow.spacing = 8
+        brushRow.addArrangedSubview(subjectSelectClickToggle)
         brushRow.addArrangedSubview(subjectSelectBrushToggle)
         brushRow.addArrangedSubview(subjectSelectBrushModeControl)
         card.addRow(SettingsRowFactory.fullWidthRow(brushRow))
@@ -5161,7 +5181,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     @objc private func subjectSelectBrushToggleChanged() {
         subjectSelectBrushEnabled = subjectSelectBrushToggle.state == .on
+        if subjectSelectBrushEnabled {
+            subjectSelectClickEnabled = false
+            subjectSelectClickToggle.state = .off
+            imageSurfaceView.setSelectionClickEnabled(false)
+        }
         imageSurfaceView.setSelectionBrushEnabled(subjectSelectBrushEnabled)
+        refreshSubjectSelectChrome()
+    }
+
+    @objc private func subjectSelectClickToggleChanged() {
+        subjectSelectClickEnabled = subjectSelectClickToggle.state == .on
+        if subjectSelectClickEnabled {
+            subjectSelectBrushEnabled = false
+            subjectSelectBrushToggle.state = .off
+            imageSurfaceView.setSelectionBrushEnabled(false)
+        }
+        imageSurfaceView.setSelectionClickEnabled(subjectSelectClickEnabled)
         refreshSubjectSelectChrome()
     }
 
@@ -5224,9 +5260,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectContrastSlider.isEnabled = refineEnabled
         subjectSelectShiftSlider.isEnabled = refineEnabled
         subjectSelectDecontamSlider.isEnabled = refineEnabled
-        subjectSelectBrushToggle.isEnabled = hasMask && !loading
-        subjectSelectBrushModeControl.isEnabled = hasMask && !loading && subjectSelectBrushEnabled
-        subjectSelectBrushRadiusSlider.isEnabled = hasMask && !loading && subjectSelectBrushEnabled
+        subjectSelectBrushToggle.isEnabled = !loading
+        subjectSelectClickToggle.isEnabled = !loading
+        subjectSelectBrushModeControl.isEnabled = !loading && subjectSelectBrushEnabled
+        subjectSelectBrushRadiusSlider.isEnabled = !loading && subjectSelectBrushEnabled
         if !hasMask, subjectSelectBrushEnabled {
             subjectSelectBrushEnabled = false
             subjectSelectBrushToggle.state = .off
@@ -5272,10 +5309,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 engineNote = ""
             }
-            let brushNote = subjectSelectBrushEnabled
-                ? " Brush: \(imageSelectionSession.currentBrushMode.menuTitle)."
-                : ""
+            let brushNote: String
+            if subjectSelectClickEnabled {
+                let draft = imageSelectionSession.currentPromptDraft
+                brushNote = " Click Select: click +, ⌥ −, ⇧ add; drag box. (\(draft.positivePoints.count)+ / \(draft.negativePoints.count)−)."
+            } else if subjectSelectBrushEnabled {
+                brushNote = " Brush: \(imageSelectionSession.currentBrushMode.menuTitle)."
+            } else {
+                brushNote = ""
+            }
             subjectSelectStatusLabel.stringValue = "\(engineNote)\(mode.menuTitle) — press F to cycle views.\(brushNote) Display-only."
+            subjectSelectStatusLabel.textColor = .secondaryLabelColor
+        } else if subjectSelectClickEnabled {
+            subjectSelectStatusLabel.stringValue = "Click Select: click object (+), ⌥-click (−), ⇧ to add; drag for box. Downloads MobileSAM if needed."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else {
             subjectSelectStatusLabel.stringValue = "Select a person matte for cutout preview. Face / Body tools will use this later."
@@ -5294,7 +5340,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         case .unsupportedClass(let cls):
             return "“\(cls.rawValue)” is not available yet."
         case .modelNotReady:
-            return "Selection model isn’t downloaded yet."
+            return "Selection model isn’t ready — run Auto Select or Click Select to download MobileSAM."
         }
     }
 
@@ -10128,6 +10174,10 @@ final class ImageSurfaceView: NSView {
     /// Selection brush stroke in source pixel space (when brush enabled).
     var onSelectionBrushStroke: ((CGPoint) -> Void)?
     var onSelectionBrushStrokeEnded: (() -> Void)?
+    /// Click Select: point in source pixels, negative flag, additive flag.
+    var onSelectionClick: ((CGPoint, Bool, Bool) -> Void)?
+    /// Click Select box in source pixels.
+    var onSelectionBox: ((CGRect, Bool) -> Void)?
 
     private let imageView = NSImageView()
     private let cropOverlay = ImageCropOverlayView()
@@ -10158,12 +10208,17 @@ final class ImageSurfaceView: NSView {
     private var marchingAntsPhase: CGFloat = 0
     private var marchingAntsTimer: Timer?
     private var selectionBrushEnabled = false
+    private var selectionClickEnabled = false
     private var selectionBrushRadius: CGFloat = 24
     private var isBrushing = false
     private var lastBrushPixelPoint: CGPoint?
     private var brushCursorViewPoint: CGPoint?
     private var brushTrackingArea: NSTrackingArea?
     private let brushRingLayer = CAShapeLayer()
+    private var clickDragStartView: CGPoint?
+    private var clickDragStartPixel: CGPoint?
+    private var clickDragCurrentView: CGPoint?
+    private let clickBoxLayer = CAShapeLayer()
     /// Offset from centered fit frame while zoomed in (points).
     private var panOffset: CGPoint = .zero
     private var isPanning = false
@@ -10171,6 +10226,7 @@ final class ImageSurfaceView: NSView {
     private var panGestureStartOffset: CGPoint = .zero
     private static let minZoom: CGFloat = 0.2
     private static let maxZoom: CGFloat = 24.0
+    private static let boxDragThresholdPoints: CGFloat = 8
     /// Metal-backed when available — better quality/perf for interactive preview.
     private let ciContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
@@ -10200,6 +10256,14 @@ final class ImageSurfaceView: NSView {
         brushRingLayer.isHidden = true
         brushRingLayer.zPosition = 50
         layer?.addSublayer(brushRingLayer)
+
+        clickBoxLayer.fillColor = LaughTheme.interactiveAccent.withAlphaComponent(0.12).cgColor
+        clickBoxLayer.strokeColor = LaughTheme.interactiveAccent.withAlphaComponent(0.95).cgColor
+        clickBoxLayer.lineWidth = 1.0
+        clickBoxLayer.lineDashPattern = [4, 3]
+        clickBoxLayer.isHidden = true
+        clickBoxLayer.zPosition = 51
+        layer?.addSublayer(clickBoxLayer)
 
         cropOverlay.translatesAutoresizingMaskIntoConstraints = false
         cropOverlay.isHidden = true
@@ -10360,6 +10424,10 @@ final class ImageSurfaceView: NSView {
             addCursorRect(bounds, cursor: .crosshair)
             return
         }
+        if selectionClickEnabled {
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if canPanImage {
             addCursorRect(bounds, cursor: isPanning ? .closedHand : .openHand)
         }
@@ -10371,7 +10439,7 @@ final class ImageSurfaceView: NSView {
             removeTrackingArea(brushTrackingArea)
             self.brushTrackingArea = nil
         }
-        guard selectionBrushEnabled else { return }
+        guard selectionBrushEnabled || selectionClickEnabled else { return }
         let options: NSTrackingArea.Options = [
             .mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect
         ]
@@ -10431,6 +10499,7 @@ final class ImageSurfaceView: NSView {
         if event.clickCount == 2 {
             isPanning = false
             isBrushing = false
+            clearClickDrag()
             onDoubleClick?()
             return
         }
@@ -10442,6 +10511,16 @@ final class ImageSurfaceView: NSView {
                 isBrushing = true
                 lastBrushPixelPoint = pixel
                 onSelectionBrushStroke?(pixel)
+                return
+            }
+        }
+        if selectionClickEnabled {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if let pixel = selectionPixelPoint(fromViewPoint: viewPoint) {
+                clickDragStartView = viewPoint
+                clickDragStartPixel = pixel
+                clickDragCurrentView = viewPoint
+                updateClickBoxOverlay()
                 return
             }
         }
@@ -10473,6 +10552,12 @@ final class ImageSurfaceView: NSView {
             onSelectionBrushStroke?(pixel)
             return
         }
+        if clickDragStartView != nil {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            clickDragCurrentView = viewPoint
+            updateClickBoxOverlay()
+            return
+        }
         guard isPanning else {
             super.mouseDragged(with: event)
             return
@@ -10493,6 +10578,32 @@ final class ImageSurfaceView: NSView {
             isBrushing = false
             lastBrushPixelPoint = nil
             onSelectionBrushStrokeEnded?()
+            return
+        }
+        if let startView = clickDragStartView, let startPixel = clickDragStartPixel {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            let dragDist = hypot(viewPoint.x - startView.x, viewPoint.y - startView.y)
+            let flags = event.modifierFlags.intersection([.shift, .option])
+            let additive = flags.contains(.shift)
+            let negative = flags.contains(.option)
+            if dragDist >= Self.boxDragThresholdPoints,
+               let endPixel = selectionPixelPoint(fromViewPoint: viewPoint)
+            {
+                let box = CGRect(
+                    x: min(startPixel.x, endPixel.x),
+                    y: min(startPixel.y, endPixel.y),
+                    width: abs(endPixel.x - startPixel.x),
+                    height: abs(endPixel.y - startPixel.y)
+                )
+                if box.width > 2, box.height > 2 {
+                    onSelectionBox?(box, additive)
+                } else {
+                    onSelectionClick?(startPixel, negative, additive)
+                }
+            } else {
+                onSelectionClick?(startPixel, negative, additive)
+            }
+            clearClickDrag()
             return
         }
         if isPanning {
@@ -10567,6 +10678,7 @@ final class ImageSurfaceView: NSView {
 
     func setSelectionBrushEnabled(_ enabled: Bool) {
         selectionBrushEnabled = enabled
+        if enabled { selectionClickEnabled = false }
         if !enabled {
             isBrushing = false
             lastBrushPixelPoint = nil
@@ -10580,9 +10692,49 @@ final class ImageSurfaceView: NSView {
         window?.invalidateCursorRects(for: self)
     }
 
+    func setSelectionClickEnabled(_ enabled: Bool) {
+        selectionClickEnabled = enabled
+        if enabled {
+            selectionBrushEnabled = false
+            brushRingLayer.isHidden = true
+        }
+        if !enabled {
+            clearClickDrag()
+        }
+        updateTrackingAreas()
+        window?.invalidateCursorRects(for: self)
+    }
+
     func setSelectionBrushRadius(_ radius: CGFloat) {
         selectionBrushRadius = min(120, max(4, radius))
         updateBrushRing()
+    }
+
+    private func clearClickDrag() {
+        clickDragStartView = nil
+        clickDragStartPixel = nil
+        clickDragCurrentView = nil
+        clickBoxLayer.isHidden = true
+        clickBoxLayer.path = nil
+    }
+
+    private func updateClickBoxOverlay() {
+        guard let start = clickDragStartView, let current = clickDragCurrentView else {
+            clickBoxLayer.isHidden = true
+            return
+        }
+        let rect = CGRect(
+            x: min(start.x, current.x),
+            y: min(start.y, current.y),
+            width: abs(current.x - start.x),
+            height: abs(current.y - start.y)
+        )
+        guard rect.width >= Self.boxDragThresholdPoints || rect.height >= Self.boxDragThresholdPoints else {
+            clickBoxLayer.isHidden = true
+            return
+        }
+        clickBoxLayer.path = CGPath(rect: rect, transform: nil)
+        clickBoxLayer.isHidden = false
     }
 
     /// View-space radius matching `selectionBrushRadius` image pixels on the fitted photo.
