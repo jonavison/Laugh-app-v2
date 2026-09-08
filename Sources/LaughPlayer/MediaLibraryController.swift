@@ -20,7 +20,10 @@ final class MediaLibraryController {
         case none
         case recentHeader
         case favoritesHeader
-        case root(MediaLibraryRoot)
+        /// Browsing a directory. `root` is the library root it sits under, or `nil` when the
+        /// folder is outside every root — where Recents and Finder opens land, since neither
+        /// is confined to the library.
+        case folder(root: MediaLibraryRoot?)
     }
 
     static let recentPreviewLimit = 5
@@ -59,7 +62,10 @@ final class MediaLibraryController {
     func reloadRoots() {
         roots = MediaLibraryRoots.allRoots()
         recentPreviewItems = RecentlyViewedStore.shared.sidebarPreview()
-        if !isSidebarRowSelectable(selectedSidebarRow) {
+        if case .folder(root: nil) = sidebarMode, currentDirectoryURL != nil {
+            // A root-less folder browse has no sidebar row to validate against — keep it.
+            reloadGrid()
+        } else if !isSidebarRowSelectable(selectedSidebarRow) {
             clearSidebarSelection()
         } else {
             reloadGrid()
@@ -125,7 +131,9 @@ final class MediaLibraryController {
         switch sidebarRow {
         case .recentItem(let file):
             openMedia(file)
-            clearSidebarSelection()
+            // Follow the file into its folder rather than emptying browse: a recent file is
+            // the one piece of context the user just gave us about where they are working.
+            revealFolder(file.url.deletingLastPathComponent())
             return
         case .librarySectionHeader, .librarySeparator:
             return
@@ -145,7 +153,7 @@ final class MediaLibraryController {
             clearSearchAndFilters(notify: false)
         case .root(let root):
             selectedSidebarRow = row
-            sidebarMode = .root(root)
+            sidebarMode = .folder(root: root)
             currentDirectoryURL = root.directoryURL
             backStack = []
             forwardStack = []
@@ -165,7 +173,7 @@ final class MediaLibraryController {
             sourceEntries = recentBrowseEntries()
         case .favoritesHeader:
             sourceEntries = favoriteBrowseEntries()
-        case .root:
+        case .folder:
             guard let directory = currentDirectoryURL else {
                 sourceEntries = []
                 break
@@ -173,7 +181,7 @@ final class MediaLibraryController {
             sourceEntries = MediaLibraryScanner.browseEntries(in: directory)
         }
 
-        if case .root = sidebarMode {
+        if case .folder = sidebarMode {
             sourceEntries = LibraryBrowseItemSorter.sorted(sourceEntries, by: browseSort)
         }
 
@@ -323,7 +331,7 @@ final class MediaLibraryController {
     }
 
     func goBack() {
-        guard case .root = sidebarMode, let current = currentDirectoryURL, let previous = backStack.popLast() else { return }
+        guard case .folder = sidebarMode, let current = currentDirectoryURL, let previous = backStack.popLast() else { return }
         forwardStack.append(current)
         currentDirectoryURL = previous
         clearSearchAndFilters(notify: false)
@@ -333,7 +341,7 @@ final class MediaLibraryController {
     }
 
     func goForward() {
-        guard case .root = sidebarMode, let current = currentDirectoryURL, let next = forwardStack.popLast() else { return }
+        guard case .folder = sidebarMode, let current = currentDirectoryURL, let next = forwardStack.popLast() else { return }
         backStack.append(current)
         currentDirectoryURL = next
         clearSearchAndFilters(notify: false)
@@ -343,7 +351,7 @@ final class MediaLibraryController {
     }
 
     func navigateTo(_ url: URL, pushingCurrent: Bool) {
-        guard case .root = sidebarMode else { return }
+        guard case .folder = sidebarMode else { return }
         if pushingCurrent, let current = currentDirectoryURL {
             backStack.append(current)
             forwardStack.removeAll()
@@ -356,15 +364,9 @@ final class MediaLibraryController {
     }
 
     func jumpToBreadcrumb(_ url: URL) {
-        guard case .root(let root) = sidebarMode else { return }
-        var newBack: [URL] = []
-        let components = breadcrumbPathComponents(root: root, current: url)
-        if components.count > 1 {
-            for i in 0..<(components.count - 1) {
-                newBack.append(components[i].url)
-            }
-        }
-        backStack = newBack
+        guard case .folder(let root) = sidebarMode else { return }
+        let components = breadcrumbTrail(root: root, current: url)
+        backStack = components.dropLast().map(\.url)
         forwardStack = []
         currentDirectoryURL = url
         clearSearchAndFilters(notify: false)
@@ -375,6 +377,53 @@ final class MediaLibraryController {
 
     func openFolder(_ url: URL) {
         navigateTo(url, pushingCurrent: true)
+    }
+
+    /// Point browse at `folder`, selecting the library root that contains it when there is
+    /// one. A folder outside every root is browsed on its own, with no sidebar row selected:
+    /// Recents and Finder opens reach files anywhere, and landing the user on an unrelated
+    /// library root instead of the folder they just opened from is worse than no selection.
+    func revealFolder(_ folder: URL) {
+        let target = folder.resolvingSymlinksInPath().standardizedFileURL
+
+        if let root = Self.root(containing: target, in: roots),
+           let index = roots.firstIndex(where: { $0.id == root.id }) {
+            selectSidebarRow(firstRootRowIndex() + index)
+            let current = currentDirectoryURL?.resolvingSymlinksInPath().standardizedFileURL
+            if current != target {
+                // Pushing the root keeps Back going up to the root listing.
+                navigateTo(target, pushingCurrent: true)
+            } else {
+                reloadGrid()
+                onChange?()
+            }
+            return
+        }
+
+        selectedSidebarRow = Self.noSelectionRow
+        sidebarMode = .folder(root: nil)
+        currentDirectoryURL = target
+        backStack = []
+        forwardStack = []
+        clearSearchAndFilters(notify: false)
+        clearMultiSelection(notify: false)
+        reloadGrid()
+        onChange?()
+    }
+
+    /// Deepest root containing `folder` (or equal to it); `nil` when none do.
+    static func root(containing folder: URL, in roots: [MediaLibraryRoot]) -> MediaLibraryRoot? {
+        let path = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        return roots
+            .filter { root in
+                let rootPath = root.directoryURL.resolvingSymlinksInPath().standardizedFileURL.path
+                return path == rootPath
+                    || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+            }
+            .max { lhs, rhs in
+                lhs.directoryURL.standardizedFileURL.path.count
+                    < rhs.directoryURL.standardizedFileURL.path.count
+            }
     }
 
     func openMedia(_ file: LibraryMediaFile) {
@@ -539,7 +588,7 @@ final class MediaLibraryController {
     }
 
     var showsFolderBrowseChrome: Bool {
-        if case .root = sidebarMode { return true }
+        if case .folder = sidebarMode { return true }
         return false
     }
 
@@ -582,7 +631,7 @@ final class MediaLibraryController {
             return RecentlyViewedStore.shared.mediaFiles()
         case .favoritesHeader:
             return ImageLibraryMetaStore.favoritedImageFiles()
-        case .root:
+        case .folder:
             guard let targetDirectory = directory ?? currentDirectoryURL else { return [] }
             let entries = MediaLibraryScanner.browseEntries(in: targetDirectory)
             return LibraryBrowseItemSorter.sorted(entries, by: browseSort).compactMap { entry in
@@ -611,7 +660,7 @@ final class MediaLibraryController {
 
     /// Sort control for folder browse only (recents/favorites stay fixed order).
     var showsBrowseSortControl: Bool {
-        if case .root = sidebarMode { return !sourceEntries.isEmpty || isFiltering }
+        if case .folder = sidebarMode { return !sourceEntries.isEmpty || isFiltering }
         return false
     }
 
@@ -624,7 +673,7 @@ final class MediaLibraryController {
         case .favoritesHeader:
             if isFiltering { return "No matches" }
             return "No favorite images"
-        case .root:
+        case .folder:
             if isFiltering { return "No matches" }
             return "Empty folder"
         }
@@ -638,10 +687,45 @@ final class MediaLibraryController {
             return [(title: "Recents", url: nil)]
         case .favoritesHeader:
             return [(title: "Favorites", url: nil)]
-        case .root(let root):
-            guard let current = currentDirectoryURL else { return [(title: root.displayName, url: root.directoryURL)] }
-            return breadcrumbPathComponents(root: root, current: current).map { (title: $0.title, url: $0.url) }
+        case .folder(let root):
+            guard let current = currentDirectoryURL else {
+                guard let root else { return [] }
+                return [(title: root.displayName, url: root.directoryURL)]
+            }
+            return breadcrumbTrail(root: root, current: current).map { (title: $0.title, url: $0.url) }
         }
+    }
+
+    private func breadcrumbTrail(root: MediaLibraryRoot?, current: URL) -> [(title: String, url: URL)] {
+        guard let root else { return Self.folderBreadcrumbTrail(for: current) }
+        return breadcrumbPathComponents(root: root, current: current)
+    }
+
+    /// Trail for a folder with no library root above it. Anchored at the home directory when
+    /// the folder sits inside it, so it reads like the Finder path instead of starting at `/`.
+    static func folderBreadcrumbTrail(
+        for folder: URL,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [(title: String, url: URL)] {
+        let target = folder.standardizedFileURL
+        let homeURL = home.standardizedFileURL
+        let anchor: URL
+        if target.path == homeURL.path || target.path.hasPrefix(homeURL.path + "/") {
+            anchor = homeURL
+        } else {
+            anchor = URL(fileURLWithPath: "/", isDirectory: true)
+        }
+
+        var trail: [(title: String, url: URL)] = [
+            (title: anchor.path == "/" ? "Computer" : anchor.lastPathComponent, url: anchor)
+        ]
+        var url = anchor
+        let remainder = target.path.dropFirst(anchor.path == "/" ? 1 : anchor.path.count)
+        for part in remainder.split(separator: "/") {
+            url = url.appendingPathComponent(String(part), isDirectory: true)
+            trail.append((title: String(part), url: url))
+        }
+        return trail
     }
 
     private func breadcrumbPathComponents(root: MediaLibraryRoot, current: URL) -> [(title: String, url: URL)] {

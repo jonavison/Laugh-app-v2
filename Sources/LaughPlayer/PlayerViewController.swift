@@ -236,6 +236,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let renderMonitor = PlaybackRenderMonitor()
     private let compatibilityBanner = CompatibilityBannerView()
     private var currentMediaURL: URL?
+    /// Set when media is opened, cleared once folder management has been scoped to its
+    /// folder — so the reveal happens on the first visit and never fights later browsing.
+    private var pendingLibraryFolderReveal = false
     /// User-selected file (used for cache/fallback lookup while a remuxed temp file plays).
     private var playbackSourceURL: URL?
     /// File path actually loaded in AVPlayer (may be a LaughPlayerFallback temp copy).
@@ -1195,6 +1198,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             userDisabledSubtitlesForSourcePath = nil
         }
         currentMediaURL = url
+        pendingLibraryFolderReveal = true
         if isVideoFileURL(url) {
             activeMediaKind = .video
         }
@@ -1948,6 +1952,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             playbackHistory.append(currentMediaURL)
         }
         currentMediaURL = url
+        pendingLibraryFolderReveal = true
         playbackSourceURL = nil
         activePlaybackFileURL = nil
         stopMpvBackend()
@@ -7608,11 +7613,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         librarySidebar.reloadRoots()
         // Grid scan can be slow for large folders — keep UI responsive at launch.
         switch mediaLibraryController.sidebarMode {
-        case .root where mediaLibraryController.currentDirectoryURL != nil,
+        case .folder where mediaLibraryController.currentDirectoryURL != nil,
              .recentHeader,
              .favoritesHeader:
             libraryBrowse.reloadContent()
-        case .none, .root:
+        case .none, .folder:
             libraryBrowse.refresh()
         }
         playerSurfaceView.isHidden = true
@@ -7692,43 +7697,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         view.layoutSubtreeIfNeeded()
     }
 
-    /// Select the library root + browse directory that contains the playing file (e.g. after Recents).
+    /// Point folder management at the open file's folder, whether or not it lives under a
+    /// library root. Runs once per opened file: after that, wherever the user browsed to is
+    /// where reopening the panel leaves them.
     private func revealCurrentMediaFolderInLibrary() {
         libraryBrowse.isHidden = false
+        guard pendingLibraryFolderReveal else { return }
         guard let mediaURL = currentMediaURL ?? activePlaybackFileURL else {
             selectFallbackLibrarySidebarDestination()
             return
         }
+        pendingLibraryFolderReveal = false
         let folder = mediaURL.resolvingSymlinksInPath().standardizedFileURL.deletingLastPathComponent()
-        let folderPath = folder.path
-
-        let match = mediaLibraryController.roots
-            .map { root -> (MediaLibraryRoot, URL) in
-                (root, root.directoryURL.resolvingSymlinksInPath().standardizedFileURL)
-            }
-            .filter { _, rootURL in
-                folderPath == rootURL.path
-                    || folderPath.hasPrefix(rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/")
-            }
-            .max(by: { $0.1.path.count < $1.1.path.count })
-
-        if let (root, _) = match,
-           let index = mediaLibraryController.roots.firstIndex(where: { $0.id == root.id }) {
-            let row = mediaLibraryController.firstRootRowIndex() + index
-            mediaLibraryController.selectSidebarRow(row)
-            let current = mediaLibraryController.currentDirectoryURL?
-                .resolvingSymlinksInPath()
-                .standardizedFileURL
-            if current != folder {
-                mediaLibraryController.openFolder(folder)
-            } else {
-                mediaLibraryController.reloadGrid()
-                mediaLibraryController.onChange?()
-            }
-            return
-        }
-
-        selectFallbackLibrarySidebarDestination()
+        mediaLibraryController.revealFolder(folder)
     }
 
     private func selectFallbackLibrarySidebarDestination() {
@@ -7744,7 +7725,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         guard activeMediaKind != .empty else { return }
 
         switch mediaLibraryController.sidebarMode {
-        case .root, .recentHeader, .favoritesHeader:
+        case .folder, .recentHeader, .favoritesHeader:
             if playbackLibraryOverlay == .sidebarOnly {
                 expandPlaybackLibraryBrowse()
             }
