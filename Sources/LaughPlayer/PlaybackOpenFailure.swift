@@ -22,6 +22,9 @@ enum PlaybackErrorFormatter {
         case missingFile
         case unsupportedOrUnreadable
         case remuxFailed
+        /// File exists but its container header is missing, zeroed, or unreadable —
+        /// typical of a torrent still downloading, or a truncated/corrupt file.
+        case incompleteOrDamaged
         case decoderUnavailable
         case noVideoTrack
         case genericPlayback
@@ -58,10 +61,25 @@ enum PlaybackErrorFormatter {
                 message: userMessage(kind: .missingFile, url: url, detail: nil)
             )
         }
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: url) {
+            return incompleteOrDamagedNotice(for: url)
+        }
         return PlaybackUserNotice(
             kind: .remuxFailed,
             message: userMessage(kind: .remuxFailed, url: url, detail: nil)
         )
+    }
+
+    static func incompleteOrDamagedNotice(for url: URL) -> PlaybackUserNotice {
+        PlaybackUserNotice(
+            kind: .incompleteOrDamaged,
+            message: userMessage(kind: .incompleteOrDamaged, url: url, detail: nil)
+        )
+    }
+
+    /// Kept for call sites that named the torrent case; same notice as `incompleteOrDamagedNotice`.
+    static func incompleteDownloadNotice(for url: URL) -> PlaybackUserNotice {
+        incompleteOrDamagedNotice(for: url)
     }
 
     static func remuxFailedMessage(for url: URL) -> String {
@@ -204,6 +222,8 @@ enum PlaybackErrorFormatter {
                 message += "\n\nTip: set LAUGH_ENABLE_HEAVY_TRANSCODE=1 for a slower full-convert fallback."
             }
             return message
+        case .incompleteOrDamaged:
+            return "This video's file header looks missing or damaged — often a download that hasn't finished, or a corrupt file. Wait for the download to finish (or re-download), then open it again."
         case .decoderUnavailable:
             return "This video needs LaughPlayer's compatibility tools, which aren't available in this build."
         case .noVideoTrack:

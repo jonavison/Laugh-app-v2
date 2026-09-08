@@ -3582,6 +3582,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         let activeGeneration = generation ?? videoLoadGeneration
 
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+            leavePlaybackPrepareUI()
+            showCompatibilityFailure(PlaybackErrorFormatter.incompleteOrDamagedNotice(for: inputURL))
+            PlaybackTrace.emit("[DEBUG-fallback] unreadable container header path=\(inputURL.path)")
+            return
+        }
+
         if !isMutedForSwitch {
             preparePlayerForVideoSwitch()
         }
@@ -3790,9 +3797,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 self.fallbackInProgress = false
                 guard let result else {
                     self.leavePlaybackPrepareUI()
-                    if !plannedRoute {
-                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
-                    }
+                    // Planned remux (MKV etc.) used to swallow this, so a bad open looked
+                    // like "buffering then nothing" with no banner.
+                    self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
                     self.fallbackLastMethod = nil
@@ -3976,9 +3983,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 self.fallbackInProgress = false
                 guard let result else {
                     self.leavePlaybackPrepareUI()
-                    if !plannedRoute {
-                        self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
-                    }
+                    // Planned remux (MKV etc.) used to swallow this, so a still-downloading
+                    // torrent looked like "buffering then nothing" with no banner.
+                    self.showCompatibilityFailure(PlaybackErrorFormatter.remuxFailedNotice(for: inputURL))
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
                     self.fallbackLastMethod = nil
