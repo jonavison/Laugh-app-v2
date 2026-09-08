@@ -29,6 +29,8 @@ final class NativeSubtitleOverlay: NSObject {
     /// Only hide AVPlayer's renderer after the overlay has received subtitle text.
     private var suppressesPlayerSubtitleRendering = false
     private var sidecarCues: [SidecarSubtitleCue] = []
+    /// Italic runs of the displayed text, from markup the source track left in the cue body.
+    private var italicRanges: [NSRange] = []
 
     func install(in host: NSView) {
         guard hostView !== host else { return }
@@ -108,10 +110,10 @@ final class NativeSubtitleOverlay: NSObject {
             return
         }
         let adjusted = timeSec + store.subtitleDelaySec
-        let text = SidecarSubtitleLoader.text(at: adjusted, in: sidecarCues)
-        textField.stringValue = text
+        let raw = SidecarSubtitleLoader.text(at: adjusted, in: sidecarCues)
+        setDisplayedText(raw)
         applyVisualStyle(from: store)
-        containerView.isHidden = text.isEmpty
+        containerView.isHidden = textField.stringValue.isEmpty
         raiseAboveVideo()
     }
 
@@ -180,7 +182,14 @@ final class NativeSubtitleOverlay: NSObject {
         if plain.isEmpty {
             textField.attributedStringValue = NSAttributedString()
         } else {
-            textField.attributedStringValue = NSAttributedString(string: plain, attributes: attrs)
+            let styled = NSMutableAttributedString(string: plain, attributes: attrs)
+            let bounds = NSRange(location: 0, length: (plain as NSString).length)
+            for range in italicRanges {
+                let clamped = NSIntersectionRange(range, bounds)
+                guard clamped.length > 0 else { continue }
+                styled.addAttribute(.obliqueness, value: 0.2, range: clamped)
+            }
+            textField.attributedStringValue = styled
         }
 
         updateVerticalPosition(userPosition: store.subtitlePosition)
@@ -213,7 +222,15 @@ final class NativeSubtitleOverlay: NSObject {
     private func clearDisplayedText() {
         textField.stringValue = ""
         textField.attributedStringValue = NSAttributedString()
+        italicRanges = []
         containerView.isHidden = true
+    }
+
+    /// Strips inline markup the source track left in the cue body before it can draw as text.
+    private func setDisplayedText(_ raw: String) {
+        let parsed = SubtitleMarkup.parse(raw)
+        textField.stringValue = parsed.text
+        italicRanges = parsed.italicRanges
     }
 
     private func attach(to item: AVPlayerItem) {
@@ -270,9 +287,9 @@ extension NativeSubtitleOverlay: AVPlayerItemLegibleOutputPushDelegate {
             if !text.isEmpty {
                 self.beginStyledCapture()
             }
-            self.textField.stringValue = text
+            self.setDisplayedText(text)
             self.applyVisualStyle(from: SettingsStore.shared)
-            self.containerView.isHidden = text.isEmpty
+            self.containerView.isHidden = self.textField.stringValue.isEmpty
             self.raiseAboveVideo()
         }
     }
