@@ -238,6 +238,28 @@ protocol BatchPromptSelecting: AnyObject {
         prompts: [SelectionPrompt],
         quality: SelectionQuality
     ) async throws -> [SelectionMask?]
+
+    /// As above, reporting how many prompts have finished so a caller can narrate the wait.
+    /// `onProgress` may arrive on any thread; the default implementation reports once at the end.
+    func select(
+        in image: CIImage,
+        prompts: [SelectionPrompt],
+        quality: SelectionQuality,
+        onProgress: @escaping @Sendable (Int) -> Void
+    ) async throws -> [SelectionMask?]
+}
+
+extension BatchPromptSelecting {
+    func select(
+        in image: CIImage,
+        prompts: [SelectionPrompt],
+        quality: SelectionQuality,
+        onProgress: @escaping @Sendable (Int) -> Void
+    ) async throws -> [SelectionMask?] {
+        let masks = try await select(in: image, prompts: prompts, quality: quality)
+        onProgress(masks.count)
+        return masks
+    }
 }
 
 /// Preview / export compositing for selection mattes (display-only; never mutates the file).

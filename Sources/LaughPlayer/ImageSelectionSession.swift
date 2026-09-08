@@ -12,7 +12,17 @@ final class ImageSelectionSession {
     enum Phase: Equatable {
         case idle
         case downloading(progress: Double)
-        case selecting
+        case selecting(Stage)
+    }
+
+    /// Step the accurate select pipeline is on. Auto Select runs Vision instance
+    /// segmentation, then one SAM decode per person, then per-person gating — several
+    /// seconds on a group photo, so the panel narrates the step instead of just spinning.
+    enum Stage: Equatable {
+        case preparing
+        case findingPeople
+        case cuttingOut(completed: Int, total: Int)
+        case refining
     }
 
     private let visionProvider: SelectionProvider
@@ -113,6 +123,10 @@ final class ImageSelectionSession {
         if case .downloading(let p) = phase { return p }
         return nil
     }
+    var selectingStage: Stage? {
+        if case .selecting(let stage) = phase { return stage }
+        return nil
+    }
     var error: SelectionError? { lastError }
     var hasSelection: Bool { mask != nil }
     var didUseVisionFallback: Bool { usedVisionFallback }
@@ -198,6 +212,8 @@ final class ImageSelectionSession {
         lastError = nil
         usedVisionFallback = false
         lastSelectKind = .semanticClass(semanticClass)
+        // Optimistic busy state so the panel reacts on the click, not on the first hop.
+        phase = .selecting(.preparing)
         notifyChrome()
         Task { await runSelect(kind: .semanticClass(semanticClass), in: image, quality: .accurate, settleAccurate: false) }
     }
@@ -209,6 +225,7 @@ final class ImageSelectionSession {
         usedVisionFallback = false
         promptDraft = prompt
         lastSelectKind = .prompt(prompt)
+        phase = .selecting(.preparing)
         notifyChrome()
         Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
     }
@@ -240,6 +257,7 @@ final class ImageSelectionSession {
         }
         let prompt = promptDraft
         lastSelectKind = .prompt(prompt)
+        phase = .selecting(.preparing)
         notifyChrome()
         Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
     }
@@ -256,6 +274,7 @@ final class ImageSelectionSession {
         }
         let prompt = promptDraft
         lastSelectKind = .prompt(prompt)
+        phase = .selecting(.preparing)
         notifyChrome()
         Task { await runSelect(kind: .prompt(prompt), in: image, quality: .accurate, settleAccurate: false) }
     }
@@ -345,7 +364,7 @@ final class ImageSelectionSession {
         let gen = await MainActor.run { () -> Int in
             self.generation += 1
             self.resetCancelFlag()
-            self.phase = .selecting
+            self.phase = .selecting(.preparing)
             self.usedVisionFallback = false
             self.lastSelectKind = kind
             self.personInstances = []
@@ -432,7 +451,7 @@ final class ImageSelectionSession {
                 }
                 await MainActor.run {
                     guard gen == self.generation else { return }
-                    self.phase = .selecting
+                    self.phase = .selecting(.cuttingOut(completed: 0, total: 1))
                     self.notifyChrome()
                 }
                 return SelectResult(
@@ -498,7 +517,7 @@ final class ImageSelectionSession {
 
         await MainActor.run {
             guard gen == self.generation else { return }
-            self.phase = .selecting
+            self.phase = .selecting(semanticClass == .person ? .findingPeople : .preparing)
             self.notifyChrome()
         }
 
@@ -508,7 +527,7 @@ final class ImageSelectionSession {
             // Prefer per-person prompting: Vision already separates individuals, so each
             // person gets their own box/points instead of a group-wide box that invites SAM
             // to merge people (and swallow whatever sits between them).
-            if let result = await personInstanceSelect(image: image) {
+            if let result = await personInstanceSelect(image: image, generation: gen) {
                 return SelectResult(mask: result.combined, instances: result.instances)
             }
             // Person specificity stays in the prompt-assist helper, not in refine/export.
@@ -520,8 +539,10 @@ final class ImageSelectionSession {
             prompt = .point(center)
         }
 
+        await setStage(.cuttingOut(completed: 0, total: 1), generation: gen)
         do {
             var mask = try await samProvider.select(in: image, prompt: prompt, quality: .accurate)
+            await setStage(.refining, generation: gen)
             if let personPrior {
                 mask = Self.gated(mask: mask, prior: personPrior) ?? mask
             }
@@ -542,13 +563,28 @@ final class ImageSelectionSession {
     /// Per-person route: a prompt per Vision instance → one SAM decode each → per-person
     /// occluder gate → matte → union. Nil when Vision sees nobody or SAM returns nothing,
     /// which sends `accurateSelect` back to the single group-wide prompt.
-    private func personInstanceSelect(image: CIImage) async -> SelectionPersonInstances? {
+    private func personInstanceSelect(
+        image: CIImage,
+        generation gen: Int
+    ) async -> SelectionPersonInstances? {
         guard let plans = try? await SelectionPersonPromptAssist.buildInstancePlans(
             using: visionProvider,
             image: image
         ), !plans.isEmpty else { return nil }
 
-        let masks = await selectAll(prompts: plans.map(\.prompt), image: image)
+        let total = plans.count
+        await setStage(.cuttingOut(completed: 0, total: total), generation: gen)
+        let masks = await selectAll(
+            prompts: plans.map(\.prompt),
+            image: image,
+            onProgress: { [weak self] completed in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.applyStage(.cuttingOut(completed: completed, total: total), generation: gen)
+                }
+            }
+        )
+        await setStage(.refining, generation: gen)
         var instances: [SelectionMask] = []
         for (plan, mask) in zip(plans, masks) {
             guard let mask else { continue }
@@ -562,17 +598,40 @@ final class ImageSelectionSession {
     }
 
     /// One image encode for N prompts when the engine offers it; otherwise a plain loop.
-    private func selectAll(prompts: [SelectionPrompt], image: CIImage) async -> [SelectionMask?] {
+    private func selectAll(
+        prompts: [SelectionPrompt],
+        image: CIImage,
+        onProgress: @escaping @Sendable (Int) -> Void
+    ) async -> [SelectionMask?] {
         if let batching = samProvider as? BatchPromptSelecting,
-           let masks = try? await batching.select(in: image, prompts: prompts, quality: .accurate)
+           let masks = try? await batching.select(
+               in: image,
+               prompts: prompts,
+               quality: .accurate,
+               onProgress: onProgress
+           )
         {
             return masks
         }
         var masks: [SelectionMask?] = []
         for prompt in prompts {
             masks.append(try? await samProvider.select(in: image, prompt: prompt, quality: .accurate))
+            onProgress(masks.count)
         }
         return masks
+    }
+
+    private func setStage(_ stage: Stage, generation gen: Int) async {
+        await MainActor.run { self.applyStage(stage, generation: gen) }
+    }
+
+    /// Stage updates are advisory: a late callback from a superseded or finished run must
+    /// never put the panel back into a busy state.
+    @MainActor
+    private func applyStage(_ stage: Stage, generation gen: Int) {
+        guard gen == generation, case .selecting(let current) = phase, current != stage else { return }
+        phase = .selecting(stage)
+        notifyChrome()
     }
 
     /// Providers hand back `.unknown`; the caller's requested class is the useful label.

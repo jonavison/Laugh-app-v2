@@ -159,6 +159,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subjectSelectDecontamValue = NSTextField(labelWithString: "0")
     private let subjectSelectBrushRadiusValue = NSTextField(labelWithString: "24")
     private let subjectSelectStatusLabel = NSTextField(wrappingLabelWithString: "")
+    private let subjectSelectProgressView = SelectionProgressView()
+    private var subjectSelectProgressRow: SettingsCardRow?
+    /// What the progress row currently costs in height — re-measure the section when it changes.
+    private var subjectSelectProgressShape: (hidden: Bool, hasBar: Bool) = (true, false)
     private var subjectSelectRefineSettleWork: DispatchWorkItem?
     private var subjectSelectBrushEnabled = false
     private var subjectSelectClickEnabled = false
@@ -5051,6 +5055,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectAutoButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
 
         card.addRow(SettingsRowFactory.fullWidthRow(actions))
+        subjectSelectProgressRow = card.addRow(
+            SettingsRowFactory.fullWidthRow(subjectSelectProgressView)
+        )
+        subjectSelectProgressRow?.isHidden = true
+        subjectSelectProgressShape = (hidden: true, hasBar: false)
         card.addRow(SettingsRowFactory.sliderRow(
             title: "Smooth",
             slider: subjectSelectSmoothSlider,
@@ -5241,9 +5250,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         subjectSelectDecontamSlider.doubleValue = refine.decontaminate
         syncSubjectSelectRefineValueLabels(refine)
 
+        updateSubjectSelectProgressRow()
+
         if downloading {
-            let pct = Int(((imageSelectionSession.downloadProgress ?? 0) * 100).rounded())
-            subjectSelectStatusLabel.stringValue = "Downloading MobileSAM… \(pct)% — cancel uses Vision fallback."
+            subjectSelectStatusLabel.stringValue = "Cancel to select with the Vision fallback instead."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         } else if loading {
             subjectSelectStatusLabel.stringValue = "Precision select (MobileSAM)…"
@@ -5280,6 +5290,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             subjectSelectStatusLabel.stringValue = "Auto-select a person, or turn on Click Select to pick any object."
             subjectSelectStatusLabel.textColor = .secondaryLabelColor
         }
+    }
+
+    /// Shows / hides the spinner row, re-measuring the open section when it flips (the
+    /// expanded body height is a constant, so appearing rows would otherwise be clipped).
+    private func updateSubjectSelectProgressRow() {
+        let status = SelectionBusyStatus.make(phase: imageSelectionSession.currentPhase)
+        subjectSelectProgressView.status = status
+        guard let row = subjectSelectProgressRow else { return }
+        // Height depends on whether the row is there and whether the bar is laid in;
+        // caption text alone never changes it, so those updates skip the re-measure.
+        let shape = (hidden: status == nil, hasBar: status?.fraction != nil)
+        guard shape != subjectSelectProgressShape else { return }
+        subjectSelectProgressShape = shape
+        row.isHidden = shape.hidden
+        imageSubjectSelectHeader?.refreshExpandedHeight()
     }
 
     private func subjectSelectErrorMessage(_ error: SelectionError) -> String {

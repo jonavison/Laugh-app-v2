@@ -67,6 +67,15 @@ final class MobileSAMSelectionProvider: SelectionProvider, BatchPromptSelecting,
         prompts: [SelectionPrompt],
         quality: SelectionQuality
     ) async throws -> [SelectionMask?] {
+        try await select(in: image, prompts: prompts, quality: quality, onProgress: { _ in })
+    }
+
+    func select(
+        in image: CIImage,
+        prompts: [SelectionPrompt],
+        quality: SelectionQuality,
+        onProgress: @escaping @Sendable (Int) -> Void
+    ) async throws -> [SelectionMask?] {
         guard !prompts.isEmpty else { return [] }
 
         let extent = image.extent.integral
@@ -108,7 +117,9 @@ final class MobileSAMSelectionProvider: SelectionProvider, BatchPromptSelecting,
             }
         }
 
-        return results.map { result in
+        // Matting is per person and runs after the shared encode, so report as each lands.
+        return results.enumerated().map { index, result in
+            defer { onProgress(index + 1) }
             guard let best = result?.masks.max(by: { $0.score < $1.score }) else { return nil }
             return finish(rawMask: best.cgImage, score: best.score, photo: image, extent: extent)
         }

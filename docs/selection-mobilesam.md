@@ -87,6 +87,24 @@ sampler skipped the plant and the gate passed it. Two corrections, same principl
   instance claims (opened, ≥0.4% of frame) becomes its own plan, which recovered the third
   person. Without it the instance route silently loses people the old route selected.
 
+### Addendum: narrating the wait
+
+Auto Select on a group photo is several seconds of Vision segmentation, one encode, N decodes
+and N mattes, and the panel used to show one static line for all of it. The pipeline now
+reports the step it is on and the panel narrates it:
+
+- `ImageSelectionSession.Stage`: `preparing` → `findingPeople` → `cuttingOut(completed:total:)`
+  → `refining`. Set optimistically on the click so the panel reacts before the first hop.
+- `BatchPromptSelecting.select(in:prompts:quality:onProgress:)`: the provider reports each
+  finished person. Matting is the per-person part (the encode is shared), so progress moves
+  as mattes land. The default implementation reports once at the end, so a provider that
+  only offers the plain batch entry still works.
+- Stage updates carry the run's generation and are dropped when it no longer owns the
+  session, so a late callback cannot re-arm the spinner after a run finishes or is superseded.
+- `SelectionBusyStatus` maps phase → caption, with a bar fraction only for the model
+  download. Select stages have no honest percentage, so they get a spinner instead of a bar
+  that would have to invent its own movement.
+
 ## Revisit
 
 - EfficientSAM3 when CoreML export ships

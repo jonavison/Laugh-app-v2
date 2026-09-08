@@ -436,6 +436,26 @@ enum SettingsRowFactory {
     }
 }
 
+/// A row added to a `SettingsSectionCard`, kept addressable so it can be shown or hidden
+/// after the card is built. Hiding takes the row's separator with it, and the stack view
+/// collapses both — no reserved gap where the row used to be.
+final class SettingsCardRow {
+    private let views: [NSView]
+
+    fileprivate init(views: [NSView]) {
+        self.views = views
+    }
+
+    var isHidden: Bool {
+        get { views.first?.isHidden ?? true }
+        set {
+            for view in views where view.isHidden != newValue {
+                view.isHidden = newValue
+            }
+        }
+    }
+}
+
 final class SettingsSectionCard: NSView {
     private let backgroundView = NSView()
     private let contentStack = NSStackView()
@@ -497,21 +517,26 @@ final class SettingsSectionCard: NSView {
         LaughTheme.applySettingsAccentChrome(in: contentStack, accent: accentTint)
     }
 
-    func addRow(_ view: NSView, separatorBelow: Bool = true) {
+    @discardableResult
+    func addRow(_ view: NSView, separatorBelow: Bool = true) -> SettingsCardRow {
         contentStack.addArrangedSubview(view)
         view.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+        var rowViews = [view]
         if separatorBelow {
             let sep = makeSeparator()
             contentStack.addArrangedSubview(sep)
             sep.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+            rowViews.append(sep)
             if #available(macOS 11.0, *) {
                 contentStack.setCustomSpacing(2, after: view)
                 contentStack.setCustomSpacing(4, after: sep)
             }
         }
+        return SettingsCardRow(views: rowViews)
     }
 
-    func addFinalRow(_ view: NSView) {
+    @discardableResult
+    func addFinalRow(_ view: NSView) -> SettingsCardRow {
         addRow(view, separatorBelow: false)
     }
 
@@ -669,6 +694,25 @@ final class CollapsibleSettingsSectionView: NSView {
         applyExpandedState(animated: animated)
         if expanded {
             onExpandedChange?(true)
+        }
+    }
+
+    /// Re-measure the open body after its rows grow or shrink (a progress row appearing,
+    /// say). The expanded height is a constant so the reveal can animate, so content that
+    /// changes size after expanding would otherwise stay clipped at the old height.
+    func refreshExpandedHeight(animated: Bool = true) {
+        guard isExpanded, !isAnimatingExpand else { return }
+        let target = measuredBodyHeight()
+        guard abs(bodyHeightConstraint.constant - target) > 0.5 else { return }
+        guard animated else {
+            bodyHeightConstraint.constant = target
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            bodyHeightConstraint.animator().constant = target
         }
     }
 
