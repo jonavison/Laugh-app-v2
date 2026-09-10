@@ -7,6 +7,7 @@ final class SubtitlesSettingsControls {
     let secondaryEnabledSwitch = CompactTealToggle()
     let secondaryTrackPopUp = NSPopUpButton()
     let loadExternalButton = NSButton(title: "Load file…", target: nil, action: nil)
+    let searchOnlineButton = NSButton(title: "Search online…", target: nil, action: nil)
     let externalFileLabel = NSTextField(labelWithString: "No external file")
 
     let delaySlider = NSSlider(value: 0, minValue: SubtitleAppearanceStyle.delayMin, maxValue: SubtitleAppearanceStyle.delayMax, target: nil, action: nil)
@@ -39,6 +40,10 @@ final class SubtitlesSettingsControls {
 
         loadExternalButton.bezelStyle = .rounded
         loadExternalButton.controlSize = .small
+
+        searchOnlineButton.bezelStyle = .rounded
+        searchOnlineButton.controlSize = .small
+        searchOnlineButton.toolTip = "Search OpenSubtitles.com (anonymous)"
 
         resetAppearanceButton.bezelStyle = .rounded
         resetAppearanceButton.controlSize = .small
@@ -76,6 +81,7 @@ final class SubtitlesSettingsControls {
         LaughTheme.applySettingsAccentChrome(to: secondaryTrackPopUp)
         LaughTheme.applySettingsAccentChrome(to: backgroundEnabledCheckbox)
         LaughTheme.applySettingsAccentChrome(to: loadExternalButton)
+        LaughTheme.applySettingsAccentChrome(to: searchOnlineButton)
         LaughTheme.applySettingsAccentChrome(to: resetAppearanceButton)
     }
 
@@ -159,6 +165,8 @@ final class SubtitlesSettingsControls {
         secondaryEnabledSwitch.isEnabled = extended
         secondaryTrackPopUp.isEnabled = extended
         loadExternalButton.isEnabled = true
+        // Search stays enabled whenever a video can accept an external file; key check is in the sheet.
+        searchOnlineButton.isEnabled = true
     }
 
     /// Legacy name — enables appearance sliders only.

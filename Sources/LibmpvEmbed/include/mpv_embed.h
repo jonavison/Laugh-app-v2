@@ -52,6 +52,19 @@ int mpv_embed_render_gl(MpvEmbed *embed, int fbo, int width, int height);
 void mpv_embed_report_swap(MpvEmbed *embed);
 void mpv_embed_destroy_gl(MpvEmbed *embed);
 
+/// Software render API (CPU blit into a BGRA/rgb0 buffer). No OpenGL context required.
+int mpv_embed_create_sw(MpvEmbed *embed);
+void mpv_embed_set_sw_update(MpvEmbed *embed, void (*cb)(void *), void *ctx);
+int mpv_embed_render_sw(
+    MpvEmbed *embed,
+    void *pixels,
+    int width,
+    int height,
+    int stride_bytes,
+    const char *format
+);
+void mpv_embed_destroy_sw(MpvEmbed *embed);
+
 #ifdef __cplusplus
 }
 #endif

@@ -9,10 +9,32 @@ struct PlaybackOpenFailure {
 }
 
 struct PlaybackUserNotice {
+    enum Action: Equatable {
+        case openFileAccessSettings
+        case searchOnlineSubtitles
+        case useEmbeddedBitmapSubs
+    }
+
     let kind: PlaybackErrorFormatter.Kind
     let message: String
+    let action: Action?
 
-    var offersFileAccessSettings: Bool { kind == .accessDenied }
+    init(kind: PlaybackErrorFormatter.Kind, message: String, action: Action? = nil) {
+        self.kind = kind
+        self.message = message
+        self.action = action
+    }
+
+    var offersFileAccessSettings: Bool { action == .openFileAccessSettings }
+    var offersSearchOnlineSubtitles: Bool { action == .searchOnlineSubtitles }
+    var actionTitle: String? {
+        switch action {
+        case .openFileAccessSettings: return "Open Settings"
+        case .searchOnlineSubtitles: return "Search online"
+        case .useEmbeddedBitmapSubs: return "Embedded subs"
+        case nil: return nil
+        }
+    }
 }
 
 enum PlaybackErrorFormatter {
@@ -25,6 +47,10 @@ enum PlaybackErrorFormatter {
         /// File exists but its container header is missing, zeroed, or unreadable —
         /// typical of a torrent still downloading, or a truncated/corrupt file.
         case incompleteOrDamaged
+        /// File header is readable but the payload is still sparse / hollow (torrent in progress).
+        case stillDownloading
+        /// Embedded subs are PGS/VobSub only — remux/AVPlayer cannot show them (IINA/mpv can).
+        case bitmapSubtitlesOnly
         case decoderUnavailable
         case noVideoTrack
         case genericPlayback
@@ -52,7 +78,8 @@ enum PlaybackErrorFormatter {
         if matchesAccessProbe(url: url) {
             return PlaybackUserNotice(
                 kind: .accessDenied,
-                message: userMessage(kind: .accessDenied, url: url, detail: nil)
+                message: userMessage(kind: .accessDenied, url: url, detail: nil),
+                action: .openFileAccessSettings
             )
         }
         if looksLikeMissingFile(url) {
@@ -61,7 +88,11 @@ enum PlaybackErrorFormatter {
                 message: userMessage(kind: .missingFile, url: url, detail: nil)
             )
         }
-        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: url) {
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: url)
+            || IncompleteMediaProbe.looksLikeUnreadableContainer(at: url) {
+            return incompleteDownloadNotice(for: url)
+        }
+        if FFmpegVideoFallback.consumeIncompleteRemuxFailure() {
             return incompleteOrDamagedNotice(for: url)
         }
         return PlaybackUserNotice(
@@ -77,9 +108,47 @@ enum PlaybackErrorFormatter {
         )
     }
 
+    static func stillDownloadingNotice(for url: URL) -> PlaybackUserNotice {
+        var message = userMessage(kind: .stillDownloading, url: url, detail: nil)
+        if let fraction = IncompleteMediaProbe.downloadProgressFraction(at: url) {
+            let pct = Int((fraction * 100).rounded(.down))
+            message = "This video is still downloading (~\(pct)% on disk). You can watch the part that's ready from the start — if the picture freezes while time keeps moving, wait for more of the file to finish downloading."
+        }
+        return PlaybackUserNotice(kind: .stillDownloading, message: message)
+    }
+
+    static func bitmapSubtitlesOnlyNotice() -> PlaybackUserNotice {
+        PlaybackUserNotice(
+            kind: .bitmapSubtitlesOnly,
+            message: "This file’s embedded subs are bitmap (PGS). Laugh keeps sharp remux picture by default — search online for text subs, or use embedded subs (softer compatibility picture until Metal present lands).",
+            action: .searchOnlineSubtitles
+        )
+    }
+
+    static func bitmapSubtitlesOnlyNotice(canUseEmbedded: Bool) -> PlaybackUserNotice {
+        guard canUseEmbedded else {
+            return PlaybackUserNotice(
+                kind: .bitmapSubtitlesOnly,
+                message: "This file only has bitmap (PGS) embeds. Keep sharp remux picture — Laugh tries an embedded overlay when libmpv is available; otherwise Search online, drop an .srt, or add an OpenSubtitles API key.",
+                action: .searchOnlineSubtitles
+            )
+        }
+        return PlaybackUserNotice(
+            kind: .bitmapSubtitlesOnly,
+            message: "Couldn’t show embedded PGS on sharp remux. Search online for text subs, or use Embedded subs (softer compatibility picture).",
+            action: .useEmbeddedBitmapSubs
+        )
+    }
+
     /// Kept for call sites that named the torrent case; same notice as `incompleteOrDamagedNotice`.
     static func incompleteDownloadNotice(for url: URL) -> PlaybackUserNotice {
-        incompleteOrDamagedNotice(for: url)
+        if IncompleteMediaProbe.looksLikeUnreadableContainer(at: url) {
+            return incompleteOrDamagedNotice(for: url)
+        }
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: url) {
+            return stillDownloadingNotice(for: url)
+        }
+        return incompleteOrDamagedNotice(for: url)
     }
 
     static func remuxFailedMessage(for url: URL) -> String {
@@ -89,7 +158,8 @@ enum PlaybackErrorFormatter {
     static func accessDeniedNotice(for url: URL) -> PlaybackUserNotice {
         PlaybackUserNotice(
             kind: .accessDenied,
-            message: userMessage(kind: .accessDenied, url: url, detail: nil)
+            message: userMessage(kind: .accessDenied, url: url, detail: nil),
+            action: .openFileAccessSettings
         )
     }
 
@@ -110,7 +180,8 @@ enum PlaybackErrorFormatter {
         )
         return PlaybackUserNotice(
             kind: kind,
-            message: userMessage(kind: kind, url: resolved, detail: shortDetail(from: error))
+            message: userMessage(kind: kind, url: resolved, detail: shortDetail(from: error)),
+            action: kind == .accessDenied ? .openFileAccessSettings : nil
         )
     }
 
@@ -224,6 +295,10 @@ enum PlaybackErrorFormatter {
             return message
         case .incompleteOrDamaged:
             return "This video's file header looks missing or damaged — often a download that hasn't finished, or a corrupt file. Wait for the download to finish (or re-download), then open it again."
+        case .stillDownloading:
+            return "This video is still downloading. You can watch from the start, but playback may stop when it reaches parts that aren't on disk yet."
+        case .bitmapSubtitlesOnly:
+            return "This file’s embedded subs are bitmap (PGS). Laugh keeps sharp remux picture by default — search online for text subs, or use embedded subs (softer compatibility picture)."
         case .decoderUnavailable:
             return "This video needs LaughPlayer's compatibility tools, which aren't available in this build."
         case .noVideoTrack:

@@ -99,6 +99,11 @@ Use `Cmd+Shift+D` in app to inspect:
 - playback time/rate
 - queue count
 
+## Subtitles
+
+- Sidecar `.srt` / `.vtt` via **Load file…** or folder discovery (`Subs/`, `subtitles/`).
+- **Search online…** (Subtitles settings): anonymous OpenSubtitles.com search/download (~5 downloads / day / IP). Requires a free consumer Api-Key in `OPENSUBTITLES_API_KEY` or gitignored `Packaging/opensubtitles-api-key.local` — create one at https://www.opensubtitles.com/en/consumers.
+
 ## Updating Guidelines
 
 When a new codec is confirmed:

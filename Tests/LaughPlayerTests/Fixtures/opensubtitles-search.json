@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "id": "1",
+      "type": "subtitle",
+      "attributes": {
+        "language": "en",
+        "download_count": 4210,
+        "ratings": 8.2,
+        "release": "Blade.Runner.2049.2017.2160p.BluRay",
+        "feature_details": {
+          "title": "Blade Runner 2049",
+          "year": 2017
+        },
+        "files": [
+          {
+            "file_id": 5274788,
+            "file_name": "Blade.Runner.2049.en.srt"
+          }
+        ]
+      }
+    },
+    {
+      "id": "2",
+      "type": "subtitle",
+      "attributes": {
+        "language": "fr",
+        "download_count": 12,
+        "release": "Blade Runner 2049 French",
+        "files": [
+          {
+            "file_id": 99,
+            "file_name": "br2049.fr.srt"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -77,4 +77,95 @@ final class FFmpegProbeParserTests: XCTestCase {
         XCTAssertFalse(FFmpegProbeParser.isPreviewByteReady(fileSize: 1032, containsMOOF: true))
         XCTAssertTrue(FFmpegProbeParser.isPreviewByteReady(fileSize: 128 * 1024, containsMOOF: true))
     }
+
+    func testBitmapOnlySubtitleDetection() {
+        let pgs = FFmpegProbeParser.parseSubtitleCodecs(from: """
+            Stream #0:2(eng): Subtitle: hdmv_pgs_subtitle (pgssub)
+            Stream #0:3(chi): Subtitle: hdmv_pgs_subtitle (pgssub)
+            """)
+        XCTAssertTrue(FFmpegProbeParser.hasBitmapSubtitlesOnly(codecs: pgs))
+
+        let mixed = FFmpegProbeParser.parseSubtitleCodecs(from: """
+            Stream #0:2(eng): Subtitle: subrip (srt)
+            Stream #0:3(eng): Subtitle: hdmv_pgs_subtitle (pgssub)
+            """)
+        XCTAssertFalse(FFmpegProbeParser.hasBitmapSubtitlesOnly(codecs: mixed))
+        XCTAssertFalse(FFmpegProbeParser.hasBitmapSubtitlesOnly(codecs: []))
+    }
+
+    func testParseSubtitleStreamsKeepsLanguageAndTitle() {
+        let streams = FFmpegProbeParser.parseSubtitleStreams(from: """
+              Stream #0:2(eng): Subtitle: hdmv_pgs_subtitle (pgssub)
+                Metadata:
+                  title           : Eng/SUP English
+              Stream #0:3(chi): Subtitle: hdmv_pgs_subtitle (pgssub)
+                Metadata:
+                  title           : Chs/SUP Chinese
+            """)
+        XCTAssertEqual(streams.count, 2)
+        XCTAssertEqual(streams[0].subtitleIndex, 0)
+        XCTAssertEqual(streams[0].language, "eng")
+        XCTAssertEqual(streams[0].title, "Eng/SUP English")
+        XCTAssertEqual(streams[0].codec, "hdmv_pgs_subtitle")
+        XCTAssertEqual(streams[1].language, "chi")
+        let tracks = SubtitleTrackCatalog.tracks(fromBitmapStreams: streams)
+        XCTAssertEqual(tracks.count, 2)
+        guard case .embeddedBitmapOverlay(let index) = tracks[0].backendID else {
+            return XCTFail("expected embeddedBitmapOverlay")
+        }
+        XCTAssertEqual(index, 0)
+        XCTAssertTrue(tracks[0].menuTitle.contains("Eng/SUP English"))
+    }
+
+    func testRemuxPayloadRejectsSparseOutput() {
+        // Bourne Identity: 146MB remux of a 1.7GB source — duration OK, payload empty → seek freezes.
+        XCTAssertFalse(
+            FFmpegProbeParser.remuxPayloadLooksComplete(
+                outputBytes: 146_000_000,
+                sourceBytes: 1_700_000_000
+            )
+        )
+        // Dropping commentary can land near ~45–60%; that must still pass the size gate
+        // (fps / source-sparse checks catch the real incomplete-torrent cases).
+        XCTAssertTrue(
+            FFmpegProbeParser.remuxPayloadLooksComplete(
+                outputBytes: 764_251_444,
+                sourceBytes: 1_692_150_810
+            )
+        )
+        XCTAssertTrue(
+            FFmpegProbeParser.remuxPayloadLooksComplete(
+                outputBytes: 1_400_000_000,
+                sourceBytes: 1_700_000_000
+            )
+        )
+        // Tiny sources skip the ratio gate.
+        XCTAssertTrue(
+            FFmpegProbeParser.remuxPayloadLooksComplete(outputBytes: 50_000, sourceBytes: 80_000)
+        )
+    }
+
+    func testRemuxFrameRateRejectsSparseAverageFps() {
+        // Supremacy sparse remux: `11.25 fps, 23.98 tbr`
+        XCTAssertFalse(
+            FFmpegProbeParser.remuxFrameRateLooksComplete(averageFps: 11.25, containerFps: 23.98)
+        )
+        // Jason Bourne poisoned remux: ~19.97/23.92 — still freezes late in timeline.
+        XCTAssertFalse(
+            FFmpegProbeParser.remuxFrameRateLooksComplete(averageFps: 19.97, containerFps: 23.92)
+        )
+        XCTAssertTrue(
+            FFmpegProbeParser.remuxFrameRateLooksComplete(averageFps: 23.98, containerFps: 23.98)
+        )
+        // Missing probe data does not fail open playback.
+        XCTAssertTrue(
+            FFmpegProbeParser.remuxFrameRateLooksComplete(averageFps: nil, containerFps: 23.98)
+        )
+
+        let sparseLine = """
+        Stream #0:0: Video: hevc (Main) (hvc1 / 0x31637668), yuv420p, 1920x816, 815 kb/s, 11.25 fps, 23.98 tbr, 16k tbn
+        """
+        XCTAssertEqual(FFmpegProbeParser.parseVideoAverageFps(from: sparseLine) ?? -1, 11.25, accuracy: 0.01)
+        XCTAssertEqual(FFmpegProbeParser.parseVideoContainerFps(from: sparseLine) ?? -1, 23.98, accuracy: 0.01)
+    }
 }

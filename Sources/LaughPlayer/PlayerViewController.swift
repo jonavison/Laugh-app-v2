@@ -27,6 +27,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let player = AVPlayer()
     private let idleSleepGuard = PlaybackIdleSleepGuard()
     private let mpvController = MpvPlaybackController()
+    /// Subtitle-only libmpv (vid=no) over remux AVPlayer for embedded PGS.
+    private let bitmapOverlayController = MpvPlaybackController()
+    private let bitmapOverlayBlitView = MpvSoftwareBlitView()
+    private var bitmapOverlayActive = false
+    private var bitmapOverlaySourcePath: String?
+    private var bitmapOverlaySyncTimer: Timer?
+    /// ffmpeg-seeded PGS/VobSub rows so the Subs picker fills before overlay mpv is ready.
+    private var cachedBitmapProbeTracks: [SubtitleTrackInfo] = []
+    private var bitmapOverlayWantPlaying = false
+    private var bitmapOverlayLastRate: Float = 1
     private var mpvBackendActive = false
     private var mpvPlaybackStarted = false
     private var activeSession: ActivePlaybackSession?
@@ -117,6 +127,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var pendingAudioTrackBackendID: AudioTrackInfo.BackendID?
     private var pendingResumePlayingAfterLoad: Bool?
     private let subtitlesSettings = SubtitlesSettingsControls()
+    /// Retained while the OpenSubtitles sheet is on screen.
+    private var openSubtitlesSearchSheet: OpenSubtitlesSearchSheetController?
     private var cachedSubtitleTracks: [SubtitleTrackInfo] = []
     private var suppressSubtitlePopUpAction = false
     private var suppressSubtitleAppearanceCallback = false
@@ -234,6 +246,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private weak var observedItem: AVPlayerItem?
     private var timeObserverToken: Any?
     private let renderMonitor = PlaybackRenderMonitor()
+    private let freezeWatchdog = PlaybackFreezeWatchdog()
     private let compatibilityBanner = CompatibilityBannerView()
     private var currentMediaURL: URL?
     /// Set when media is opened, cleared once folder management has been scoped to its
@@ -252,6 +265,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var lastPlaybackTraceSecond: Int = -1
     private var isSeekingFromUI = false
     private var seekGeneration = 0
+    /// Sticky across rapid seek bursts: first seek pauses, later seeks see rate==0.
+    private var resumePlaybackAfterSeek = false
     private var currentControlTier: ControlDensityTier = .regular
     private var outsideClickMonitor: Any?
     private var edgeHotZoneClickMonitor: Any?
@@ -305,6 +320,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var progressiveExtendInProgress = false
     private var lastProgressiveExtendWallTime: CFAbsoluteTime = 0
     private var progressiveExtentMonitorToken: Int = 0
+    /// One ffmpeg probe per playable remux path — detects sparse incomplete remux freezes.
+    private var sparseRemuxFreezeCheckedPath: String?
+    /// Avoid re-tipping bitmap-only subs on every subtitle refresh for the same source.
+    private var bitmapSubtitlesTipShownForPath: String?
     private var seekBarPrepareTimer: Timer?
     private var playbackPrepareActive = false
     private var fallbackSessionToken: Int = 0
@@ -331,8 +350,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var settingsPanelTopConstraint: NSLayoutConstraint?
     private var imageSettingsTabsTopConstraint: NSLayoutConstraint?
     private var volumeSliderWidthConstraint: NSLayoutConstraint?
+    private var volumeClusterCollapsedWidthConstraint: NSLayoutConstraint?
     private var playbackAccessoryToVolumeConstraint: NSLayoutConstraint?
-    private var playbackAccessoryToEdgeConstraint: NSLayoutConstraint?
+    private var playbackAccessoryToSettingsConstraint: NSLayoutConstraint?
+    private var volumeToSettingsConstraint: NSLayoutConstraint?
     private var playbackTopRowLayoutConfigured = false
     private var audioOutputEnabled = true
     private var playerInterfaceInstalled = false
@@ -409,12 +430,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         player.automaticallyWaitsToMinimizeStalling = true
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.actionAtItemEnd = .pause
+        PlaybackPipelinePolicy.configure(player)
         if #available(macOS 12.0, *) {
             player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
         }
         playerSurfaceView.videoGravity = .resizeAspect
         playerSurfaceView.translatesAutoresizingMaskIntoConstraints = false
         nativeSubtitleOverlay.install(in: playerSurfaceView)
+        installBitmapOverlayBlitViewIfNeeded()
         playerSurfaceView.onMpvLayoutChanged = { [weak self] in
             guard let self, self.mpvBackendActive else { return }
             self.mpvController.requestRenderRefresh()
@@ -1158,7 +1181,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         setPrimarySubtitlesEnabled(false)
         secondarySubtitlesEnabled = false
         cachedSubtitleTracks = []
+        bitmapSubtitlesTipShownForPath = nil
         resetNativeSubtitlePresentationForSourceChange()
+        stopBitmapSubtitleOverlay()
+        cachedBitmapProbeTracks = []
         if mpvBackendActive {
             stopMpvBackend()
         }
@@ -1167,6 +1193,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         PlaybackTrace.emit("[DEBUG-playback] Loading video: \(url.path)")
         videoLoadGeneration += 1
         seekGeneration += 1
+        resumePlaybackAfterSeek = false
+        isSeekingFromUI = false
         lastPlaybackTraceSecond = -1
         let generation = videoLoadGeneration
 
@@ -1190,6 +1218,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         hideCompatibilityFailure()
         renderMonitor.reset()
+        freezeWatchdog.reset()
         audioOutputEnabled = true
         isUserVolumeMuted = false
         lastPlaybackStartedItemID = nil
@@ -1246,31 +1275,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         if !isGeneratedFallbackURL(url), PlaybackRoutePlanner.prefersFastRemux(for: url) {
-            let mpvAvailable = PlaybackRuntime.canUseBundledCodecStack && MpvPlaybackController.isAvailable()
-            let remuxAvailable = PlaybackRuntime.canUseBundledCodecStack && FFmpegVideoFallback.isAvailable()
-            let route = PlaybackRoutePlanner.route(from: .init(
-                pathExtension: url.pathExtension,
-                mpvAvailable: mpvAvailable,
-                remuxAvailable: remuxAvailable,
-                videoCodecTag: nil,
-                hasSidecars: false
-            ))
-            if isVideoFileURL(url) {
-                enterInstantPlaybackPrepareUI(
-                    for: url,
-                    probeDuration: PlaybackRoutePlanner.shouldProbeSourceDuration(for: route)
-                )
-            }
-            switch route {
-            case .directMpv(let reason):
-                PlaybackTrace.emit("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
-                startDirectMpvPlayback(sourceURL: url, generation: generation)
-            case .compatibilityRemux(let reason):
-                PlaybackTrace.emit("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
-                startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
-            case .nativeAVFoundation:
-                PlaybackTrace.emit("[DEBUG-route] planned native path=\(url.path)")
-                startNativePlayback(url: url, generation: generation)
+            // Open-time route (includes bitmap-only → DirectMpv). Must not use empty Inputs.
+            Task {
+                let route = await PlaybackRoutePlanner.route(for: url)
+                await MainActor.run {
+                    guard generation == self.videoLoadGeneration else { return }
+                    if isVideoFileURL(url) {
+                        enterInstantPlaybackPrepareUI(
+                            for: url,
+                            probeDuration: PlaybackRoutePlanner.shouldProbeSourceDuration(for: route)
+                        )
+                    }
+                    switch route {
+                    case .directMpv(let reason):
+                        PlaybackTrace.emit("[DEBUG-route] planned mpv (\(reason)) path=\(url.path)")
+                        startDirectMpvPlayback(sourceURL: url, generation: generation)
+                    case .compatibilityRemux(let reason):
+                        PlaybackTrace.emit("[DEBUG-route] planned remux (\(reason)) path=\(url.path)")
+                        startPlannedCompatibilityPlayback(sourceURL: url, generation: generation)
+                    case .nativeAVFoundation:
+                        PlaybackTrace.emit("[DEBUG-route] planned native path=\(url.path)")
+                        startNativePlayback(url: url, generation: generation)
+                    }
+                }
             }
             return
         }
@@ -1370,7 +1397,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func startPlannedCompatibilityPlayback(sourceURL: URL, generation: Int) {
-        FFmpegVideoFallback.prefetchFullRemux(for: sourceURL)
+        // Do not prefetch full remux here — progressive preview must own the disk first.
         attemptFFmpegFallbackIfNeeded(plannedRoute: true, generation: generation)
     }
 
@@ -1400,8 +1427,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             let surfaceReady = self.playerSurfaceView.window != nil
                 && self.playerSurfaceView.bounds.width > 1
                 && self.playerSurfaceView.bounds.height > 1
-            let renderLayer = self.playerSurfaceView.mpvRenderLayer
-            if !surfaceReady || renderLayer == nil {
+            let hostView = self.playerSurfaceView.mpvHostViewIfEmbedded
+            if !surfaceReady || hostView == nil {
                 if attempt < 12 {
                     PlaybackTrace.emit("[DEBUG-mpv] embedding not ready attempt=\(attempt); retrying")
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -1418,7 +1445,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
             self.wireMpvCallbacks(generation: generation, sourceURL: sourceURL)
 
-            self.mpvController.load(url: sourceURL, renderLayer: renderLayer!) { [weak self] result in
+            self.mpvController.load(url: sourceURL, hostView: hostView!) { [weak self] result in
                 guard let self, generation == self.videoLoadGeneration else { return }
                 switch result {
                 case .success:
@@ -1619,6 +1646,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     self.playbackSourceURL = sourceURL
                 case .failure(let failure):
                     print("[DEBUG-playback] cached open failed: \(failure.debugDetails)")
+                    // Remux/preview URLs that AVFoundation rejects must not re-enter the remux
+                    // loop (terminate + wipe + remux forever while the tip stays up).
+                    if self.isGeneratedFallbackURL(playableURL) {
+                        self.leavePlaybackPrepareUI()
+                        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: sourceURL) {
+                            self.showCompatibilityFailure(
+                                PlaybackErrorFormatter.stillDownloadingNotice(for: sourceURL)
+                            )
+                        } else {
+                            self.showCompatibilityFailure(
+                                PlaybackErrorFormatter.remuxFailedNotice(for: sourceURL)
+                            )
+                        }
+                        return
+                    }
                     self.attemptFFmpegFallbackIfNeeded()
                 }
             }
@@ -1636,6 +1678,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 4
         item.audioTimePitchAlgorithm = .spectral
+        PlaybackPipelinePolicy.configure(item)
         activePlaybackGeneration = generation
         observedItemLoadGeneration = generation
         if let previousItem = observedItem, previousItem !== item {
@@ -1826,9 +1869,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         self?.handleRenderFailure(message)
                     }
                 }
+                self.startFreezeWatchdog(for: item)
                 Task {
                     await self.refreshAudioTrackPicker()
                     await self.refreshSubtitleSettings()
+                }
+                Task { @MainActor in
+                    await PlaybackSeekStressHarness.run(
+                        generation: generation,
+                        currentGeneration: { self.videoLoadGeneration },
+                        seekBySeconds: { self.commandSeek(bySeconds: $0) },
+                        playbackRate: {
+                            if self.mpvBackendActive {
+                                return self.activeSession?.isPlaying == true ? self.preferredPlaybackRate : 0
+                            }
+                            return self.player.rate
+                        },
+                        currentTimeSec: {
+                            if self.mpvBackendActive, let session = self.activeSession {
+                                return session.currentTimeSec
+                            }
+                            return CMTimeGetSeconds(self.player.currentTime())
+                        }
+                    )
                 }
             }
             self.schedulePlaybackStartWhenBuffered(item: item, generation: generation, start: finishStart)
@@ -1866,8 +1929,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         if mpvBackendActive, let session = activeSession {
-            let wasPlaying = session.isPlaying && !isMutedForSwitch
-            if wasPlaying { session.pause() }
+            let currentlyPlaying = session.isPlaying && !isMutedForSwitch
+            resumePlaybackAfterSeek = CooperativeSeekResumePolicy.markPlaying(
+                currentRatePlaying: currentlyPlaying,
+                existingIntent: resumePlaybackAfterSeek
+            )
+            if currentlyPlaying { session.pause() }
             session.seek(to: seconds, exact: precise) { [weak self] finished in
                 guard let self, generation == self.seekGeneration else {
                     completion?(false)
@@ -1875,7 +1942,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }
                 self.isSeekingFromUI = false
                 self.updateTimelineUI()
-                if wasPlaying, finished, !self.isMutedForSwitch {
+                let shouldResume = CooperativeSeekResumePolicy.shouldResume(
+                    intent: self.resumePlaybackAfterSeek,
+                    finished: finished,
+                    mutedForSwitch: self.isMutedForSwitch
+                )
+                self.resumePlaybackAfterSeek = false
+                if shouldResume {
                     self.startPlaybackAtPreferredRate()
                 }
                 completion?(finished)
@@ -1883,10 +1956,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
 
-        let wasPlaying = player.rate > 0 && !isMutedForSwitch
-        if wasPlaying {
-            player.pause()
-        }
+        let currentlyPlaying = player.rate > 0 && !isMutedForSwitch
+        resumePlaybackAfterSeek = CooperativeSeekResumePolicy.markPlaying(
+            currentRatePlaying: currentlyPlaying,
+            existingIntent: resumePlaybackAfterSeek
+        )
+        // Scrub while playing. Pausing here made every seek-bar click feel frozen
+        // (rate=0 for 1s+) and raced resume when seeks overlapped.
 
         let tolerance = precise
             ? .zero
@@ -1895,17 +1971,45 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             DispatchQueue.main.async {
                 guard let self, generation == self.seekGeneration else {
+                    // Superseded by a newer seek — keep sticky resume intent for that seek.
                     completion?(false)
                     return
                 }
                 self.isSeekingFromUI = false
                 self.updateTimelineUI()
-                if wasPlaying, finished, !self.isMutedForSwitch {
+                let shouldResume = CooperativeSeekResumePolicy.shouldResume(
+                    intent: self.resumePlaybackAfterSeek,
+                    finished: finished,
+                    mutedForSwitch: self.isMutedForSwitch
+                )
+                self.resumePlaybackAfterSeek = false
+                if shouldResume {
+                    // Always re-assert play after scrub. Seek-while-playing can leave
+                    // HEVC/AVPlayerLayer showing a stuck frame while the clock advances.
                     self.startPlaybackAtPreferredRate()
+                    self.kickVideoDisplayAfterSeek()
                 }
                 completion?(finished)
             }
         }
+    }
+
+    /// Nudge the display path after a scrub — remuxed HEVC often freezes the picture otherwise.
+    private func kickVideoDisplayAfterSeek() {
+        guard !mpvBackendActive else { return }
+        guard player.currentItem != nil else { return }
+        // Re-bind the layer player briefly; cheaper than replaceCurrentItem, enough to
+        // restart frame delivery when AVPlayerLayer goes stale after a long seek.
+        let surface = playerSurfaceView
+        if surface.player === player {
+            surface.player = nil
+            surface.player = player
+        }
+        PlaybackTrace.emit(String(
+            format: "[DEBUG-ui] seek_display_kick rate=%.2f t=%.2f",
+            player.rate,
+            CMTimeGetSeconds(player.currentTime())
+        ))
     }
 
     private func schedulePlaybackStartWhenBuffered(
@@ -2113,6 +2217,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         removeImmersivePointerMonitor()
         renderMonitor.reset()
+        freezeWatchdog.reset()
         endSecurityScopedAccess()
         removeImmersiveCursorWindowObservers()
         restoreImmersivePlaybackCursor()
@@ -2630,6 +2735,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         hidePlaybackMiniPreview()
         hideCompatibilityFailure()
         renderMonitor.reset()
+        freezeWatchdog.reset()
         endSecurityScopedAccess()
         suspendPlayerOutputForStillOrEmpty()
         currentMediaURL = nil
@@ -3530,12 +3636,25 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func showCompatibilityFailure(_ notice: PlaybackUserNotice) {
         print("[DEBUG-playback] CompatibilityFailure: \(notice.message)")
-        compatibilityBanner.onAction = notice.offersFileAccessSettings
-            ? { MacPrivacySettings.openFilesAndFoldersPrivacy() }
-            : nil
+        switch notice.action {
+        case .openFileAccessSettings:
+            compatibilityBanner.onAction = { MacPrivacySettings.openFilesAndFoldersPrivacy() }
+        case .searchOnlineSubtitles:
+            compatibilityBanner.onAction = { [weak self] in
+                self?.hideCompatibilityFailure()
+                self?.searchOnlineSubtitlesPressed()
+            }
+        case .useEmbeddedBitmapSubs:
+            compatibilityBanner.onAction = { [weak self] in
+                self?.hideCompatibilityFailure()
+                self?.restartWithEmbeddedBitmapSubs()
+            }
+        case nil:
+            compatibilityBanner.onAction = nil
+        }
         compatibilityBanner.show(
             message: notice.message,
-            actionTitle: notice.offersFileAccessSettings ? "Open Settings" : nil
+            actionTitle: notice.actionTitle
         )
         view.addSubview(compatibilityBanner, positioned: .above, relativeTo: rightSettingsSheet)
         raisePlaybackChromeToFront()
@@ -3582,11 +3701,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         let activeGeneration = generation ?? videoLoadGeneration
 
-        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+        if IncompleteMediaProbe.looksLikeUnreadableContainer(at: inputURL) {
             leavePlaybackPrepareUI()
             showCompatibilityFailure(PlaybackErrorFormatter.incompleteOrDamagedNotice(for: inputURL))
             PlaybackTrace.emit("[DEBUG-fallback] unreadable container header path=\(inputURL.path)")
             return
+        }
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+            // Header is fine — allow progressive start. Full remux stays blocked until complete.
+            showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: inputURL))
+            PlaybackTrace.emit("[DEBUG-fallback] source still downloading — progressive only path=\(inputURL.lastPathComponent)")
         }
 
         if !isMutedForSwitch {
@@ -3700,17 +3824,86 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            let sourceDuration = FFmpegVideoFallback.probeSourceDurationSec(for: inputURL)
-            await MainActor.run {
-                guard sessionToken == self.fallbackSessionToken else { return }
-                self.activePreviewSourceDurationSec = sourceDuration
-                self.updateSeekBarPreparingState()
+
+            // Don't block preview attach on a slow incomplete-MKV duration probe.
+            Task.detached(priority: .utility) { [weak self] in
+                guard let self else { return }
+                let sourceDuration = FFmpegVideoFallback.probeSourceDurationSec(for: inputURL)
+                await MainActor.run {
+                    guard sessionToken == self.fallbackSessionToken else { return }
+                    self.activePreviewSourceDurationSec = sourceDuration
+                    self.updateSeekBarPreparingState()
+                }
             }
 
-            var attachedPreview = false
             let pollIntervalNs: UInt64 = 100_000_000
             let maxWaitNs: UInt64 = 120 * 1_000_000_000
             var waited: UInt64 = 0
+
+            func attachChunkedPreviewIfPossible(waitedMs: Double) async -> Bool {
+                let readable = await FFmpegVideoFallback.isPreviewReadableEnoughForPlayback(url: previewURL)
+                    || FFmpegVideoFallback.isOutputReadyForPlayback(at: previewURL)
+                guard readable else { return false }
+
+                // Finished sparse remuxes of incomplete torrents advance the clock with a frozen
+                // frame — refuse attach and wipe so a capped remux can replace them.
+                if !FFmpegVideoFallback.isRemuxing(outputURL: previewURL),
+                   IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL),
+                   FFmpegVideoFallback.remuxLooksTooSparseForPlayback(at: previewURL) {
+                    PlaybackTrace.emit(
+                        "[DEBUG-fallback] discard sparse progressive preview (would freeze) path=\(previewURL.lastPathComponent)"
+                    )
+                    try? FileManager.default.removeItem(at: previewURL)
+                    return false
+                }
+
+                await MainActor.run {
+                    guard sessionToken == self.fallbackSessionToken else { return }
+                    self.fallbackInProgress = false
+                    self.updateSeekBarPreparingState()
+                    self.fallbackLastMethod = "remux-preview"
+                    self.fallbackConvertedOutputPaths.insert(previewURL.path)
+                    // Keep the still-downloading tip visible; don't clear it on preview start.
+                    if !IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+                        self.hideCompatibilityFailure()
+                    }
+                    if rawResumeTargetSec.isFinite, rawResumeTargetSec > 2 {
+                        PlaybackTrace.emit(String(
+                            format: "[DEBUG-fallback] deferring resume %.1fs until full remux",
+                            rawResumeTargetSec
+                        ))
+                        self.fallbackResumeTargetSec = rawResumeTargetSec
+                        self.pendingStartTimeAfterLoad = .zero
+                    } else if rawResumeTargetSec.isFinite, rawResumeTargetSec >= 0 {
+                        self.pendingStartTimeAfterLoad = resumeTime
+                    }
+                    let sourceDuration = self.activePreviewSourceDurationSec
+                    PlaybackTrace.emit("[DEBUG-fallback] chunked preview start waitedMs=\(waitedMs) sourceDur=\(sourceDuration ?? 0)s")
+                    self.activePreviewFullTargetURL = fullTargetURL
+                    self.activePlayableDurationSec = 0
+                    _ = FFmpegVideoFallback.ensureBackgroundFullRemux(
+                        inputURL: inputURL,
+                        outputURL: fullTargetURL
+                    )
+                    self.resolveAndAttach(
+                        playableURL: previewURL,
+                        sourceURL: inputURL,
+                        generation: activeGeneration
+                    )
+                    self.startProgressiveExtentMonitor(
+                        previewURL: previewURL,
+                        sessionToken: sessionToken
+                    )
+                    self.scheduleUpgradeToFullRemux(
+                        previewURL: previewURL,
+                        fullTargetURL: fullTargetURL,
+                        sourceURL: inputURL,
+                        generation: activeGeneration,
+                        sessionToken: sessionToken
+                    )
+                }
+                return true
+            }
 
             while waited < maxWaitNs {
                 if Task.isCancelled { return }
@@ -3743,52 +3936,42 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     return
                 }
 
-                if !attachedPreview,
-                   await FFmpegVideoFallback.isPreviewReadableEnoughForPlayback(url: previewURL) {
-                    attachedPreview = true
-                    let waitedMs = Double(waited) / 1_000_000
-                    await MainActor.run {
-                        guard sessionToken == self.fallbackSessionToken else { return }
-                        self.fallbackInProgress = false
-                        self.updateSeekBarPreparingState()
-                        self.fallbackLastMethod = "remux-preview"
-                        self.fallbackConvertedOutputPaths.insert(previewURL.path)
-                        self.hideCompatibilityFailure()
-                        if rawResumeTargetSec.isFinite && rawResumeTargetSec >= 0 {
-                            self.pendingStartTimeAfterLoad = resumeTime
-                        }
-                        PlaybackTrace.emit("[DEBUG-fallback] chunked preview start waitedMs=\(waitedMs) sourceDur=\(sourceDuration ?? 0)s")
-                        self.activePreviewFullTargetURL = fullTargetURL
-                        self.activePreviewSourceDurationSec = sourceDuration
-                        self.activePlayableDurationSec = 0
-                        self.resolveAndAttach(
-                            playableURL: previewURL,
-                            sourceURL: inputURL,
-                            generation: activeGeneration
-                        )
-                        self.startProgressiveExtentMonitor(
-                            previewURL: previewURL,
-                            sessionToken: sessionToken
-                        )
-                        self.scheduleUpgradeToFullRemux(
-                            previewURL: previewURL,
-                            fullTargetURL: fullTargetURL,
-                            sourceURL: inputURL,
-                            generation: activeGeneration,
-                            sessionToken: sessionToken
-                        )
-                    }
+                let waitedMs = Double(waited) / 1_000_000
+                if await attachChunkedPreviewIfPossible(waitedMs: waitedMs) {
                     return
                 }
 
                 let previewRunning = FFmpegVideoFallback.isRemuxing(outputURL: previewURL)
                 let fullRunning = FFmpegVideoFallback.isBackgroundFullRemuxing(outputURL: fullTargetURL)
                 if !previewRunning && !fullRunning && waited > 2_000_000_000 {
+                    // Remux ended — one last attach attempt before falling back.
+                    if await attachChunkedPreviewIfPossible(waitedMs: waitedMs) {
+                        return
+                    }
                     break
                 }
 
                 try? await Task.sleep(nanoseconds: pollIntervalNs)
                 waited += pollIntervalNs
+            }
+
+            // Still-downloading sources must not enter blocking full-remux retries (always sparse).
+            if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+                let waitedMs = Double(waited) / 1_000_000
+                if await attachChunkedPreviewIfPossible(waitedMs: waitedMs) {
+                    return
+                }
+                await MainActor.run {
+                    guard sessionToken == self.fallbackSessionToken else { return }
+                    self.fallbackInProgress = false
+                    self.leavePlaybackPrepareUI()
+                    self.showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: inputURL))
+                    self.fallbackStartedAt = nil
+                    self.fallbackResumeTargetSec = nil
+                    self.fallbackLastMethod = nil
+                    PlaybackTrace.emit("[DEBUG-fallback] progressive preview unavailable while downloading")
+                }
+                return
             }
 
             let result = FFmpegVideoFallback.convertToPlayable(inputURL: inputURL)
@@ -3939,7 +4122,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         return
                     }
 
-                    let resume = self.player.currentTime()
+                    let resume: CMTime
+                    if let deferred = self.fallbackResumeTargetSec, deferred > 2 {
+                        resume = CMTime(seconds: deferred, preferredTimescale: 600)
+                        self.fallbackResumeTargetSec = nil
+                    } else {
+                        resume = self.player.currentTime()
+                    }
                     self.pendingStartTimeAfterLoad = resume
                     self.fallbackLastMethod = "remux"
                     self.fallbackConvertedOutputPaths.insert(fullTargetURL.path)
@@ -4129,7 +4318,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         NSLayoutConstraint.activate([
             imageLeadingAccessoryCluster.leadingAnchor.constraint(
-                greaterThanOrEqualTo: imageTopRowView.leadingAnchor
+                equalTo: imageTopRowView.leadingAnchor
             ),
             imageLeadingAccessoryCluster.trailingAnchor.constraint(
                 equalTo: imageTransportCluster.leadingAnchor,
@@ -4174,9 +4363,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if queueButton.superview === playbackAccessoryCluster { return }
         queueButton.removeFromSuperview()
         playbackAccessoryCluster.insertArrangedSubview(queueButton, at: 0)
-        if !playbackAccessoryCluster.arrangedSubviews.contains(settingsButton) {
-            playbackAccessoryCluster.addArrangedSubview(settingsButton)
-        }
+        // Settings stays pinned to the far trailing edge of the top row — not in this cluster.
+        settingsButton.removeFromSuperview()
     }
 
     private func moveQueueButtonToImageAccessoryCluster() {
@@ -4777,12 +4965,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         s.loadExternalButton.target = self
         s.loadExternalButton.action = #selector(loadExternalSubtitlePressed)
+        s.searchOnlineButton.target = self
+        s.searchOnlineButton.action = #selector(searchOnlineSubtitlesPressed)
 
         let externalRow = NSStackView()
         externalRow.orientation = .horizontal
         externalRow.alignment = .centerY
         externalRow.spacing = 8
         externalRow.addArrangedSubview(s.loadExternalButton)
+        externalRow.addArrangedSubview(s.searchOnlineButton)
         externalRow.addArrangedSubview(s.externalFileLabel)
 
         addPlaybackSettingsSection(to: subtitlesTabView, title: "Tracks", symbolName: "captions.bubble", isFirst: true) { card in
@@ -6122,7 +6313,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             switch track.backendID {
             case .externalMpv(_, let path), .companionSidecar(let path):
                 return CompanionSubtitleDiscovery.normalizePath(path)
-            case .avFoundation, .mpv:
+            case .avFoundation, .mpv, .embeddedBitmapOverlay:
                 return nil
             }
         })
@@ -6166,7 +6357,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func isSubtitlePlaybackReady() -> Bool {
-        (mpvBackendActive && mpvPlaybackStarted) || nativeSubtitlePlayerItem() != nil
+        (mpvBackendActive && mpvPlaybackStarted)
+            || bitmapOverlayActive
+            || !cachedBitmapProbeTracks.isEmpty
+            || nativeSubtitlePlayerItem() != nil
     }
 
     @MainActor
@@ -6244,6 +6438,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if let sourceURL {
                 tracks = tracks.map { CompanionSubtitleDiscovery.enrich($0, mediaURL: sourceURL) }
             }
+        } else if bitmapOverlayActive || !cachedBitmapProbeTracks.isEmpty {
+            let overlayTracks = await fetchBitmapOverlaySubtitleTracks()
+            tracks = overlayTracks.isEmpty ? cachedBitmapProbeTracks : overlayTracks
         } else if let item = nativeSubtitlePlayerItem() {
             do {
                 tracks = try await SubtitleTrackCatalog.tracks(from: item.asset)
@@ -6289,6 +6486,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
         updateCompanionSubtitlesUI()
         updateSubtitleControlsAvailability()
+        maybeTipBitmapSubtitlesOnly(sourceURL: sourceURL, playableTracks: availableTracks)
         if applyAppearance {
             await applySubtitleAppearanceToPlayback()
         }
@@ -6394,6 +6592,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
             return tracks.first
         }
+        if bitmapOverlayActive {
+            let selectedID = await Task.detached { [bitmapOverlayController] in
+                bitmapOverlayController.selectedSubtitleTrackID(secondary: false)
+            }.value
+            if let selectedID, let match = tracks.first(where: {
+                if case .mpv(let id) = $0.backendID { return id == selectedID }
+                return false
+            }) {
+                return match
+            }
+            return preferredBitmapTrack(in: tracks) ?? tracks.first
+        }
         if let item = nativeSubtitlePlayerItem(),
            let index = await NativeSubtitleSelection.selectedOptionIndex(for: item) {
             if let match = tracks.first(where: {
@@ -6476,6 +6686,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         subtitlesSettings.setAppearanceControlsEnabled(canEditAppearance, delayEnabled: extended)
         subtitlesSettings.setMpvExclusiveControlsEnabled(extended)
+
+        let hasVideo = activeMediaKind == .video && (currentMediaURL != nil || playbackSourceURL != nil)
+        subtitlesSettings.searchOnlineButton.isEnabled = hasVideo
 
         subtitlesSettings.primaryEnabledSwitch.isEnabled = !cachedSubtitleTracks.isEmpty
             || !cachedDiscoveredCompanions.isEmpty
@@ -6590,7 +6803,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             switch track.backendID {
             case .externalMpv(_, let path), .companionSidecar(let path):
                 return CompanionSubtitleDiscovery.normalizePath(path) == pendingNormalized
-            case .avFoundation, .mpv:
+            case .avFoundation, .mpv, .embeddedBitmapOverlay:
                 return false
             }
         }) else { return }
@@ -6653,6 +6866,36 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }.value
             }
             await applySubtitleAppearanceToPlayback()
+            updatePlaybackSubtitleToggle()
+            return
+        }
+        if bitmapOverlayActive || !cachedBitmapProbeTracks.isEmpty {
+            if !bitmapOverlayActive,
+               let url = playbackSourceURL ?? currentMediaURL,
+               !isGeneratedFallbackURL(url) {
+                startBitmapSubtitleOverlay(sourceURL: url)
+            }
+            if primarySubtitlesEnabled, let track {
+                if case .mpv(let id) = track.backendID {
+                    _ = await Task.detached { [bitmapOverlayController] in
+                        bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
+                    }.value
+                } else if case .embeddedBitmapOverlay(let subtitleIndex) = track.backendID {
+                    _ = await Task.detached { [bitmapOverlayController] in
+                        let tracks = bitmapOverlayController.subtitleTracks()
+                        if subtitleIndex >= 0, subtitleIndex < tracks.count,
+                           case .mpv(let id) = tracks[subtitleIndex].backendID {
+                            bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
+                        } else {
+                            bitmapOverlayController.selectPreferredSubtitleLanguage("en")
+                        }
+                    }.value
+                }
+                bitmapOverlayBlitView.isHidden = false
+                bitmapOverlayBlitView.requestFrame()
+            } else {
+                bitmapOverlayBlitView.isHidden = true
+            }
             updatePlaybackSubtitleToggle()
             return
         }
@@ -6884,7 +7127,348 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         panel.title = "Open subtitle file"
         panel.prompt = "Open"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        applyExternalSubtitleURL(url)
+    }
 
+    @objc private func searchOnlineSubtitlesPressed() {
+        guard let videoURL = playbackSourceURL ?? currentMediaURL, activeMediaKind == .video else {
+            let alert = NSAlert()
+            alert.messageText = "No video open"
+            alert.informativeText = OpenSubtitlesClientError.noVideoOpen.userMessage
+            alert.runModal()
+            return
+        }
+        guard let hostWindow = view.window else { return }
+
+        let sheet = OpenSubtitlesSearchSheetController()
+        openSubtitlesSearchSheet = sheet
+        sheet.videoURL = videoURL
+        sheet.initialQuery = OpenSubtitlesQueryCleaner.query(fromFileName: videoURL.lastPathComponent)
+        sheet.onAttach = { [weak self] url in
+            self?.applyExternalSubtitleURL(url)
+        }
+        sheet.onDismiss = { [weak self] in
+            self?.openSubtitlesSearchSheet = nil
+        }
+        sheet.prepareAndPresent(asSheetOn: hostWindow)
+    }
+
+    /// Remux keeps sharp A/V. Prefer local PGS overlay (no API key); OpenSubtitles is optional.
+    private func maybeTipBitmapSubtitlesOnly(sourceURL: URL?, playableTracks: [SubtitleTrackInfo]) {
+        guard !mpvBackendActive else { return }
+        guard !bitmapOverlayActive else { return }
+        guard cachedBitmapProbeTracks.isEmpty else { return }
+        guard !nativeSubtitleOverlay.usesSidecarPlayback else { return }
+        guard let sourceURL, !isGeneratedFallbackURL(sourceURL) else { return }
+        let path = sourceURL.standardizedFileURL.path
+        guard bitmapSubtitlesTipShownForPath != path else { return }
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: sourceURL) { return }
+
+        let hasPlayableText = playableTracks.contains { track in
+            switch track.backendID {
+            case .avFoundation, .companionSidecar, .externalMpv:
+                return true
+            case .mpv, .embeddedBitmapOverlay:
+                return false
+            }
+        }
+        guard !hasPlayableText else { return }
+        guard playableTracks.isEmpty else { return }
+
+        let url = sourceURL
+        let hasCompanions = !cachedDiscoveredCompanions.isEmpty
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let streams = FFmpegVideoFallback.probeSubtitleStreams(for: url)
+            let codecs = streams.map(\.codec)
+            let bitmapOnly = FFmpegProbeParser.hasBitmapSubtitlesOnly(codecs: codecs)
+            guard bitmapOnly else { return }
+
+            let probeTracks = SubtitleTrackCatalog.tracks(fromBitmapStreams: streams)
+            let shouldOverlay = EmbeddedBitmapOverlayPolicy.shouldAutoAttach(
+                mpvBackendActive: false,
+                playableTextTracksEmpty: true,
+                sourceHasBitmapOnly: true,
+                hasTextSidecarActive: hasCompanions,
+                libmpvAvailable: MpvPlaybackController.isAvailable()
+            )
+
+            if shouldOverlay, !probeTracks.isEmpty {
+                let started = await MainActor.run { () -> Bool in
+                    guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                        return false
+                    }
+                    guard !self.mpvBackendActive else { return false }
+                    guard !self.nativeSubtitleOverlay.usesSidecarPlayback else { return false }
+                    guard !self.bitmapOverlayActive else { return true }
+                    self.publishBitmapProbeTracks(probeTracks)
+                    self.startBitmapSubtitleOverlay(sourceURL: url)
+                    return true
+                }
+                if started { return }
+            }
+
+            let decision = OpenSubtitlesAutoAttach.decision(
+                hasApiKey: OpenSubtitlesConfig.hasApiKey,
+                playableTracksEmpty: true,
+                sourceHasBitmapOnly: true,
+                hasCompanionSidecar: hasCompanions
+            )
+
+            switch decision {
+            case .attempt:
+                await MainActor.run {
+                    guard self.bitmapSubtitlesTipShownForPath != path else { return }
+                    guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                        return
+                    }
+                    self.bitmapSubtitlesTipShownForPath = path
+                    self.showCompatibilityFailure(
+                        PlaybackUserNotice(
+                            kind: .bitmapSubtitlesOnly,
+                            message: "Downloading text subtitles for sharp playback…"
+                        )
+                    )
+                }
+                await self.autoAttachOpenSubtitles(for: url, path: path)
+            case .skip(let reason):
+                await MainActor.run {
+                    guard self.bitmapSubtitlesTipShownForPath != path else { return }
+                    guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                        return
+                    }
+                    if self.bitmapOverlayActive || !self.cachedBitmapProbeTracks.isEmpty { return }
+                    self.bitmapSubtitlesTipShownForPath = path
+                    let canEmbedded = MpvPresentCapability.canPresentPicture
+                    self.showCompatibilityFailure(
+                        PlaybackErrorFormatter.bitmapSubtitlesOnlyNotice(canUseEmbedded: canEmbedded)
+                    )
+                    PlaybackTrace.emit(
+                        "[DEBUG-subs] bitmap-only tip reason=\(reason) path=\(url.lastPathComponent)"
+                    )
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func publishBitmapProbeTracks(_ tracks: [SubtitleTrackInfo]) {
+        cachedBitmapProbeTracks = tracks
+        cachedSubtitleTracks = mergeCompanionSubtitleTracks(with: tracks)
+        applySubtitleUIDefaultIfNeeded(tracks: cachedSubtitleTracks)
+        let primarySelected = primarySubtitlesEnabled
+            ? preferredBitmapTrack(in: cachedSubtitleTracks)
+            : nil
+        populateSubtitleTrackPopUps(
+            tracks: cachedSubtitleTracks,
+            primarySelected: primarySelected,
+            secondarySelected: nil
+        )
+        updateSubtitleControlsAvailability()
+        updatePlaybackSubtitleToggle()
+        PlaybackTrace.emit("[DEBUG-subs] seeded \(tracks.count) PGS tracks into Subs picker")
+    }
+
+    private func preferredBitmapTrack(in tracks: [SubtitleTrackInfo]) -> SubtitleTrackInfo? {
+        tracks.first { track in
+            let lang = (track.language ?? "").lowercased()
+            return lang.contains("english") || lang.hasPrefix("en")
+        } ?? tracks.first
+    }
+
+    private func installBitmapOverlayBlitViewIfNeeded() {
+        guard bitmapOverlayBlitView.superview !== playerSurfaceView else { return }
+        bitmapOverlayBlitView.configureAsTransparentOverlay()
+        bitmapOverlayBlitView.translatesAutoresizingMaskIntoConstraints = false
+        bitmapOverlayBlitView.isHidden = true
+        playerSurfaceView.addSubview(bitmapOverlayBlitView, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            bitmapOverlayBlitView.leadingAnchor.constraint(equalTo: playerSurfaceView.leadingAnchor),
+            bitmapOverlayBlitView.trailingAnchor.constraint(equalTo: playerSurfaceView.trailingAnchor),
+            bitmapOverlayBlitView.topAnchor.constraint(equalTo: playerSurfaceView.topAnchor),
+            bitmapOverlayBlitView.bottomAnchor.constraint(equalTo: playerSurfaceView.bottomAnchor)
+        ])
+    }
+
+    private func startBitmapSubtitleOverlay(sourceURL: URL) {
+        guard MpvPlaybackController.isAvailable() else { return }
+        installBitmapOverlayBlitViewIfNeeded()
+        let path = sourceURL.standardizedFileURL.path
+        bitmapOverlaySourcePath = path
+        bitmapOverlayBlitView.isHidden = false
+        bitmapOverlayActive = true
+        bitmapSubtitlesTipShownForPath = path
+
+        PlaybackTrace.emit("[DEBUG-subs] starting PGS overlay on remux path=\(sourceURL.lastPathComponent)")
+        bitmapOverlayController.loadSubtitleOverlayOnly(
+            url: sourceURL,
+            blitView: bitmapOverlayBlitView
+        ) { [weak self] result in
+            guard let self else { return }
+            guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                self.stopBitmapSubtitleOverlay()
+                return
+            }
+            switch result {
+            case .success:
+                self.setPrimarySubtitlesEnabled(true)
+                self.startBitmapOverlaySyncTimer()
+                if let sec = self.nativePlaybackTimeSec() {
+                    self.bitmapOverlayController.seek(to: sec, exact: true)
+                    self.bitmapOverlayBlitView.requestFrame()
+                }
+                Task { await self.refreshSubtitleSettings(syncPlayback: true, applyAppearance: false) }
+                self.hideCompatibilityFailure()
+                PlaybackTrace.emit("[DEBUG-subs] PGS overlay ready path=\(sourceURL.lastPathComponent)")
+                PlaybackTrace.emit(
+                    "[DEBUG-subs] overlay uses second decode (scaled black plate) — blits off-main @~12fps"
+                )
+            case .failed(let message):
+                PlaybackTrace.emit("[DEBUG-subs] PGS overlay failed: \(message)")
+                self.stopBitmapSubtitleOverlay()
+                let canEmbedded = MpvPresentCapability.canPresentPicture
+                self.showCompatibilityFailure(
+                    PlaybackErrorFormatter.bitmapSubtitlesOnlyNotice(canUseEmbedded: canEmbedded)
+                )
+            }
+        }
+    }
+
+    private func stopBitmapSubtitleOverlay() {
+        bitmapOverlaySyncTimer?.invalidate()
+        bitmapOverlaySyncTimer = nil
+        if bitmapOverlayActive || bitmapOverlayController.isRunning {
+            bitmapOverlayController.terminate()
+        }
+        bitmapOverlayActive = false
+        bitmapOverlaySourcePath = nil
+        bitmapOverlayBlitView.isHidden = true
+        bitmapOverlayBlitView.onRenderFrame = nil
+        // Keep probe tracks so Subs picker stays populated if overlay restarts; clear only on source change.
+    }
+
+    private func startBitmapOverlaySyncTimer() {
+        bitmapOverlaySyncTimer?.invalidate()
+        // Drift correction only — blits come from mpv's SW update callback (off-main).
+        bitmapOverlaySyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.syncBitmapSubtitleOverlayClock()
+        }
+    }
+
+    private func syncBitmapSubtitleOverlayClock() {
+        guard bitmapOverlayActive, !mpvBackendActive else { return }
+        let show = primarySubtitlesEnabled
+        if bitmapOverlayBlitView.isHidden == show {
+            bitmapOverlayBlitView.isHidden = !show
+        }
+        guard show else {
+            if bitmapOverlayWantPlaying {
+                bitmapOverlayWantPlaying = false
+                bitmapOverlayController.pause()
+            }
+            return
+        }
+        guard let sec = nativePlaybackTimeSec() else { return }
+        let playing = player.rate > 0.01
+        if playing != bitmapOverlayWantPlaying {
+            bitmapOverlayWantPlaying = playing
+            if playing {
+                bitmapOverlayController.play()
+            } else {
+                bitmapOverlayController.pause()
+            }
+        }
+        if playing {
+            let rate = player.rate
+            if abs(rate - bitmapOverlayLastRate) > 0.01 {
+                bitmapOverlayLastRate = rate
+                bitmapOverlayController.setSpeed(rate)
+            }
+        }
+        // Prefer cached time-pos — never ipcQueue.sync on the UI timer.
+        let mpvSec = bitmapOverlayController.currentTimeSec()
+        if abs(mpvSec - sec) > 0.45 {
+            bitmapOverlayController.seek(to: sec, exact: true)
+        }
+    }
+
+    private func fetchBitmapOverlaySubtitleTracks() async -> [SubtitleTrackInfo] {
+        guard bitmapOverlayActive else { return [] }
+        return await Task.detached { [bitmapOverlayController] in
+            bitmapOverlayController.subtitleTracks()
+        }.value
+    }
+
+    private func autoAttachOpenSubtitles(for videoURL: URL, path: String) async {
+        let client = OpenSubtitlesClient()
+        let query = OpenSubtitlesQueryCleaner.query(fromFileName: videoURL.lastPathComponent)
+        let language = "en"
+        do {
+            let results = try await client.search(query: query, language: language)
+            guard let best = OpenSubtitlesAutoAttach.pickBest(from: results, preferredLanguage: language) else {
+                throw OpenSubtitlesClientError.emptyResults
+            }
+            let (link, fileName) = try await client.requestDownload(fileID: best.fileID)
+            let data = try await client.downloadFile(from: link)
+            let dest = OpenSubtitlesSidecarStore.destinationURL(
+                forVideo: videoURL,
+                language: language,
+                suggestedFileName: fileName ?? best.fileName
+            )
+            let written = try OpenSubtitlesSidecarStore.write(data, to: dest)
+            await MainActor.run {
+                guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                    return
+                }
+                self.hideCompatibilityFailure()
+                self.applyExternalSubtitleURL(written)
+                PlaybackTrace.emit(
+                    "[DEBUG-subs] auto-attached OpenSubtitles file=\(written.lastPathComponent) query=\(query)"
+                )
+            }
+        } catch let error as OpenSubtitlesClientError {
+            await MainActor.run {
+                guard (self.playbackSourceURL ?? self.currentMediaURL)?.standardizedFileURL.path == path else {
+                    return
+                }
+                let canEmbedded = MpvPresentCapability.canPresentPicture
+                self.showCompatibilityFailure(
+                    PlaybackUserNotice(
+                        kind: .bitmapSubtitlesOnly,
+                        message: error.userMessage + (canEmbedded
+                            ? " Or use Embedded subs for PGS (softer picture)."
+                            : " Search online from Subs, or drop an .srt next to the file."),
+                        action: canEmbedded ? .useEmbeddedBitmapSubs : .searchOnlineSubtitles
+                    )
+                )
+                PlaybackTrace.emit("[DEBUG-subs] auto-attach failed: \(error.userMessage)")
+            }
+        } catch {
+            await MainActor.run {
+                self.showCompatibilityFailure(
+                    PlaybackErrorFormatter.bitmapSubtitlesOnlyNotice(
+                        canUseEmbedded: MpvPresentCapability.canPresentPicture
+                    )
+                )
+            }
+        }
+    }
+
+    /// Opt-in DirectMpv software-blit so PGS can show (softer picture until Metal present).
+    private func restartWithEmbeddedBitmapSubs() {
+        guard let url = playbackSourceURL ?? currentMediaURL, !isGeneratedFallbackURL(url) else { return }
+        guard MpvPresentCapability.canPresentPicture else {
+            searchOnlineSubtitlesPressed()
+            return
+        }
+        let resume = player.currentTime()
+        stopBitmapSubtitleOverlay()
+        PlaybackTrace.emit("[DEBUG-route] user opted into embedded bitmap DirectMpv path=\(url.lastPathComponent)")
+        loadVideo(url: url, replaceCurrent: true, startAt: resume, forceDirectMpv: true)
+    }
+
+    /// Shared attach path for Load file… and OpenSubtitles downloads.
+    private func applyExternalSubtitleURL(_ url: URL) {
         lastExternalSubtitlePath = url.path
         subtitlesSettings.externalFileLabel.stringValue = url.lastPathComponent
 
@@ -6902,6 +7486,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         nativeSubtitleOverlay.loadSidecar(url: url)
+        stopBitmapSubtitleOverlay()
         setPrimarySubtitlesEnabled(true)
         syncNativeSubtitleOverlay()
         if let currentSec = nativePlaybackTimeSec() {
@@ -7155,7 +7740,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let showVolume = activeMediaKind == .video && audioOutputEnabled
         volumeCluster.isHidden = !showVolume
         playbackAccessoryToVolumeConstraint?.isActive = showVolume
-        playbackAccessoryToEdgeConstraint?.isActive = !showVolume
+        volumeToSettingsConstraint?.isActive = showVolume
+        playbackAccessoryToSettingsConstraint?.isActive = !showVolume
+        // Hidden sibling views still keep intrinsic width in the top row unless collapsed —
+        // that shoved the trailing settings gear inward vs the leading folder.
+        volumeClusterCollapsedWidthConstraint?.isActive = !showVolume
         if showVolume, playbackTopRowLayoutConfigured {
             let tier = currentControlTier
             volumeSliderWidthConstraint?.constant = volumeSliderWidth(for: tier)
@@ -7170,7 +7759,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     func applyEffectivePlaybackVolume() {
-        guard audioOutputEnabled, !isMutedForSwitch else { return }
+        guard audioOutputEnabled else { return }
         let volume = effectivePlaybackVolume()
         if mpvBackendActive {
             activeSession?.setVolume(volume)
@@ -7178,6 +7767,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             player.isMuted = volume < 0.01
             player.volume = volume
         }
+    }
+
+    /// Clear an in-flight switch mute when the user (or a safety net) explicitly wants sound.
+    private func clearSwitchMuteIfNeeded() {
+        guard isMutedForSwitch else { return }
+        isMutedForSwitch = false
+        PlaybackTrace.emit("[DEBUG-playback] cleared stuck switch-mute")
     }
 
     private func volumeSpeakerSymbolName() -> String {
@@ -7203,7 +7799,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     @objc func volumeMuteButtonPressed() {
-        guard audioOutputEnabled, !isMutedForSwitch else { return }
+        guard audioOutputEnabled else { return }
+        clearSwitchMuteIfNeeded()
         if isUserVolumeMuted {
             isUserVolumeMuted = false
             desiredPlaybackVolume = max(0.05, volumeLevelBeforeUserMute)
@@ -7237,7 +7834,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     func applyPlaybackEQToActiveMpv() {
         guard mpvBackendActive, mpvPlaybackStarted else { return }
         let bands = SettingsStore.shared.playbackEQBands
-        mpvController.applyPlaybackEQ(gains: bands)
+        // Flat EQ still ran lavfi and could color/glitch audio under SW present load.
+        if bands.allSatisfy({ abs($0) < 0.05 }) {
+            mpvController.clearPlaybackEQ()
+        } else {
+            mpvController.applyPlaybackEQ(gains: bands)
+        }
     }
 
     @objc private func audioEQPresetChanged() {
@@ -7426,6 +8028,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func startPlaybackAtPreferredRate() {
+        // Play must never leave a stuck switch-mute or zeroed AVPlayer volume behind —
+        // common after freeze recovery / item rebind / long HEVC sessions.
+        if isMutedForSwitch {
+            restoreAudioAfterSwitchSmoothly()
+        } else {
+            ensureLaughVolumeIfPlaying()
+        }
         if mpvBackendActive {
             activeSession?.setRate(preferredPlaybackRate)
             activeSession?.play()
@@ -7434,6 +8043,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if preferredPlaybackRate != 1.0 {
                 player.rate = preferredPlaybackRate
             }
+            // Re-assert volume after play(); some AVPlayer stalls clear mute flags only briefly.
+            ensureLaughVolumeIfPlaying()
         }
         updatePlayPauseButtonIcon()
     }
@@ -8520,49 +9131,76 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         playbackTopRowView.translatesAutoresizingMaskIntoConstraints = false
         volumeCluster.translatesAutoresizingMaskIntoConstraints = false
+        libraryButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
 
+        // Far left: library. Left of transport: subs. Right of transport: queue + volume.
+        // Far right: settings.
+        playbackTopRowView.addSubview(libraryButton)
         playbackTopRowView.addSubview(playbackLeadingAccessoryCluster)
         playbackTopRowView.addSubview(transportClusterStack)
         playbackTopRowView.addSubview(playbackAccessoryCluster)
         playbackTopRowView.addSubview(volumeCluster)
+        playbackTopRowView.addSubview(settingsButton)
 
         playbackAccessoryToVolumeConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
             equalTo: volumeCluster.leadingAnchor,
             constant: -playbackControlClusterSpacing
         )
-        playbackAccessoryToEdgeConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
-            equalTo: playbackTopRowView.trailingAnchor
+        volumeToSettingsConstraint = volumeCluster.trailingAnchor.constraint(
+            equalTo: settingsButton.leadingAnchor,
+            constant: -playbackControlClusterSpacing
+        )
+        playbackAccessoryToSettingsConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
+            equalTo: settingsButton.leadingAnchor,
+            constant: -playbackControlClusterSpacing
         )
 
         NSLayoutConstraint.activate([
             playbackTopRowView.heightAnchor.constraint(equalToConstant: 28),
+
+            libraryButton.leadingAnchor.constraint(equalTo: playbackTopRowView.leadingAnchor),
+            libraryButton.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
             playbackLeadingAccessoryCluster.trailingAnchor.constraint(
                 equalTo: transportClusterStack.leadingAnchor,
                 constant: -playbackControlClusterSpacing
             ),
             playbackLeadingAccessoryCluster.leadingAnchor.constraint(
-                greaterThanOrEqualTo: playbackTopRowView.leadingAnchor
+                greaterThanOrEqualTo: libraryButton.trailingAnchor,
+                constant: 8
             ),
             playbackLeadingAccessoryCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
             transportClusterStack.centerXAnchor.constraint(equalTo: playbackTopRowView.centerXAnchor),
             transportClusterStack.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
+            playbackAccessoryCluster.leadingAnchor.constraint(
+                greaterThanOrEqualTo: transportClusterStack.trailingAnchor,
+                constant: 8
+            ),
             playbackAccessoryCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
-            volumeCluster.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
             volumeCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+
+            settingsButton.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
+            settingsButton.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
             transportClusterStack.trailingAnchor.constraint(
                 lessThanOrEqualTo: playbackAccessoryCluster.leadingAnchor,
                 constant: -8
             ),
 
-            playbackAccessoryToVolumeConstraint!
+            playbackAccessoryToVolumeConstraint!,
+            volumeToSettingsConstraint!
         ])
-        playbackAccessoryToEdgeConstraint?.isActive = false
+        volumeClusterCollapsedWidthConstraint = volumeCluster.widthAnchor.constraint(equalToConstant: 0)
+        volumeClusterCollapsedWidthConstraint?.priority = .required
+        playbackAccessoryToSettingsConstraint?.isActive = false
         updatePlaybackVolumeChromeVisibility()
+        // Keep outer accessories above transport chrome so edge icons stay visually paired.
+        playbackTopRowView.addSubview(libraryButton, positioned: .above, relativeTo: nil)
+        playbackTopRowView.addSubview(settingsButton, positioned: .above, relativeTo: nil)
     }
 
     private enum SpeedBadgePin {
@@ -8667,6 +9305,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             height: Self.playbackBarAccessoryButtonSize.height
         )
         button.imagePosition = .imageOnly
+        (button.cell as? NSButtonCell)?.imageScaling = .scaleProportionallyDown
     }
 
     private func styleIconButton(_ button: NSButton, symbol: String, label: String, pointSize: CGFloat = 15) {
@@ -8770,7 +9409,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         transportClusterStack.addArrangedSubview(queueNextButton)
         updateQueueTransportButtons()
 
-        playbackLeadingAccessoryCluster.addArrangedSubview(libraryButton)
+        // Subs sit immediately left of the transport cluster — library is pinned far left.
+        if libraryButton.superview !== playbackTopRowView {
+            libraryButton.removeFromSuperview()
+            playbackTopRowView.addSubview(libraryButton)
+        }
+        if settingsButton.superview !== playbackTopRowView {
+            settingsButton.removeFromSuperview()
+            playbackTopRowView.addSubview(settingsButton)
+        }
         playbackLeadingAccessoryCluster.addArrangedSubview(playbackSubtitleToggle)
         MusicStylePlaybackBar.configureSubtitleToggleButton(playbackSubtitleToggle)
         playbackSubtitleToggle.target = self
@@ -8956,6 +9603,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         let rate = player.rate
+        // Auto-heal stuck mute while the clock is running (switch-mute left behind, AVPlayer hang).
+        if rate > 0.01, audioOutputEnabled, !isUserVolumeMuted {
+            if isMutedForSwitch || player.isMuted || player.volume < 0.01 {
+                clearSwitchMuteIfNeeded()
+                applyEffectivePlaybackVolume()
+            }
+        }
+        if rate > 0.01 {
+            checkSparseIncompleteRemuxFreeze()
+        }
         guard let item = player.currentItem else {
             PlaybackTrace.emit("[DEBUG-playback] t=\(rounded)s rate=\(String(format: "%.2f", rate)) buffer=none")
             return
@@ -8968,6 +9625,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         PlaybackTrace.emit(
             "[DEBUG-playback] t=\(rounded)s rate=\(String(format: "%.2f", rate)) buffer=\(health.logLabel) keepUp=\(item.isPlaybackLikelyToKeepUp) empty=\(item.isPlaybackBufferEmpty) full=\(item.isPlaybackBufferFull)"
         )
+    }
+
+    private func checkSparseIncompleteRemuxFreeze() {
+        guard let playable = activePlaybackFileURL, isGeneratedFallbackURL(playable) else { return }
+        guard sparseRemuxFreezeCheckedPath != playable.path else { return }
+        sparseRemuxFreezeCheckedPath = playable.path
+        guard let source = playbackSourceURL ?? currentMediaURL,
+              IncompleteMediaProbe.looksLikeIncompleteDownload(at: source) else { return }
+
+        let playableURL = playable
+        let sourceURL = source
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            guard FFmpegVideoFallback.remuxLooksTooSparseForPlayback(at: playableURL) else { return }
+            await MainActor.run {
+                guard self.activePlaybackFileURL?.path == playableURL.path else { return }
+                self.player.pause()
+                self.showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: sourceURL))
+                PlaybackTrace.emit(
+                    "[DEBUG-fallback] paused sparse remux freeze (clock advanced, picture stuck) path=\(playableURL.lastPathComponent)"
+                )
+            }
+        }
     }
 
     private func logBufferStateChanges(item: AVPlayerItem) {
@@ -9040,6 +9720,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     @objc private func seekSliderChanged() {
         let start = CFAbsoluteTimeGetCurrent()
         let targetSec = seekSlider.doubleValue
+        PlaybackTrace.emit(String(format: "[DEBUG-ui] seek_bar target=%.2fs rate=%.2f", targetSec, player.rate))
         if isPreviewPlaybackActive,
            targetSec > activePlayableDurationSec - 5,
            let sourceDuration = activePreviewSourceDurationSec,
@@ -9048,9 +9729,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         let target = CMTime(seconds: targetSec, preferredTimescale: 600)
-        performCooperativeSeek(to: target) { _ in
+        // Precise seek for bar clicks — loose tolerance on HEVC remuxes often lands on a
+        // non-decodable point and leaves a frozen frame at roughly the same look.
+        performCooperativeSeek(to: target, precise: true) { [weak self] _ in
+            guard let self else { return }
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
-            print(String(format: "[DEBUG-ui] seek=%.2fms", elapsedMs))
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-ui] seek_bar done=%.0fms rate=%.2f t=%.2f",
+                elapsedMs,
+                self.player.rate,
+                CMTimeGetSeconds(self.player.currentTime())
+            ))
         }
         DispatchQueue.main.async { [weak self] in
             self?.focusPlaybackSurfaceForTransportShortcuts()
@@ -9156,6 +9845,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         volumeRampToken += 1
         isMutedForSwitch = true
         renderMonitor.reset()
+        freezeWatchdog.reset()
         detachCurrentPlayerItemObserver()
         lastPlaybackStartedItemID = nil
         player.pause()
@@ -9164,6 +9854,67 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         disconnectPlayerFromVideoSurfaces()
         updatePlayPauseButtonIcon()
         print("[DEBUG-playback] suspended AVPlayer output (still image / empty — no item teardown)")
+    }
+
+    private func startFreezeWatchdog(for item: AVPlayerItem) {
+        freezeWatchdog.isSeekingProvider = { [weak self] in
+            self?.isSeekingFromUI == true
+        }
+        freezeWatchdog.isDisplaySuppressedProvider = { [weak self] in
+            self?.isPlaybackDisplaySuppressed() ?? false
+        }
+        freezeWatchdog.onFreezeDetected = { [weak self] in
+            self?.recoverFromPlaybackFreeze()
+        }
+        freezeWatchdog.begin(player: player, item: item)
+    }
+
+    /// VideoOutput stops delivering frames when Laugh is inactive or covered — not a real freeze.
+    private func isPlaybackDisplaySuppressed() -> Bool {
+        if NSApp.isActive == false { return true }
+        guard let window = view.window else { return true }
+        if window.occlusionState.contains(.visible) == false { return true }
+        return false
+    }
+
+    /// Soft recovery when the clock advances but frames/audio have died (long-session AVPlayer hang).
+    /// Seeks without pausing — cooperative pause was audible as playback "stopping" on false positives.
+    private func recoverFromPlaybackFreeze() {
+        guard !mpvBackendActive else { return }
+        guard let item = player.currentItem, item === observedItem else { return }
+        guard player.rate > 0.01 else { return }
+        guard !isPlaybackDisplaySuppressed() else { return }
+
+        let current = item.currentTime()
+        let currentSec = CMTimeGetSeconds(current)
+        guard currentSec.isFinite else { return }
+
+        freezeWatchdog.noteRecoveryStarted()
+        let nudge = CMTimeAdd(current, CMTime(seconds: 0.05, preferredTimescale: 600))
+        let resumeRate = player.rate
+        PlaybackTrace.emit(String(
+            format: "[DEBUG-qos] freeze_watchdog recovering with seek nudge at %.2fs",
+            currentSec
+        ))
+        player.seek(to: nudge, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.isMutedForSwitch {
+                    self.restoreAudioAfterSwitchSmoothly()
+                }
+                self.ensureLaughVolumeIfPlaying()
+                self.kickVideoDisplayAfterSeek()
+                if finished, self.player.rate < 0.01, !self.isMutedForSwitch {
+                    self.player.rate = resumeRate > 0.01 ? resumeRate : self.preferredPlaybackRate
+                }
+                // Force volume even if safety-net guards thought we were fine — freeze
+                // recoveries often leave isMuted=true with volume still at the UI value.
+                if self.audioOutputEnabled, !self.isUserVolumeMuted {
+                    self.applyEffectivePlaybackVolume()
+                }
+                self.freezeWatchdog.noteRecoveryFinished()
+            }
+        }
     }
 
     private func connectPlayerToVideoSurfaces() {
@@ -9208,7 +9959,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         guard lastPlaybackStartedItemID != nil else { return }
-        guard player.rate > 0, player.currentItem != nil else { return }
+        guard player.currentItem != nil else { return }
+        // Also fix mute while paused — user often hits play after a freeze and expects sound.
         guard player.volume < 0.01 || player.isMuted else { return }
         applyEffectivePlaybackVolume()
         print(String(format: "[DEBUG-playback] volume safety restore=%.2f", effectivePlaybackVolume()))
@@ -9782,6 +10534,7 @@ extension PlayerViewController {
     func commandAdjustVolume(by delta: Float) {
         guard activeMediaKind == .video, audioOutputEnabled else { return }
         noteTransportChromeActivity()
+        clearSwitchMuteIfNeeded()
         isUserVolumeMuted = false
         desiredPlaybackVolume = min(1, max(0, desiredPlaybackVolume + delta))
         volumeSlider.doubleValue = Double(desiredPlaybackVolume)
@@ -12110,9 +12863,14 @@ final class PlayerSurfaceView: NSView {
         return mpvHostView.renderLayer
     }
 
+    var mpvHostViewIfEmbedded: MpvRenderHostView? {
+        guard mpvEmbeddingActive else { return nil }
+        return mpvHostView
+    }
+
     var mpvEmbeddingWindowID: Int {
         guard mpvEmbeddingActive else { return 0 }
-        return mpvRenderLayer == nil ? 0 : 1
+        return 1
     }
 
     func setMpvEmbeddingActive(_ active: Bool) {
@@ -12122,7 +12880,8 @@ final class PlayerSurfaceView: NSView {
             avPlayerLayer.player = nil
             avPlayerLayer.isHidden = true
             mpvHostView.isHidden = false
-            mpvHostView.renderLayer.setNeedsDisplay()
+            mpvHostView.presentCapability = MpvPresentCapability.preferred
+            mpvHostView.requestPresentRefresh()
         } else {
             mpvHostView.isHidden = true
             avPlayerLayer.isHidden = false
@@ -12136,7 +12895,7 @@ final class PlayerSurfaceView: NSView {
         lastReportedMpvBounds = .null
         notifyMpvLayoutIfNeeded()
         if mpvEmbeddingActive {
-            mpvHostView.renderLayer.setNeedsDisplay()
+            mpvHostView.requestPresentRefresh()
         }
     }
 
@@ -12153,7 +12912,7 @@ final class PlayerSurfaceView: NSView {
         }
         lastReportedMpvBounds = bounds
         onMpvLayoutChanged?()
-        mpvHostView.renderLayer.setNeedsDisplay()
+        mpvHostView.requestPresentRefresh()
     }
 
     var player: AVPlayer? {

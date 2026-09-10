@@ -19,14 +19,50 @@ final class MpvPlaybackController: @unchecked Sendable {
         ("osd-level", "0"),
         ("keep-open", "yes"),
         ("idle", "yes"),
-        ("hwdec", "auto-copy"),
+        // Copy-back hwdec keeps VT decode off the CPU while SW present still needs system RAM frames.
+        ("hwdec", "videotoolbox-copy"),
         ("stop-screensaver", "yes"),
         ("sub-auto", "no"),
         ("sub-visibility", "yes"),
         ("input-default-bindings", "no"),
         ("input-vo-keyboard", "no"),
         ("audio-display", "no"),
-        ("vd-lavc-dr", "no")
+        ("vd-lavc-dr", "no"),
+        // Prefer continuous audio over chasing video under software-blit CPU load.
+        ("ao", "coreaudio"),
+        ("audio-buffer", "0.25"),
+        ("video-sync", "audio"),
+        ("audio-channels", "auto-safe"),
+        // Speeds MPV_RENDER_API_TYPE_SW (CPU present path).
+        ("sw-fast", "yes")
+    ]
+
+    /// Subtitle overlay over remux AVPlayer. Needs a video track (vid=no cannot render PGS);
+    /// picture is scaled + blackened so black-key compositing keeps only glyphs.
+    static let subtitleOverlayOptions: [(String, String)] = [
+        ("config", "no"),
+        ("terminal", "no"),
+        ("vo", "libmpv"),
+        ("force-window", "no"),
+        ("osc", "no"),
+        ("osd-level", "0"),
+        ("keep-open", "yes"),
+        ("idle", "yes"),
+        ("hwdec", "videotoolbox-copy"),
+        ("aid", "no"),
+        ("ao", "null"),
+        ("pause", "yes"),
+        ("hr-seek", "yes"),
+        ("stop-screensaver", "no"),
+        ("sub-auto", "no"),
+        ("sub-visibility", "yes"),
+        ("input-default-bindings", "no"),
+        ("input-vo-keyboard", "no"),
+        ("audio-display", "no"),
+        ("sw-fast", "yes"),
+        // Force near-black video so overlay keying leaves only subtitle pixels.
+        // Keep scale modest — overlay still decodes HEVC alongside remux AVPlayer.
+        ("vf", "scale=960:400,eq=contrast=0:brightness=-1")
     ]
 
     var onTimeUpdate: ((Double, Double) -> Void)?
@@ -36,11 +72,15 @@ final class MpvPlaybackController: @unchecked Sendable {
 
     private var embed: OpaquePointer?
     private weak var renderLayer: MpvOpenGLLayer?
+    private weak var softwareBlitView: MpvSoftwareBlitView?
+    private var presentCapability: MpvPresentCapability = .preferred
     private let ipcQueue = DispatchQueue(label: "mpv-embed")
     private var isReady = false
     private var lastDuration: Double = 0
     private var lastTimePos: Double = 0
     private var terminated = false
+    /// Updated from pause property observations — safe to read on the main thread.
+    private(set) var cachedIsPaused: Bool = true
     private static var cachedAvailable: Bool?
     private static let availabilityLock = NSLock()
 
@@ -91,8 +131,24 @@ final class MpvPlaybackController: @unchecked Sendable {
         ipcQueue.sync { terminateUnlocked() }
     }
 
-    /// Loads `url` and draws into `renderLayer`. Completion runs on the main queue.
+    /// Loads `url` and draws via the preferred present path (software blit by default).
+    func load(
+        url: URL,
+        hostView: MpvRenderHostView,
+        completion: @escaping @MainActor (LoadResult) -> Void
+    ) {
+        let capability = MpvPresentCapability.preferred
+        hostView.presentCapability = capability
+        if capability == .softwareBlit {
+            loadSoftwareBlit(url: url, blitView: hostView.softwareBlitView, completion: completion)
+        } else {
+            load(url: url, renderLayer: hostView.openGLLayer, completion: completion)
+        }
+    }
+
+    /// Loads `url` and draws into `renderLayer` (OpenGL — currently blacks out on this macOS).
     func load(url: URL, renderLayer: MpvOpenGLLayer, completion: @escaping @MainActor (LoadResult) -> Void) {
+        presentCapability = .openGLDeprecated
         ipcQueue.async { [weak self] in
             guard let self else {
                 DispatchQueue.main.async { completion(.failed("controller deallocated")) }
@@ -158,45 +214,251 @@ final class MpvPlaybackController: @unchecked Sendable {
                         completion(.failed("OpenGL render context failed"))
                         return
                     }
-                    self.ipcQueue.async {
-                        let loadStatus = mediaPath.withCString { pathC in
-                            mpv_embed_command3(created, "loadfile", pathC, "replace")
-                        }
-                        guard loadStatus >= 0 else {
-                            self.terminateUnlocked()
-                            DispatchQueue.main.async { completion(.failed("loadfile failed")) }
-                            return
-                        }
-
-                        let readyDeadline = CFAbsoluteTimeGetCurrent() + 8
-                        while CFAbsoluteTimeGetCurrent() < readyDeadline {
-                            mpv_embed_drain_events(created)
-                            if !self.isReady, self.lastDuration > 0 {
-                                self.isReady = true
-                            }
-                            if self.isReady { break }
-                            if self.terminated || self.embed == nil {
-                                DispatchQueue.main.async { completion(.failed("mpv exited early")) }
-                                return
-                            }
-                            Thread.sleep(forTimeInterval: 0.02)
-                        }
-
-                        guard self.isReady else {
-                            self.terminateUnlocked()
-                            DispatchQueue.main.async { completion(.failed("mpv ready timeout")) }
-                            return
-                        }
-                        PlaybackTrace.emit("[DEBUG-mpv] in-process libmpv render attached path=\(mediaPath)")
-                        DispatchQueue.main.async { completion(.success) }
-                    }
+                    self.finishLoadfile(created: created, mediaPath: mediaPath, completion: completion)
                 }
             }
         }
     }
 
-    func play() { setFlag("pause", value: 0) }
-    func pause() { setFlag("pause", value: 1) }
+    private func loadSoftwareBlit(
+        url: URL,
+        blitView: MpvSoftwareBlitView,
+        completion: @escaping @MainActor (LoadResult) -> Void
+    ) {
+        presentCapability = .softwareBlit
+        ipcQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(.failed("controller deallocated")) }
+                return
+            }
+            self.terminateUnlocked()
+            self.terminated = false
+            self.isReady = false
+            self.lastDuration = 0
+            self.lastTimePos = 0
+
+            guard Self.isAvailable() else {
+                DispatchQueue.main.async { completion(.failed("libmpv not available")) }
+                return
+            }
+
+            guard let created = mpv_embed_create() else {
+                DispatchQueue.main.async { completion(.failed("mpv_create failed")) }
+                return
+            }
+            self.embed = created
+
+            for (name, value) in Self.inProcessOptions {
+                _ = name.withCString { nameC in
+                    value.withCString { valueC in
+                        mpv_embed_set_option(created, nameC, valueC)
+                    }
+                }
+            }
+            if let fontDirectory = SubtitleFont.bundledFontsDirectoryURL?.path {
+                _ = "sub-fonts-dir".withCString { nameC in
+                    fontDirectory.withCString { valueC in
+                        mpv_embed_set_option(created, nameC, valueC)
+                    }
+                }
+            }
+
+            let initStatus = mpv_embed_initialize(created)
+            guard initStatus >= 0 else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("mpv_initialize failed")) }
+                return
+            }
+
+            let swStatus = mpv_embed_create_sw(created)
+            guard swStatus >= 0 else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("software render context failed")) }
+                return
+            }
+
+            _ = mpv_embed_observe(created, 1, "time-pos", 1)
+            _ = mpv_embed_observe(created, 2, "duration", 1)
+            _ = mpv_embed_observe(created, 3, "pause", 0)
+            self.installHooksUnlocked()
+
+            let mediaPath = url.path
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    completion(.failed("controller deallocated"))
+                    return
+                }
+                self.attachSoftwareBlitView(blitView)
+                self.finishLoadfile(created: created, mediaPath: mediaPath, completion: completion)
+            }
+        }
+    }
+
+    /// Loads `url` with video/audio disabled; SW-blits PGS/ASS into `blitView` for overlay on AVPlayer.
+    func loadSubtitleOverlayOnly(
+        url: URL,
+        blitView: MpvSoftwareBlitView,
+        preferredLanguage: String = "en",
+        completion: @escaping @MainActor (LoadResult) -> Void
+    ) {
+        presentCapability = .softwareBlit
+        ipcQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(.failed("controller deallocated")) }
+                return
+            }
+            self.terminateUnlocked()
+            self.terminated = false
+            self.isReady = false
+            self.lastDuration = 0
+            self.lastTimePos = 0
+
+            guard Self.isAvailable() else {
+                DispatchQueue.main.async { completion(.failed("libmpv not available")) }
+                return
+            }
+
+            guard let created = mpv_embed_create() else {
+                DispatchQueue.main.async { completion(.failed("mpv_create failed")) }
+                return
+            }
+            self.embed = created
+
+            for (name, value) in Self.subtitleOverlayOptions {
+                _ = name.withCString { nameC in
+                    value.withCString { valueC in
+                        mpv_embed_set_option(created, nameC, valueC)
+                    }
+                }
+            }
+            if let fontDirectory = SubtitleFont.bundledFontsDirectoryURL?.path {
+                _ = "sub-fonts-dir".withCString { nameC in
+                    fontDirectory.withCString { valueC in
+                        mpv_embed_set_option(created, nameC, valueC)
+                    }
+                }
+            }
+
+            let initStatus = mpv_embed_initialize(created)
+            guard initStatus >= 0 else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("mpv_initialize failed")) }
+                return
+            }
+
+            let swStatus = mpv_embed_create_sw(created)
+            guard swStatus >= 0 else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("software render context failed")) }
+                return
+            }
+
+            _ = mpv_embed_observe(created, 1, "time-pos", 1)
+            _ = mpv_embed_observe(created, 2, "duration", 1)
+            _ = mpv_embed_observe(created, 3, "pause", 0)
+            self.installHooksUnlocked()
+
+            let mediaPath = url.path
+            let lang = preferredLanguage
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    completion(.failed("controller deallocated"))
+                    return
+                }
+                blitView.configureAsTransparentOverlay()
+                self.attachSoftwareBlitView(blitView)
+                self.finishLoadfile(created: created, mediaPath: mediaPath) { [weak self] result in
+                    guard let self else {
+                        completion(.failed("controller deallocated"))
+                        return
+                    }
+                    if case .success = result {
+                        self.selectPreferredSubtitleLanguage(lang)
+                        blitView.requestFrame()
+                    }
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    /// Prefer English (or `language`) subtitle track; falls back to first embedded sub.
+    func selectPreferredSubtitleLanguage(_ language: String) {
+        let preferred = language.lowercased()
+        ipcQueue.async { [weak self] in
+            guard let self, let embed = self.embed else { return }
+            let tracks = SubtitleTrackCatalog.tracks(fromMpvTrackList: self.getNodeJSONUnlocked("track-list"))
+            let match = tracks.first { track in
+                let lang = (track.language ?? "").lowercased()
+                return lang == preferred
+                    || lang.hasPrefix(preferred + "-")
+                    || lang.hasPrefix(preferred + " ")
+                    || lang.contains("english")
+            } ?? tracks.first
+            guard let match, case .mpv(let id) = match.backendID else { return }
+            _ = mpv_embed_set_double(embed, "sid", Double(id))
+            _ = mpv_embed_set_flag(embed, "sub-visibility", 1)
+            self.nudgeSubtitleDisplayUnlocked()
+        }
+    }
+
+    private func finishLoadfile(
+        created: OpaquePointer,
+        mediaPath: String,
+        completion: @escaping @MainActor (LoadResult) -> Void
+    ) {
+        ipcQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(.failed("controller deallocated")) }
+                return
+            }
+            let loadStatus = mediaPath.withCString { pathC in
+                mpv_embed_command3(created, "loadfile", pathC, "replace")
+            }
+            guard loadStatus >= 0 else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("loadfile failed")) }
+                return
+            }
+
+            let readyDeadline = CFAbsoluteTimeGetCurrent() + 8
+            while CFAbsoluteTimeGetCurrent() < readyDeadline {
+                mpv_embed_drain_events(created)
+                if !self.isReady, self.lastDuration > 0 {
+                    self.isReady = true
+                }
+                if self.isReady { break }
+                if self.terminated || self.embed == nil {
+                    DispatchQueue.main.async { completion(.failed("mpv exited early")) }
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+
+            guard self.isReady else {
+                self.terminateUnlocked()
+                DispatchQueue.main.async { completion(.failed("mpv ready timeout")) }
+                return
+            }
+            PlaybackTrace.emit(
+                "[DEBUG-mpv] in-process libmpv present=\(self.presentCapability) path=\(mediaPath)"
+            )
+            DispatchQueue.main.async {
+                self.softwareBlitView?.requestFrame()
+                completion(.success)
+            }
+        }
+    }
+
+    func play() {
+        cachedIsPaused = false
+        setFlag("pause", value: 0)
+    }
+
+    func pause() {
+        cachedIsPaused = true
+        setFlag("pause", value: 1)
+    }
 
     var isPaused: Bool {
         ipcQueue.sync {
@@ -425,7 +687,12 @@ final class MpvPlaybackController: @unchecked Sendable {
 
     func requestRenderRefresh() {
         DispatchQueue.main.async { [weak self] in
-            self?.renderLayer?.setNeedsDisplay()
+            guard let self else { return }
+            if self.presentCapability == .softwareBlit {
+                self.softwareBlitView?.requestFrame()
+            } else {
+                self.renderLayer?.setNeedsDisplay()
+            }
         }
     }
 
@@ -435,11 +702,42 @@ final class MpvPlaybackController: @unchecked Sendable {
 
     // MARK: - Private
 
+    private func attachSoftwareBlitView(_ view: MpvSoftwareBlitView) {
+        softwareBlitView = view
+        renderLayer = nil
+        view.onRenderFrame = { [weak self] width, height, stride, pixels in
+            guard let self else { return false }
+            // Render on the mpv ipc queue so SW present never races the event loop /
+            // blocks the main thread when the blit view runs off-main.
+            return self.ipcQueue.sync {
+                guard let embed = self.embed else { return false }
+                let status = "bgr0".withCString { formatC in
+                    mpv_embed_render_sw(embed, pixels, width, height, Int32(stride), formatC)
+                }
+                if status >= 0 {
+                    mpv_embed_report_swap(embed)
+                    return true
+                }
+                return false
+            }
+        }
+        guard let embed else { return }
+        mpv_embed_set_sw_update(embed, { ctx in
+            guard let ctx else { return }
+            let controller = Unmanaged<MpvPlaybackController>.fromOpaque(ctx).takeUnretainedValue()
+            DispatchQueue.main.async {
+                controller.softwareBlitView?.requestFrame()
+            }
+        }, Unmanaged.passUnretained(self).toOpaque())
+        view.requestFrame()
+    }
+
     private func attachRenderLayer(
         _ layer: MpvOpenGLLayer,
         completion: @escaping (Bool) -> Void
     ) {
         renderLayer = layer
+        softwareBlitView = nil
         layer.onDraw = { [weak self] fbo, width, height in
             guard let embed = self?.embed else { return }
             _ = mpv_embed_render_gl(embed, fbo, width, height)
@@ -509,7 +807,9 @@ final class MpvPlaybackController: @unchecked Sendable {
         hooks.on_pause = { ctx, paused in
             guard let ctx else { return }
             let controller = Unmanaged<MpvPlaybackController>.fromOpaque(ctx).takeUnretainedValue()
-            DispatchQueue.main.async { controller.onPauseChanged?(paused != 0) }
+            let isPaused = paused != 0
+            controller.cachedIsPaused = isPaused
+            DispatchQueue.main.async { controller.onPauseChanged?(isPaused) }
         }
         mpv_embed_set_hooks(embed, hooks)
     }

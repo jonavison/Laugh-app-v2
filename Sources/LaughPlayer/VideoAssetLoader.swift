@@ -108,8 +108,10 @@ enum VideoAssetLoader {
     }
 
     private static func makeAsset(for url: URL, mimeHint: String?) -> AVURLAsset {
+        // Precise duration probing stalls on still-growing fragmented previews.
+        let preferPrecise = !url.lastPathComponent.contains("-preview")
         var options: [String: Any] = [
-            AVURLAssetPreferPreciseDurationAndTimingKey: true
+            AVURLAssetPreferPreciseDurationAndTimingKey: preferPrecise
         ]
         if let mimeHint {
             options["AVURLAssetOverrideMIMETypeKey"] = mimeHint

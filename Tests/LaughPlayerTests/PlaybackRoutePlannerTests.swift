@@ -67,6 +67,62 @@ final class PlaybackRoutePlannerTests: XCTestCase {
         XCTAssertTrue(PlaybackRoutePlanner.shouldProbeSourceDuration(for: .compatibilityRemux(reason: "container.mkv")))
         XCTAssertTrue(PlaybackRoutePlanner.shouldProbeSourceDuration(for: .nativeAVFoundation))
     }
+
+    func testBitmapOnlySubsPreferDirectMpvWhenPresentCapable() {
+        // Auto DirectMpv at open is off while present is software blit (soft picture).
+        XCTAssertFalse(BitmapSubtitleRouting.prefersDirectMpvAtOpen)
+        let route = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: "h264",
+            hasSidecars: false,
+            subtitleCodecs: ["hdmv_pgs_subtitle", "hdmv_pgs_subtitle"],
+            presentCapable: true
+        ))
+        XCTAssertEqual(route, .compatibilityRemux(reason: "container.mkv"))
+    }
+
+    func testBitmapOnlySubsFallBackToRemuxWhenPresentNotCapable() {
+        let route = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: nil,
+            hasSidecars: false,
+            subtitleCodecs: ["hdmv_pgs_subtitle"],
+            presentCapable: false
+        ))
+        XCTAssertEqual(route, .compatibilityRemux(reason: "container.mkv"))
+    }
+
+    func testPresentInitFailureFallsBackToRemux() {
+        let route = BitmapSubtitleRouting.fallbackAfterPresentInitFailure(remuxAvailable: true)
+        XCTAssertEqual(route, .compatibilityRemux(reason: "bitmap.presentInitFailed"))
+    }
+
+    func testOpenTimeBitmapDecisionDoesNotDependOnLaterPicker() {
+        // Remux session for text-capable file stays remux even if codecs list is empty
+        // (mid-play PGS pick is a UX tip / restart — not a silent re-route).
+        let openRoute = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: nil,
+            hasSidecars: false,
+            subtitleCodecs: ["subrip"],
+            presentCapable: true
+        ))
+        XCTAssertEqual(openRoute, .compatibilityRemux(reason: "container.mkv"))
+        XCTAssertFalse(
+            BitmapSubtitleRouting.shouldPreferDirectMpv(
+                subtitleCodecs: ["subrip"],
+                presentCapable: true,
+                remuxAvailable: true,
+                mpvAvailable: true
+            )
+        )
+    }
 }
 
 final class MediaKindDetectorTests: XCTestCase {

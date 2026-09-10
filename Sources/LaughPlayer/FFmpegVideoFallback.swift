@@ -22,7 +22,7 @@ enum FFmpegVideoFallback {
         let sourceIdentity: String
     }
 
-    private static let remuxProfileVersion = "9-all-text-subs"
+    private static let remuxProfileVersion = "14-sparse-source-not-size"
 
     private enum RemuxStrategy: String {
         /// All audio streams + all text subs (slow; many sidecar-like sub tracks).
@@ -37,6 +37,17 @@ enum FFmpegVideoFallback {
         case firstAudioTranscodeAudio
         /// Fragmented fMP4 with stereo AAC — E-AC-3 cannot be fragmented stream-copied.
         case progressivePreviewStereo
+
+        init(_ open: RemuxOpenStrategy) {
+            switch open {
+            case .allAudioWithSubs: self = .allAudioWithSubs
+            case .allAudioNoSubs: self = .allAudioNoSubs
+            case .firstAudioWithTextSubs: self = .firstAudioWithTextSubs
+            case .firstAudioNoSubs: self = .firstAudioNoSubs
+            case .firstAudioTranscodeAudio: self = .firstAudioTranscodeAudio
+            case .progressivePreviewStereo: self = .progressivePreviewStereo
+            }
+        }
     }
 
     /// Codecs that need AAC downmix/transcode for native MP4 playback (not E-AC-3 — that stream-copies fine).
@@ -133,6 +144,21 @@ enum FFmpegVideoFallback {
     private static var previewFullTargets: [URL: URL] = [:]
     private static var readyOutputPaths: Set<String> = []
     private static var remuxCache: [String: CacheEntry] = [:]
+    /// Set when a remux completed but fps/payload looked like an incomplete torrent rip.
+    private static var lastFailureIndicatesIncomplete = false
+
+    /// True when the most recent remux rejection was sparse/incomplete (not a generic ffmpeg fail).
+    static func consumeIncompleteRemuxFailure() -> Bool {
+        onProcessQueue {
+            let value = lastFailureIndicatesIncomplete
+            lastFailureIndicatesIncomplete = false
+            return value
+        }
+    }
+
+    private static func noteIncompleteRemuxFailure() {
+        _ = onProcessQueue { lastFailureIndicatesIncomplete = true }
+    }
 
     /// Reads the primary video stream codec tag from ffmpeg's header probe (stderr).
     static func probePrimaryVideoCodecTag(for inputURL: URL) -> String? {
@@ -186,13 +212,9 @@ enum FFmpegVideoFallback {
     }
 
     private static func progressivePreviewStrategy(for inputURL: URL) -> RemuxStrategy {
-        if requiresFragmentedAudioTranscode(for: inputURL) {
-            return .progressivePreviewStereo
-        }
-        if !probeTextSubtitleStreamIndices(for: inputURL).isEmpty {
-            return .firstAudioWithTextSubs
-        }
-        return .firstAudioNoSubs
+        RemuxStrategy(RemuxOpenStrategy.progressive(
+            needsAudioTranscode: requiresFragmentedAudioTranscode(for: inputURL)
+        ))
     }
 
     /// Full-quality remux destination paired with an in-flight fragmented preview.
@@ -210,7 +232,9 @@ enum FFmpegVideoFallback {
     }
 
     /// Disk/cache lookup only — never spawns ffmpeg (safe on the main thread).
+    /// Still refuses sparse sources and clears ready-flags for missing files.
     static func knownCachedPlayableURL(for inputURL: URL) -> URL? {
+        guard sourceReadyForFullRemux(inputURL) else { return nil }
         if let identity = sourceIdentity(for: inputURL) {
             let cachedURL: URL? = onProcessQueue {
                 remuxCache[identity]?.outputURL
@@ -264,13 +288,14 @@ enum FFmpegVideoFallback {
     static func prefetchFullRemux(for inputURL: URL) {
         processQueue.async {
             guard isAvailable() else { return }
+            guard sourceReadyForFullRemux(inputURL) else { return }
             guard cachedPlayableURL(for: inputURL) == nil else { return }
             let fullURL = makeOutputURL(for: inputURL)
             guard !isBackgroundFullRemuxing(outputURL: fullURL) else { return }
             if FileManager.default.fileExists(atPath: fullURL.path),
                remuxOutputHasVideoStream(at: fullURL),
                (!sourceHasAudioStreams(for: inputURL) || remuxOutputHasAudioStream(at: fullURL)),
-               outputDurationMeetsSource(outputURL: fullURL, inputURL: inputURL) {
+               outputLooksHealthy(outputURL: fullURL, inputURL: inputURL) {
                 markOutputReadyIfValid(fullURL, inputURL: inputURL)
                 storeCache(inputURL: inputURL, outputURL: fullURL)
                 return
@@ -288,6 +313,24 @@ enum FFmpegVideoFallback {
         let summary = FFmpegProbeParser.parse(stderr)
         PlaybackTrace.emit("[DEBUG-format] \(summary.logLine) file=\(inputURL.lastPathComponent)")
         return summary.durationSec
+    }
+
+    /// True when the source only has PGS/VobSub-style bitmap subs (IINA shows them; remux cannot).
+    static func sourceHasBitmapSubtitlesOnly(at inputURL: URL) -> Bool {
+        let codecs = probeSubtitleCodecs(for: inputURL)
+        return FFmpegProbeParser.hasBitmapSubtitlesOnly(codecs: codecs)
+    }
+
+    static func probeSubtitleCodecs(for inputURL: URL) -> [String] {
+        guard isAvailable() else { return [] }
+        let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
+        return FFmpegProbeParser.parseSubtitleCodecs(from: stderr)
+    }
+
+    static func probeSubtitleStreams(for inputURL: URL) -> [FFmpegSubtitleStream] {
+        guard isAvailable() else { return [] }
+        let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
+        return FFmpegProbeParser.parseSubtitleStreams(from: stderr)
     }
 
     static func remuxOutputDurationSec(at url: URL) -> Double? {
@@ -357,6 +400,7 @@ enum FFmpegVideoFallback {
     }
 
     static func cachedPlayableURL(for inputURL: URL) -> URL? {
+        guard sourceReadyForFullRemux(inputURL) else { return nil }
         let expectingAudio = sourceHasAudioStreams(for: inputURL)
         if let identity = sourceIdentity(for: inputURL) {
             let entry: CacheEntry? = onProcessQueue {
@@ -366,7 +410,7 @@ enum FFmpegVideoFallback {
                FileManager.default.fileExists(atPath: entry.outputURL.path),
                remuxOutputHasVideoStream(at: entry.outputURL),
                (!expectingAudio || remuxOutputHasAudioStream(at: entry.outputURL)),
-               outputDurationMeetsSource(outputURL: entry.outputURL, inputURL: inputURL) {
+               outputLooksHealthy(outputURL: entry.outputURL, inputURL: inputURL) {
                 markOutputReadyIfValid(entry.outputURL, inputURL: inputURL)
                 return entry.outputURL
             }
@@ -379,7 +423,7 @@ enum FFmpegVideoFallback {
         guard FileManager.default.fileExists(atPath: outputURL.path),
               remuxOutputHasVideoStream(at: outputURL),
               (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)),
-              outputDurationMeetsSource(outputURL: outputURL, inputURL: inputURL) else {
+              outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) else {
             if FileManager.default.fileExists(atPath: outputURL.path) {
                 try? FileManager.default.removeItem(at: outputURL)
             }
@@ -390,25 +434,54 @@ enum FFmpegVideoFallback {
         return outputURL
     }
 
-    /// Cache hit returns immediately; otherwise starts preview + parallel full remux.
+    /// Cache hit returns immediately; otherwise starts progressive preview only.
+    /// Full remux runs after preview attaches (see PlayerViewController) so two ffmpeg
+    /// processes are not stream-copying the same 4K source at once.
     static func beginRemux(inputURL: URL) -> RemuxStart {
-        if let cached = cachedPlayableURL(for: inputURL) {
+        guard sourceReadyForRemux(inputURL) else {
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] refuse remux — unreadable header path=\(inputURL.lastPathComponent)"
+            )
+            return .failed
+        }
+        let fullyReady = sourceReadyForFullRemux(inputURL)
+        if fullyReady, let cached = cachedPlayableURL(for: inputURL) {
             return .cacheHit(cached)
         }
         let fullURL = makeOutputURL(for: inputURL)
         let previewURL = makePreviewOutputURL(for: inputURL)
-        _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
         let skipPreview = shouldSkipProgressivePreview(audioCodec: probePrimaryAudioCodec(for: inputURL))
         if skipPreview {
+            guard fullyReady else {
+                PlaybackTrace.emit(
+                    "[DEBUG-fallback] refuse full-only remux while source still downloading path=\(inputURL.lastPathComponent)"
+                )
+                return .failed
+            }
             PlaybackTrace.emit("[DEBUG-fallback] skip progressive preview (would transcode full-length audio) input=\(inputURL.lastPathComponent)")
-        } else if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
+            _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
+            if waitUntilBackgroundFullRemuxReady(outputURL: fullURL, timeoutSec: 180) {
+                storeCache(inputURL: inputURL, outputURL: fullURL)
+                return .cacheHit(fullURL)
+            }
+            return .failed
+        }
+        if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
             return .progressivePreview(preview: previewURL, fullTarget: fullURL)
         }
+        guard fullyReady else { return .failed }
+        _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
         if waitUntilBackgroundFullRemuxReady(outputURL: fullURL, timeoutSec: 180) {
             storeCache(inputURL: inputURL, outputURL: fullURL)
             return .cacheHit(fullURL)
         }
         return .failed
+    }
+
+    /// Start the full seekable remux once progressive playback is already on screen.
+    @discardableResult
+    static func ensureBackgroundFullRemux(inputURL: URL, outputURL: URL) -> Bool {
+        launchBackgroundFullRemux(inputURL: inputURL, outputURL: outputURL)
     }
 
     private static func waitUntilBackgroundFullRemuxReady(outputURL: URL, timeoutSec: TimeInterval) -> Bool {
@@ -418,7 +491,14 @@ enum FFmpegVideoFallback {
                 return true
             }
             let stillRunning = onProcessQueue {
-                activeBackgroundFullRemux?.outputURL == outputURL && activeBackgroundFullRemux?.process.isRunning == true
+                if activeBackgroundFullRemux?.outputURL == outputURL
+                    && activeBackgroundFullRemux?.process.isRunning == true {
+                    return true
+                }
+                return activeProcesses.contains { process in
+                    guard process.isRunning else { return false }
+                    return (process.arguments ?? []).last == outputURL.path
+                }
             }
             if !stillRunning {
                 return isOutputReadyForPlayback(at: outputURL)
@@ -434,20 +514,29 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Sparse remuxes (incomplete torrent) report avg fps ≪ tbr with a full duration header.
+    /// Playing them freezes the picture while the clock keeps advancing.
+    static func remuxLooksTooSparseForPlayback(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        return !outputFrameRateLooksComplete(outputURL: url)
+    }
+
     /// Cheap readiness for fragmented preview — avoids spawning ffmpeg on every poll.
+    /// Byte-level moof readiness is enough to attach: waiting for AVAsset track probes on a
+    /// still-growing 4K HEVC fMP4 routinely stalls until the remux finishes (20–30s), which
+    /// defeats progressive preview entirely.
     static func isPreviewReadableEnoughForPlayback(url: URL) async -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard FFmpegProbeParser.isPreviewByteReady(fileSize: size, containsMOOF: fileContainsMOOFAtom(at: url)) else {
-            return false
-        }
-
-        let asset = AVURLAsset(url: url)
-        if let videoTracks = try? await asset.loadTracks(withMediaType: .video), !videoTracks.isEmpty {
+        if FFmpegProbeParser.isPreviewByteReady(
+            fileSize: size,
+            containsMOOF: fileContainsMOOFAtom(at: url)
+        ) {
             return true
         }
-        if let playable = try? await asset.load(.isPlayable), playable { return true }
-        return false
+        // Incomplete torrent remuxes can finish with a large fMP4 before every poll saw `moof`
+        // in the first 512KB (writer flush). A multi-MB file is enough to try attaching.
+        return size >= 2 * 1024 * 1024
     }
 
     private static func fileContainsMOOFAtom(at url: URL) -> Bool {
@@ -489,11 +578,28 @@ enum FFmpegVideoFallback {
 
         let outputURL = makeOutputURL(for: inputURL)
         let start = CFAbsoluteTimeGetCurrent()
+
+        // Prefer waiting for an in-flight background remux over launching competing
+        // strategy retries that delete the same output path mid-write.
+        if isBackgroundFullRemuxing(outputURL: outputURL)
+            || launchBackgroundFullRemux(inputURL: inputURL, outputURL: outputURL) {
+            if waitUntilBackgroundFullRemuxReady(outputURL: outputURL, timeoutSec: 180),
+               FileManager.default.fileExists(atPath: outputURL.path),
+               remuxOutputHasVideoStream(at: outputURL),
+               (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)),
+               outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                storeCache(inputURL: inputURL, outputURL: outputURL)
+                return Result(outputURL: outputURL, method: "remux", elapsedMs: elapsedMs)
+            }
+        }
+
         let remuxExit = runRemux(inputURL: inputURL, outputURL: outputURL, fragmented: false)
         if remuxExit == 0,
            FileManager.default.fileExists(atPath: outputURL.path),
            remuxOutputHasVideoStream(at: outputURL),
-           (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)) {
+           (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)),
+           outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) {
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
             storeCache(inputURL: inputURL, outputURL: outputURL)
             return Result(outputURL: outputURL, method: "remux", elapsedMs: elapsedMs)
@@ -512,10 +618,11 @@ enum FFmpegVideoFallback {
     }
 
     private static func fullRemuxStrategy(for inputURL: URL) -> RemuxStrategy {
-        if !probeTextSubtitleStreamIndices(for: inputURL).isEmpty {
-            return .firstAudioWithTextSubs
-        }
-        return .firstAudioNoSubs
+        let includeTextSubs = !probeTextSubtitleStreamIndices(for: inputURL).isEmpty
+        return RemuxStrategy(RemuxOpenStrategy.full(
+            needsAudioTranscode: requiresAudioTranscodeForNativePlayback(for: inputURL),
+            includeTextSubs: includeTextSubs
+        ))
     }
 
     private static func outputDurationMeetsSource(
@@ -530,14 +637,68 @@ enum FFmpegVideoFallback {
         return outputDur >= sourceDur * minimumRatio
     }
 
+    /// Reject sparse remuxes that declare a full duration but only copied a fraction of bytes
+    /// (classic still-downloading torrent / aborted remux). Those freeze on seek.
+    private static func outputPayloadMeetsSource(outputURL: URL, inputURL: URL) -> Bool {
+        let sourceBytes = (try? inputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        let outputBytes = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        let ok = FFmpegProbeParser.remuxPayloadLooksComplete(
+            outputBytes: outputBytes,
+            sourceBytes: sourceBytes
+        )
+        if !ok {
+            noteIncompleteRemuxFailure()
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] remux payload too small outputBytes=\(outputBytes) sourceBytes=\(sourceBytes) path=\(outputURL.lastPathComponent)"
+            )
+        }
+        return ok
+    }
+
+    private static func outputLooksHealthy(outputURL: URL, inputURL: URL) -> Bool {
+        outputDurationMeetsSource(outputURL: outputURL, inputURL: inputURL)
+            && outputPayloadMeetsSource(outputURL: outputURL, inputURL: inputURL)
+            && outputFrameRateLooksComplete(outputURL: outputURL)
+    }
+
+    /// Sparse remuxes often report avg fps ≪ tbr while duration metadata still looks full.
+    private static func outputFrameRateLooksComplete(outputURL: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: outputURL.path) else { return false }
+        let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", outputURL.path])
+        let average = FFmpegProbeParser.parseVideoAverageFps(from: stderr)
+        let container = FFmpegProbeParser.parseVideoContainerFps(from: stderr)
+        let ok = FFmpegProbeParser.remuxFrameRateLooksComplete(
+            averageFps: average,
+            containerFps: container
+        )
+        if !ok {
+            noteIncompleteRemuxFailure()
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] remux fps sparse avg=\(average.map { String(format: "%.2f", $0) } ?? "nil") tbr=\(container.map { String(format: "%.2f", $0) } ?? "nil") path=\(outputURL.lastPathComponent)"
+            )
+        }
+        return ok
+    }
+
     private static func markOutputReadyIfValid(_ outputURL: URL, inputURL: URL) {
+        let isPreview = outputURL.lastPathComponent.contains("-preview")
+        if isPreview {
+            let size = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            // Don't spawn ffmpeg probes on a sparse/incomplete preview — byte presence is enough.
+            guard size >= 64 * 1024 else { return }
+            _ = onProcessQueue {
+                readyOutputPaths.insert(outputURL.path)
+            }
+            return
+        }
+
         let expectingAudio = sourceHasAudioStreams(for: inputURL)
         guard remuxOutputHasVideoStream(at: outputURL),
               (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)) else { return }
 
-        let isPreview = outputURL.lastPathComponent.contains("-preview")
-        if !isPreview, !outputDurationMeetsSource(outputURL: outputURL, inputURL: inputURL) {
-            PlaybackTrace.emit("[DEBUG-fallback] remux output too short — not marking ready path=\(outputURL.path)")
+        if !outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) {
+            PlaybackTrace.emit("[DEBUG-fallback] remux output unhealthy — not marking ready path=\(outputURL.path)")
+            try? FileManager.default.removeItem(at: outputURL)
             return
         }
 
@@ -546,19 +707,50 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Readable header is enough to attempt progressive remux. Full remux cache requires
+    /// a materialized source (see `sourceReadyForFullRemux`).
+    private static func sourceReadyForRemux(_ inputURL: URL) -> Bool {
+        !IncompleteMediaProbe.looksLikeUnreadableContainer(at: inputURL)
+    }
+
+    private static func sourceReadyForFullRemux(_ inputURL: URL) -> Bool {
+        sourceReadyForRemux(inputURL)
+            && !IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL)
+    }
+
     @discardableResult
     private static func launchBackgroundFullRemux(inputURL: URL, outputURL: URL) -> Bool {
+        guard sourceReadyForFullRemux(inputURL) else {
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] skip background remux — source still downloading path=\(inputURL.lastPathComponent)"
+            )
+            return false
+        }
         guard let bundled = BundledCodecTools.ffmpegExecutablePath() else { return false }
         let alreadyRunning = onProcessQueue {
             activeBackgroundFullRemux?.outputURL == outputURL && activeBackgroundFullRemux?.process.isRunning == true
         }
         if alreadyRunning { return true }
 
+        // Another ffmpeg (blocking strategy remux, leftover process) may already be
+        // writing this path — do not delete mid-write or we thrash for 30s+.
+        let writingSamePath = onProcessQueue {
+            activeProcesses.contains { process in
+                guard process.isRunning else { return false }
+                let args = process.arguments ?? []
+                return args.last == outputURL.path
+            }
+        }
+        if writingSamePath {
+            PlaybackTrace.emit("[DEBUG-fallback] background remux deferred — output already being written path=\(outputURL.lastPathComponent)")
+            return true
+        }
+
         let expectingAudio = sourceHasAudioStreams(for: inputURL)
         if FileManager.default.fileExists(atPath: outputURL.path),
            remuxOutputHasVideoStream(at: outputURL),
            (!expectingAudio || remuxOutputHasAudioStream(at: outputURL)),
-           outputDurationMeetsSource(outputURL: outputURL, inputURL: inputURL) {
+           outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) {
             markOutputReadyIfValid(outputURL, inputURL: inputURL)
             storeCache(inputURL: inputURL, outputURL: outputURL)
             return true
@@ -612,9 +804,45 @@ enum FFmpegVideoFallback {
     }
 
     private static func launchProgressiveRemux(inputURL: URL, previewURL: URL, fullTargetURL: URL) -> Bool {
+        guard sourceReadyForRemux(inputURL) else { return false }
         guard let bundled = BundledCodecTools.ffmpegExecutablePath() else { return false }
+
+        let incomplete = IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL)
+        let durationCap = progressiveRemuxDurationCapSec(for: inputURL)
+        if incomplete, durationCap == nil {
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] refuse progressive preview — no contiguous head yet path=\(inputURL.lastPathComponent)"
+            )
+            return false
+        }
+
+        // Reuse only finished *dense* previews of complete sources. Incomplete downloads must
+        // never reuse an older full-duration sparse remux (clock advances, picture freezes).
         if FileManager.default.fileExists(atPath: previewURL.path) {
-            try? FileManager.default.removeItem(at: previewURL)
+            if incomplete {
+                PlaybackTrace.emit(
+                    "[DEBUG-fallback] discard stale progressive preview (source still downloading) path=\(previewURL.lastPathComponent)"
+                )
+                try? FileManager.default.removeItem(at: previewURL)
+            } else {
+                let size = (try? previewURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                let byteReady = size >= 2 * 1024 * 1024
+                    || FFmpegProbeParser.isPreviewByteReady(
+                        fileSize: size,
+                        containsMOOF: fileContainsMOOFAtom(at: previewURL)
+                    )
+                if byteReady, !remuxLooksTooSparseForPlayback(at: previewURL) {
+                    markOutputReadyIfValid(previewURL, inputURL: inputURL)
+                    _ = onProcessQueue {
+                        previewFullTargets[previewURL] = fullTargetURL
+                    }
+                    PlaybackTrace.emit(
+                        "[DEBUG-fallback] reuse progressive preview bytes=\(size) path=\(previewURL.lastPathComponent)"
+                    )
+                    return true
+                }
+                try? FileManager.default.removeItem(at: previewURL)
+            }
         }
 
         let process = Process()
@@ -624,9 +852,19 @@ enum FFmpegVideoFallback {
             inputURL: inputURL,
             outputURL: previewURL,
             fragmented: true,
-            strategy: strategy
+            strategy: strategy,
+            maxDurationSec: durationCap
         )
-        PlaybackTrace.emit("[DEBUG-fallback] progressive preview strategy=\(strategy.rawValue) preview=\(previewURL.path)")
+        if let durationCap {
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-fallback] progressive preview strategy=%@ cap=%.1fs preview=%@",
+                strategy.rawValue,
+                durationCap,
+                previewURL.path
+            ))
+        } else {
+            PlaybackTrace.emit("[DEBUG-fallback] progressive preview strategy=\(strategy.rawValue) preview=\(previewURL.path)")
+        }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
@@ -661,11 +899,23 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Cap progressive remux to the contiguous downloaded head so the MP4 timeline has no holes.
+    private static func progressiveRemuxDurationCapSec(for inputURL: URL) -> Double? {
+        guard IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) else { return nil }
+        let head = IncompleteMediaProbe.contiguousHeadFraction(at: inputURL)
+        guard head >= 0.02 else { return nil }
+        guard let duration = probeSourceDurationSec(for: inputURL), duration.isFinite, duration > 1 else {
+            return nil
+        }
+        return max(15, duration * head * 0.90)
+    }
+
     private static func remuxArguments(
         inputURL: URL,
         outputURL: URL,
         fragmented: Bool,
-        strategy: RemuxStrategy
+        strategy: RemuxStrategy,
+        maxDurationSec: Double? = nil
     ) -> [String] {
         var args = [
             "-y", "-nostdin",
@@ -674,6 +924,10 @@ enum FFmpegVideoFallback {
             "-map", "0:v:0",
             "-map_chapters", "-1"
         ]
+
+        if let maxDurationSec, maxDurationSec.isFinite, maxDurationSec > 1 {
+            args += ["-t", String(format: "%.3f", maxDurationSec)]
+        }
 
         switch strategy {
         case .allAudioWithSubs, .allAudioNoSubs:
@@ -733,16 +987,9 @@ enum FFmpegVideoFallback {
 
     @discardableResult
     private static func runRemux(inputURL: URL, outputURL: URL, fragmented: Bool) -> Int32 {
-        var strategies: [RemuxStrategy] = [
-            .firstAudioWithTextSubs,
-            .firstAudioNoSubs,
-            .allAudioNoSubs,
-            .firstAudioTranscodeAudio,
-            .allAudioWithSubs
-        ]
-        if requiresAudioTranscodeForNativePlayback(for: inputURL) {
-            strategies = [.firstAudioTranscodeAudio, .firstAudioWithTextSubs, .firstAudioNoSubs, .allAudioNoSubs]
-        }
+        let strategies = RemuxOpenStrategy.blockingOrder(
+            needsAudioTranscode: requiresAudioTranscodeForNativePlayback(for: inputURL)
+        ).map(RemuxStrategy.init)
         var lastExit: Int32 = -1
         var lastStderr = ""
         for strategy in strategies {
@@ -765,9 +1012,19 @@ enum FFmpegVideoFallback {
                 let expectingAudio = sourceHasAudioStreams(for: inputURL)
                 let hasVideo = remuxOutputHasVideoStream(at: outputURL)
                 let hasAudio = !expectingAudio || remuxOutputHasAudioStream(at: outputURL)
-                if hasVideo && hasAudio {
+                if hasVideo && hasAudio && outputLooksHealthy(outputURL: outputURL, inputURL: inputURL) {
                     PlaybackTrace.emit("[DEBUG-fallback] remux succeeded with strategy=\(strategy.rawValue)")
                     return 0
+                }
+                // Stream-copy strategies that map fewer streams cannot grow the payload.
+                // Retrying all of them just burns 30s on the same sparse/partial output.
+                let sparsePayload = !outputPayloadMeetsSource(outputURL: outputURL, inputURL: inputURL)
+                let sparseFps = !outputFrameRateLooksComplete(outputURL: outputURL)
+                if hasVideo && hasAudio && (sparsePayload || sparseFps) {
+                    PlaybackTrace.emit(
+                        "[DEBUG-fallback] remux exit 0 but output sparse — stopping strategy retries strategy=\(strategy.rawValue)"
+                    )
+                    break
                 }
                 PlaybackTrace.emit("[DEBUG-fallback] remux exit 0 but output incomplete, trying next strategy")
             }
@@ -823,12 +1080,14 @@ enum FFmpegVideoFallback {
     }
 
     private static func sourceIdentity(for inputURL: URL) -> String? {
-        guard let values = try? inputURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
+        // Path + logical size only. Sparse mid-download is blocked by
+        // `sourceReadyForRemux` (allocated-size probe), not by cache identity — including
+        // allocated bytes here churned the output path on every piece and forced remuxes.
+        guard let values = try? inputURL.resourceValues(forKeys: [.fileSizeKey]) else {
             return inputURL.path
         }
-        let mod = values.contentModificationDate?.timeIntervalSince1970 ?? 0
         let size = values.fileSize ?? 0
-        return "\(remuxProfileVersion)|\(inputURL.path)|\(mod)|\(size)"
+        return "\(remuxProfileVersion)|\(inputURL.path)|\(size)"
     }
 
     private static func makeOutputURL(for inputURL: URL) -> URL {

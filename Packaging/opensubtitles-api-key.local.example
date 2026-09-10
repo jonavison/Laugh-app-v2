@@ -1,0 +1,3 @@
+# Paste your OpenSubtitles.com consumer Api-Key below (one line, no quotes).
+# Create one at https://www.opensubtitles.com/en/consumers
+# Then copy this file to opensubtitles-api-key.local (gitignored) or export OPENSUBTITLES_API_KEY.

@@ -15,6 +15,10 @@ enum PlaybackRoutePlanner {
         var remuxAvailable: Bool
         var videoCodecTag: String?
         var hasSidecars: Bool
+        /// Open-time EmbeddedSubtitleTrack codecs from ffmpeg probe (empty if unknown).
+        var subtitleCodecs: [String] = []
+        /// Static present capability (software blit today).
+        var presentCapable: Bool = false
     }
 
     /// Containers macOS AVFoundation often cannot open reliably; remux to MP4 first.
@@ -40,9 +44,20 @@ enum PlaybackRoutePlanner {
         let ext = url.pathExtension.lowercased()
         let mpvAvailable = PlaybackRuntime.canUseBundledCodecStack && MpvPlaybackController.isAvailable()
         let remuxAvailable = PlaybackRuntime.canUseBundledCodecStack && FFmpegVideoFallback.isAvailable()
+        let presentCapable = MpvPresentCapability.canPresentPicture
 
         guard remuxAvailable || mpvAvailable else {
             return .nativeAVFoundation
+        }
+
+        let subtitleCodecs: [String]
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: url) {
+            // Progressive remux / tip wins until the file is materialized.
+            subtitleCodecs = []
+        } else if remuxContainerExtensions.contains(ext) || presentCapable {
+            subtitleCodecs = FFmpegVideoFallback.probeSubtitleCodecs(for: url)
+        } else {
+            subtitleCodecs = []
         }
 
         if remuxContainerExtensions.contains(ext) {
@@ -51,7 +66,9 @@ enum PlaybackRoutePlanner {
                 mpvAvailable: mpvAvailable,
                 remuxAvailable: remuxAvailable,
                 videoCodecTag: nil,
-                hasSidecars: false
+                hasSidecars: false,
+                subtitleCodecs: subtitleCodecs,
+                presentCapable: presentCapable
             ))
         }
 
@@ -65,7 +82,9 @@ enum PlaybackRoutePlanner {
             mpvAvailable: mpvAvailable,
             remuxAvailable: remuxAvailable,
             videoCodecTag: codecTag,
-            hasSidecars: hasSidecars
+            hasSidecars: hasSidecars,
+            subtitleCodecs: subtitleCodecs,
+            presentCapable: presentCapable
         ))
     }
 
@@ -89,10 +108,18 @@ enum PlaybackRoutePlanner {
             return .nativeAVFoundation
         }
 
-        // Picture is AVPlayer (Metal). libmpv's public render API is still OpenGL
-        // (deprecated, black on current macOS); standalone mpv 0.41 cannot embed.
-        // DirectMpv stays only when remux is missing (picture currently blacks out on
-        // opt-in subtitle paths, so those were removed).
+        // Bitmap-only embeds need DirectMpv picture (software blit) — remux cannot carry PGS.
+        if BitmapSubtitleRouting.shouldPreferDirectMpv(
+            subtitleCodecs: inputs.subtitleCodecs,
+            presentCapable: inputs.presentCapable,
+            remuxAvailable: remuxAvailable,
+            mpvAvailable: mpvAvailable
+        ) {
+            return .directMpv(reason: "subs.bitmapOnly")
+        }
+
+        // Picture is AVPlayer (Metal) by default. Software blit DirectMpv is for bitmap
+        // routing (above) or when remux is unavailable.
         if remuxContainerExtensions.contains(ext) {
             if remuxAvailable {
                 return .compatibilityRemux(reason: "container.\(ext)")

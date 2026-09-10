@@ -10,6 +10,8 @@ struct SubtitleTrackInfo: Equatable {
         case externalMpv(trackID: Int, path: String)
         /// Sidecar on disk — playable via extended (DirectMpv) playback.
         case companionSidecar(path: String)
+        /// Bitmap embed (PGS/VobSub) shown via remux + subtitle-only overlay.
+        case embeddedBitmapOverlay(subtitleIndex: Int)
     }
 
     let backendID: BackendID
@@ -34,6 +36,9 @@ struct SubtitleTrackInfo: Equatable {
         }
         if case .companionSidecar(let path) = backendID {
             parts.append((path as NSString).lastPathComponent)
+        }
+        if case .embeddedBitmapOverlay = backendID {
+            // Keep codec token; callers already pass hdmv_pgs_subtitle / dvd_subtitle.
         }
         return parts.joined(separator: " · ")
     }
@@ -133,6 +138,19 @@ enum SubtitleTrackCatalog {
             )
         }
         return result
+    }
+
+    /// Remux path catalog for PGS/VobSub when AVPlayer has nothing legible.
+    static func tracks(fromBitmapStreams streams: [FFmpegSubtitleStream]) -> [SubtitleTrackInfo] {
+        streams.enumerated().map { offset, stream in
+            SubtitleTrackInfo(
+                backendID: .embeddedBitmapOverlay(subtitleIndex: stream.subtitleIndex),
+                displayIndex: offset + 1,
+                language: AudioTrackLanguageDisplay.displayName(for: stream.language),
+                title: stream.title,
+                codec: stream.codec
+            )
+        }
     }
 
     static func selectedMpvTrackID(fromMpvTrackList data: Any?, secondary: Bool) -> Int? {

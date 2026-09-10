@@ -515,3 +515,47 @@ void mpv_embed_destroy_gl(MpvEmbed *embed) {
     api.render_context_free(embed->render);
     embed->render = NULL;
 }
+
+int mpv_embed_create_sw(MpvEmbed *embed) {
+    if (!embed || !embed->mpv || embed->render) {
+        return embed && embed->render ? 0 : -1;
+    }
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_API_TYPE, (void *)MPV_RENDER_API_TYPE_SW},
+        {0}
+    };
+    return api.render_context_create(&embed->render, embed->mpv, params);
+}
+
+void mpv_embed_set_sw_update(MpvEmbed *embed, void (*cb)(void *), void *ctx) {
+    mpv_embed_set_gl_update(embed, cb, ctx);
+}
+
+int mpv_embed_render_sw(
+    MpvEmbed *embed,
+    void *pixels,
+    int width,
+    int height,
+    int stride_bytes,
+    const char *format
+) {
+    if (!embed || !embed->render || !pixels || width <= 0 || height <= 0 || stride_bytes <= 0 || !format) {
+        return -1;
+    }
+    int size[2] = {width, height};
+    size_t stride = (size_t)stride_bytes;
+    int block_for_target = 0;
+    mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_SW_SIZE, &size[0]},
+        {MPV_RENDER_PARAM_SW_FORMAT, (void *)format},
+        {MPV_RENDER_PARAM_SW_STRIDE, &stride},
+        {MPV_RENDER_PARAM_SW_POINTER, pixels},
+        {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block_for_target},
+        {0}
+    };
+    return api.render_context_render(embed->render, params);
+}
+
+void mpv_embed_destroy_sw(MpvEmbed *embed) {
+    mpv_embed_destroy_gl(embed);
+}

@@ -35,3 +35,6 @@ Sources/LaughPlayer/codec-tools/lib/
 *.swp
 *~
 .tmp/
+
+# Local OpenSubtitles consumer Api-Key (never commit)
+Packaging/opensubtitles-api-key.local
