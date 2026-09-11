@@ -129,6 +129,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let subtitlesSettings = SubtitlesSettingsControls()
     /// Retained while the OpenSubtitles sheet is on screen.
     private var openSubtitlesSearchSheet: OpenSubtitlesSearchSheetController?
+    private var imageExportOptionsSheet: ImageExportOptionsSheetController?
     private var cachedSubtitleTracks: [SubtitleTrackInfo] = []
     private var suppressSubtitlePopUpAction = false
     private var suppressSubtitleAppearanceCallback = false
@@ -6028,27 +6029,74 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             || !ImageCropGeometry.isIdentity(crop)
             || !ImageCropGeometry.isIdentityStraighten(straighten)
         guard !parameters.isIdentity || hasGeometry else { return }
-
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-        panel.allowedContentTypes = [.jpeg, .png]
-        panel.nameFieldStringValue = ImageExportWriter.suggestedFileName(for: source)
-        panel.title = "Export Image"
-        panel.message = "Writes a new file. The original stays unchanged."
-        panel.prompt = "Export"
         guard let window = view.window else { return }
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let dest = panel.url else { return }
-            self?.performImageExport(
+
+        let pixelSize = ImageExportWriter.geometryPixelSize(
+            sourceURL: source,
+            quarterTurns: turns,
+            cropNormalized: crop,
+            straightenRadians: straighten,
+            flipHorizontal: flipH,
+            flipVertical: flipV
+        ) ?? CGSize(width: 1920, height: 1080)
+
+        let sheet = ImageExportOptionsSheetController(sourcePixelSize: pixelSize)
+        imageExportOptionsSheet = sheet
+        sheet.onCancel = { [weak self] in
+            self?.imageExportOptionsSheet = nil
+        }
+        sheet.onContinue = { [weak self] options in
+            self?.imageExportOptionsSheet = nil
+            self?.presentImageExportSavePanel(
                 source: source,
-                destination: dest,
+                options: options,
                 parameters: parameters,
                 quarterTurns: turns,
                 cropNormalized: crop,
                 straightenRadians: straighten,
                 flipHorizontal: flipH,
                 flipVertical: flipV
+            )
+        }
+        sheet.present(asSheetOn: window)
+    }
+
+    private func presentImageExportSavePanel(
+        source: URL,
+        options: ImageExportOptions,
+        parameters: ImageAdjustParameters,
+        quarterTurns: Int,
+        cropNormalized: CGRect?,
+        straightenRadians: CGFloat,
+        flipHorizontal: Bool,
+        flipVertical: Bool
+    ) {
+        guard let window = view.window else { return }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [options.format.utType]
+        panel.nameFieldStringValue = ImageExportWriter.suggestedFileName(for: source, format: options.format)
+        panel.title = "Export Image"
+        panel.message = "Writes a new file. The original stays unchanged."
+        panel.prompt = "Export"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let dest = panel.url else { return }
+            var finalURL = dest
+            let expectedExt = options.format.pathExtension
+            if finalURL.pathExtension.lowercased() != expectedExt {
+                finalURL = finalURL.deletingPathExtension().appendingPathExtension(expectedExt)
+            }
+            self?.performImageExport(
+                source: source,
+                destination: finalURL,
+                parameters: parameters,
+                quarterTurns: quarterTurns,
+                cropNormalized: cropNormalized,
+                straightenRadians: straightenRadians,
+                flipHorizontal: flipHorizontal,
+                flipVertical: flipVertical,
+                exportOptions: options
             )
         }
     }
@@ -6061,7 +6109,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         cropNormalized: CGRect?,
         straightenRadians: CGFloat,
         flipHorizontal: Bool,
-        flipVertical: Bool
+        flipVertical: Bool,
+        exportOptions: ImageExportOptions
     ) {
         if destination.standardizedFileURL == source.standardizedFileURL {
             presentImageExportAlert(title: "Choose a new file", message: "Export never overwrites the original.")
@@ -6076,13 +6125,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 cropNormalized: cropNormalized,
                 straightenRadians: straightenRadians,
                 flipHorizontal: flipHorizontal,
-                flipVertical: flipVertical
+                flipVertical: flipVertical,
+                exportOptions: exportOptions
             )
-            let format = ImageExportWriter.Format.from(url: destination)
             var writeError: Error?
             if let image {
                 do {
-                    try ImageExportWriter.write(image, to: destination, format: format)
+                    try ImageExportWriter.write(image, to: destination, options: exportOptions)
                 } catch {
                     writeError = error
                 }
