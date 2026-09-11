@@ -857,6 +857,8 @@ enum LibraryBrowseBatchAction {
 final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let controller: MediaLibraryController
     private let plateView = LibraryPanelPlateView(style: .content)
+    /// Window-space points that should miss this panel so a floating sibling (mini-preview) can receive them.
+    var shouldYieldHitTestToOverlay: ((NSPoint) -> Bool)?
     private let backButton = NSButton(title: "", target: nil, action: nil)
     private let forwardButton = NSButton(title: "", target: nil, action: nil)
     private let openButton = LibraryPillButton(
@@ -939,6 +941,18 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // `point` is in the superview’s coordinate system.
+        if let shouldYieldHitTestToOverlay, let superview {
+            let local = convert(point, from: superview)
+            let windowPoint = convert(local, to: nil)
+            if shouldYieldHitTestToOverlay(windowPoint) {
+                return nil
+            }
+        }
+        return super.hitTest(point)
     }
 
     func refresh() {

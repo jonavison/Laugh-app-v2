@@ -1072,6 +1072,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackMiniPreview.onTogglePlayPause = { [weak self] in
             self?.togglePlayPause()
         }
+        // Library plate sits under the floating mini-preview; yield hits so tiles
+        // scrolled under the preview cannot steal clicks meant for the preview.
+        libraryBrowse.shouldYieldHitTestToOverlay = { [weak self] pointInWindow in
+            guard let self, !self.playbackMiniPreview.isHidden else { return false }
+            let local = self.playbackMiniPreview.convert(pointInWindow, from: nil)
+            return self.playbackMiniPreview.bounds.contains(local)
+        }
 
         view.addSubview(librarySidebar)
         view.addSubview(libraryBrowse)
@@ -3358,6 +3365,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         raiseTitleBarChromeToFront()
         raiseEdgeHotZoneAffordancesToFront()
+        raisePlaybackMiniPreviewAboveLibrary()
     }
 
     private func raiseEdgeHotZoneAffordancesToFront() {
@@ -3382,6 +3390,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if !imageControlsContainer.isHidden {
                 view.addSubview(imageControlsContainer, positioned: .above, relativeTo: imageStudioMetaBar)
             }
+        }
+    }
+
+    /// Keep the floating mini-preview above the library plate after other chrome reorders.
+    private func raisePlaybackMiniPreviewAboveLibrary() {
+        guard libraryChromeInstalled, !playbackMiniPreview.isHidden else { return }
+        view.addSubview(playbackMiniPreview, positioned: .above, relativeTo: libraryBrowse)
+        if !titleBarChromeStrip.isHidden {
+            view.addSubview(titleBarChromeStrip, positioned: .above, relativeTo: playbackMiniPreview)
         }
     }
 
@@ -8500,6 +8517,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         playbackMiniPreview.isHidden = false
+        raisePlaybackMiniPreviewAboveLibrary()
     }
 
     private func updateMiniPreviewLayout() {
@@ -12427,17 +12445,31 @@ final class PlaybackMiniPreviewView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        if hit === closeButton || hit === closeBackdrop {
+        // Always claim the preview rect so library tiles scrolled underneath cannot win.
+        guard !isHidden, alphaValue > 0.01, frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if closeButton.frame.insetBy(dx: -4, dy: -4).contains(local)
+            || closeBackdrop.frame.insetBy(dx: -4, dy: -4).contains(local) {
             return closeButton
         }
-        if hit === expandButton || hit === expandBackdrop {
+        if expandButton.frame.insetBy(dx: -4, dy: -4).contains(local)
+            || expandBackdrop.frame.insetBy(dx: -4, dy: -4).contains(local) {
             return expandButton
         }
-        if showsPlayPause, hit === playPauseButton || hit === playPauseBackdrop {
+        if showsPlayPause,
+           playPauseButton.frame.insetBy(dx: -4, dy: -4).contains(local)
+            || playPauseBackdrop.frame.insetBy(dx: -4, dy: -4).contains(local) {
             return playPauseButton
         }
-        return hit
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            expandClicked()
+            return
+        }
+        // Absorb single clicks on the preview body — do not let them fall through.
     }
 
     required init?(coder: NSCoder) {
