@@ -47,7 +47,7 @@ struct ImageDevelopToolDescriptor: Hashable {
     var isAvailable: Bool { adjustSection != nil || isSubjectSelect }
 }
 
-/// Static catalog for the Edits outline. Unfinished tools stay listed as Coming soon.
+/// Static catalog for the Edits outline. Unfinished tools stay in the catalog but are hidden until ready.
 enum ImageDevelopOutline {
     static let groups: [(ImageDevelopGroupID, [ImageDevelopToolDescriptor])] = [
         (.essentials, [
@@ -98,6 +98,15 @@ enum ImageDevelopOutline {
             .init(id: "clone", title: "Clone", symbolName: "plus.viewfinder", adjustSection: nil)
         ])
     ]
+
+    /// Groups with at least one shippable tool — Coming soon rows stay out of the UI for now.
+    static var visibleGroups: [(ImageDevelopGroupID, [ImageDevelopToolDescriptor])] {
+        groups.compactMap { group, tools in
+            let available = tools.filter(\.isAvailable)
+            guard !available.isEmpty else { return nil }
+            return (group, available)
+        }
+    }
 }
 
 /// Spacing for the Edits outline (group titles + tool rows).

@@ -74,6 +74,7 @@ enum MediaLibraryScanner {
         .isDirectoryKey,
         .contentModificationDateKey,
         .creationDateKey,
+        .addedToDirectoryDateKey,
         .fileSizeKey
     ]
 
@@ -103,7 +104,10 @@ enum MediaLibraryScanner {
                         kind: .folder(url),
                         name: url.lastPathComponent,
                         dateModified: values?.contentModificationDate,
-                        dateAdded: values?.creationDate,
+                        dateAdded: LibraryBrowseDateMetadata.dateAdded(
+                            addedToDirectory: values?.addedToDirectoryDate,
+                            creation: values?.creationDate
+                        ),
                         size: nil
                     )
                 )
@@ -117,7 +121,10 @@ enum MediaLibraryScanner {
                     kind: .media(LibraryMediaFile(url: url, kind: mediaKind)),
                     name: url.lastPathComponent,
                     dateModified: values?.contentModificationDate,
-                    dateAdded: values?.creationDate,
+                    dateAdded: LibraryBrowseDateMetadata.dateAdded(
+                        addedToDirectory: values?.addedToDirectoryDate,
+                        creation: values?.creationDate
+                    ),
                     size: values?.fileSize.map(Int64.init)
                 )
             )

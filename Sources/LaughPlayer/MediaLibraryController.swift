@@ -161,6 +161,7 @@ final class MediaLibraryController {
         }
 
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }
@@ -284,8 +285,20 @@ final class MediaLibraryController {
 
     func setSort(_ sort: LibraryBrowseSort) {
         browseSort = sort
+        if let directory = currentDirectoryURL {
+            LibraryFolderSortStore.setSort(sort, for: directory)
+        }
         reloadGrid()
         onChange?()
+    }
+
+    /// Restore this folder’s remembered sort (or Name A→Z when unset).
+    private func applyBrowseSortForCurrentDirectory() {
+        guard let directory = currentDirectoryURL else {
+            browseSort = .default
+            return
+        }
+        browseSort = LibraryFolderSortStore.resolvedSort(for: directory)
     }
 
     func setViewMode(_ mode: LibraryBrowseViewMode) {
@@ -336,6 +349,7 @@ final class MediaLibraryController {
         currentDirectoryURL = previous
         clearSearchAndFilters(notify: false)
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }
@@ -346,6 +360,7 @@ final class MediaLibraryController {
         currentDirectoryURL = next
         clearSearchAndFilters(notify: false)
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }
@@ -359,6 +374,7 @@ final class MediaLibraryController {
         currentDirectoryURL = url
         clearSearchAndFilters(notify: false)
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }
@@ -371,6 +387,7 @@ final class MediaLibraryController {
         currentDirectoryURL = url
         clearSearchAndFilters(notify: false)
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }
@@ -407,6 +424,7 @@ final class MediaLibraryController {
         forwardStack = []
         clearSearchAndFilters(notify: false)
         clearMultiSelection(notify: false)
+        applyBrowseSortForCurrentDirectory()
         reloadGrid()
         onChange?()
     }

@@ -5,7 +5,7 @@ import AppKit
 @MainActor
 final class NativeSubtitleOverlay: NSObject {
     private let legibleOutput = AVPlayerItemLegibleOutput()
-    private let containerView = NSView()
+    private let containerView = SubtitleOverlayContainerView()
     private let textField: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.alignment = .center
@@ -31,11 +31,15 @@ final class NativeSubtitleOverlay: NSObject {
     private var sidecarCues: [SidecarSubtitleCue] = []
     /// Italic runs of the displayed text, from markup the source track left in the cue body.
     private var italicRanges: [NSRange] = []
+    private var lastStyledContainerHeight: CGFloat = -1
 
     func install(in host: NSView) {
         guard hostView !== host else { return }
         hostView = host
         containerView.translatesAutoresizingMaskIntoConstraints = false
+        containerView.onLayout = { [weak self] in
+            self?.handleContainerLayout()
+        }
         if containerView.superview !== host {
             host.addSubview(containerView, positioned: .above, relativeTo: nil)
             NSLayoutConstraint.activate([
@@ -159,7 +163,16 @@ final class NativeSubtitleOverlay: NSObject {
     var hasAttachedItem: Bool { attachedItem != nil }
 
     func applyVisualStyle(from store: SettingsStore) {
-        let size = max(12, store.subtitleFontSize * store.subtitleScale)
+        let height = max(containerView.bounds.height, 1)
+        let size = SubtitleAppearanceStyle.resolvedOverlayFontSize(
+            fontSize: store.subtitleFontSize,
+            scale: store.subtitleScale,
+            containerHeight: height
+        )
+        let borderWidth = SubtitleAppearanceStyle.resolvedOverlayBorderWidth(
+            borderWidth: store.subtitleBorderWidth,
+            containerHeight: height
+        )
         let font = SubtitleFont.nsFont(size: size)
         let fontColor = store.subtitleFontColor.usingColorSpace(.sRGB) ?? store.subtitleFontColor
         let borderColor = store.subtitleBorderColor.usingColorSpace(.sRGB) ?? store.subtitleBorderColor
@@ -169,9 +182,9 @@ final class NativeSubtitleOverlay: NSObject {
             .foregroundColor: fontColor,
             .paragraphStyle: centeredParagraphStyle()
         ]
-        if store.subtitleBorderWidth > 0.25 {
+        if borderWidth > 0.25 {
             attrs[.strokeColor] = borderColor
-            attrs[.strokeWidth] = -max(1, store.subtitleBorderWidth)
+            attrs[.strokeWidth] = -max(1, borderWidth)
         }
         if store.subtitleBackgroundEnabled {
             let bg = store.subtitleBackgroundColor.usingColorSpace(.sRGB) ?? store.subtitleBackgroundColor
@@ -192,6 +205,7 @@ final class NativeSubtitleOverlay: NSObject {
             textField.attributedStringValue = styled
         }
 
+        lastStyledContainerHeight = height
         updateVerticalPosition(userPosition: store.subtitlePosition)
     }
 
@@ -245,25 +259,31 @@ final class NativeSubtitleOverlay: NSObject {
         attachedItem = item
     }
 
+    private func handleContainerLayout() {
+        guard displaysSubtitles, !textField.stringValue.isEmpty else { return }
+        let height = containerView.bounds.height
+        guard height > 1, abs(height - lastStyledContainerHeight) > 1 else { return }
+        applyVisualStyle(from: SettingsStore.shared)
+    }
+
     private func updateVerticalPosition(userPosition: Double) {
-        bottomConstraint?.isActive = false
         topConstraint?.isActive = false
         centerYConstraint?.isActive = false
 
-        let clamped = max(
-            SubtitleAppearanceStyle.positionMin,
-            min(SubtitleAppearanceStyle.positionMax, userPosition)
+        let textHeight = max(
+            textField.fittingSize.height,
+            textField.intrinsicContentSize.height,
+            ceil(textField.font?.pointSize ?? 36)
         )
-        if clamped <= 8 {
-            bottomConstraint?.constant = -48
-            bottomConstraint?.isActive = true
-        } else if clamped >= 92 {
-            topConstraint?.isActive = true
-        } else {
-            let t = (clamped - 50) / 50
-            centerYConstraint?.constant = CGFloat(t * 120)
-            centerYConstraint?.isActive = true
-        }
+        let height = max(containerView.bounds.height, 1)
+        let inset = SubtitleAppearanceStyle.bottomInset(
+            userPosition: userPosition,
+            containerHeight: height,
+            textHeight: textHeight,
+            edgePadding: SubtitleAppearanceStyle.resolvedPositionEdgePadding(containerHeight: height)
+        )
+        bottomConstraint?.constant = -inset
+        bottomConstraint?.isActive = true
     }
 
     private func centeredParagraphStyle() -> NSParagraphStyle {
@@ -293,4 +313,15 @@ extension NativeSubtitleOverlay: AVPlayerItemLegibleOutputPushDelegate {
             self.raiseAboveVideo()
         }
     }
+}
+
+private final class SubtitleOverlayContainerView: NSView {
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

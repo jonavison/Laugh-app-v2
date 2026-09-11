@@ -354,6 +354,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var playbackAccessoryToVolumeConstraint: NSLayoutConstraint?
     private var playbackAccessoryToSettingsConstraint: NSLayoutConstraint?
     private var volumeToSettingsConstraint: NSLayoutConstraint?
+    private var transportCenterXConstraint: NSLayoutConstraint?
     private var playbackTopRowLayoutConfigured = false
     private var audioOutputEnabled = true
     private var playerInterfaceInstalled = false
@@ -686,7 +687,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         transportClusterStack.orientation = .horizontal
         transportClusterStack.alignment = .centerY
         transportClusterStack.distribution = .fill
-        transportClusterStack.spacing = 8
+        transportClusterStack.spacing = 4
 
         transportSpeedLeftCluster.orientation = .horizontal
         transportSpeedLeftCluster.alignment = .centerY
@@ -708,7 +709,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         bottomControlsStack.orientation = .horizontal
         bottomControlsStack.alignment = .centerY
         bottomControlsStack.distribution = .fill
-        bottomControlsStack.spacing = 10
+        bottomControlsStack.spacing = 6
 
         playbackLeadingAccessoryCluster.orientation = .horizontal
         playbackLeadingAccessoryCluster.alignment = .centerY
@@ -857,8 +858,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageTopRowView.topAnchor.constraint(equalTo: imageControlsContainer.topAnchor, constant: 8),
             imageTopRowView.bottomAnchor.constraint(equalTo: imageControlsContainer.bottomAnchor, constant: -8),
 
-            controlsStack.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 16),
-            controlsStack.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -16),
+            controlsStack.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 10),
+            controlsStack.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -10),
             controlsStack.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 10),
             controlsStack.bottomAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: -10),
 
@@ -1163,6 +1164,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             } else {
                 print("[DEBUG-playback] already playing \(url.lastPathComponent)")
             }
+            // Explicit re-open (e.g. tile click while mini-preview is up) still wants full chrome.
+            dismissSidePanelsForFocusedPlayback()
             ensureLaughVolumeIfPlaying()
             return
         }
@@ -2514,50 +2517,85 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     func playNextInQueue() {
-        guard let next = queue.first else { return }
-        queue.removeFirst()
-        openQueuedMedia(LibraryMediaFile(url: next.url, kind: next.kind), replaceVideo: true)
-        syncQueueChrome()
+        if let next = queue.first {
+            queue.removeFirst()
+            openQueuedMedia(LibraryMediaFile(url: next.url, kind: next.kind), replaceVideo: true)
+            syncQueueChrome()
+            return
+        }
+        if let nextURL = folderPlaybackNeighbors().next {
+            let kind = MediaKindDetector.kind(for: nextURL)
+            openQueuedMedia(LibraryMediaFile(url: nextURL, kind: kind), replaceVideo: true)
+            syncQueueChrome()
+        }
     }
 
     func playPreviousInQueue() {
-        guard let previousURL = playbackHistory.popLast() else { return }
+        if !playbackHistory.isEmpty {
+            guard let previousURL = playbackHistory.popLast() else { return }
 
-        if let current = currentMediaURL {
-            let kind = MediaKindDetector.kind(for: current)
-            if kind == .video || kind == .image {
-                queue.insert(PlaybackQueueItem(url: current, kind: kind), at: 0)
+            if let current = currentMediaURL {
+                let kind = MediaKindDetector.kind(for: current)
+                if kind == .video || kind == .image {
+                    queue.insert(PlaybackQueueItem(url: current, kind: kind), at: 0)
+                }
             }
+
+            suppressPlaybackHistoryAppend = true
+            defer { suppressPlaybackHistoryAppend = false }
+
+            switch MediaKindDetector.kind(for: previousURL) {
+            case .video:
+                loadVideo(url: previousURL, replaceCurrent: true)
+            case .image:
+                loadImage(url: previousURL)
+            case .unsupported:
+                break
+            }
+            syncQueueChrome()
+            return
         }
 
-        suppressPlaybackHistoryAppend = true
-        defer { suppressPlaybackHistoryAppend = false }
-
-        switch MediaKindDetector.kind(for: previousURL) {
-        case .video:
-            loadVideo(url: previousURL, replaceCurrent: true)
-        case .image:
-            loadImage(url: previousURL)
-        case .unsupported:
-            break
+        if let previousURL = folderPlaybackNeighbors().previous {
+            let kind = MediaKindDetector.kind(for: previousURL)
+            openQueuedMedia(LibraryMediaFile(url: previousURL, kind: kind), replaceVideo: true)
+            syncQueueChrome()
         }
-        syncQueueChrome()
+    }
+
+    private func folderPlaybackNeighbors() -> FolderPlaybackNeighbors.Result {
+        guard let url = playbackSourceURL ?? currentMediaURL, !isGeneratedFallbackURL(url) else {
+            return FolderPlaybackNeighbors.Result(previous: nil, next: nil)
+        }
+        let kind = MediaKindDetector.kind(for: url)
+        let directory = url.deletingLastPathComponent()
+        let sort = LibraryFolderSortStore.resolvedSort(for: directory)
+        return FolderPlaybackNeighbors.neighbors(around: url, matchingKind: kind, sort: sort)
     }
 
     private func updateQueueTransportButtons() {
-        let show = !queue.isEmpty || !playbackHistory.isEmpty
-        let canGoPrevious = !playbackHistory.isEmpty
-        let canGoNext = !queue.isEmpty
+        let neighbors = folderPlaybackNeighbors()
+        let canGoPrevious = !playbackHistory.isEmpty || neighbors.previous != nil
+        let canGoNext = !queue.isEmpty || neighbors.next != nil
+        let show = canGoPrevious || canGoNext
 
         queuePreviousButton.isHidden = !show
         queueNextButton.isHidden = !show
         queuePreviousButton.isEnabled = canGoPrevious
         queueNextButton.isEnabled = canGoNext
+        queuePreviousButton.toolTip = !playbackHistory.isEmpty
+            ? "Previous in queue"
+            : "Previous in folder"
+        queueNextButton.toolTip = !queue.isEmpty
+            ? "Next in queue"
+            : "Next in folder"
 
         imageQueuePreviousButton.isHidden = !show
         imageQueueNextButton.isHidden = !show
         imageQueuePreviousButton.isEnabled = canGoPrevious
         imageQueueNextButton.isEnabled = canGoNext
+        imageQueuePreviousButton.toolTip = queuePreviousButton.toolTip
+        imageQueueNextButton.toolTip = queueNextButton.toolTip
 
         attachTransportSpeedIndicatorOverlays()
         updatePlaybackSpeedTransportLabels()
@@ -4452,10 +4490,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         currentTimeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         currentTimeLabel.textColor = .secondaryLabelColor
-        currentTimeLabel.alignment = .right
+        // Flush with library icon edge (was .right inside a wide slot → looked over-padded).
+        currentTimeLabel.alignment = .left
         totalTimeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         totalTimeLabel.textColor = .secondaryLabelColor
-        totalTimeLabel.alignment = .left
+        totalTimeLabel.alignment = .right
         currentTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
         totalTimeLabel.setContentHuggingPriority(.required, for: .horizontal)
         seekSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -4510,7 +4549,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         // Outline owns its own vertical rhythm (title → tools → next group → bottom pad).
         imageTabView.spacing = 0
 
-        for (groupIndex, (group, tools)) in ImageDevelopOutline.groups.enumerated() {
+        for (groupIndex, (group, tools)) in ImageDevelopOutline.visibleGroups.enumerated() {
             if groupIndex > 0 {
                 let groupGap = NSView()
                 groupGap.translatesAutoresizingMaskIntoConstraints = false
@@ -4553,14 +4592,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     ) { card in
                         self.configureImageAdjustCard(card, for: section)
                     }
-                } else {
-                    addImageDevelopComingSoonRow(
-                        title: tool.title,
-                        symbolName: tool.symbolName,
-                        to: toolsColumn,
-                        leadingGap: 0
-                    )
                 }
+                // Coming soon tools stay in the catalog but are not shown until ready.
             }
 
             imageTabView.addArrangedSubview(groupColumn)
@@ -6327,7 +6360,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 startingDisplayIndex: merged.count
             )
         }
-        return merged.filter { track in
+        let withoutDupCompanions = merged.filter { track in
             guard case .companionSidecar(let path) = track.backendID else { return true }
             let normalized = CompanionSubtitleDiscovery.normalizePath(path)
             return !merged.contains { other in
@@ -6335,6 +6368,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 return CompanionSubtitleDiscovery.normalizePath(otherPath) == normalized
             }
         }
+        return finalizeSubtitleTracksForUI(withoutDupCompanions)
+    }
+
+    private func currentSubtitlePlaybackSession() -> SubtitlePlaybackSession {
+        if mpvBackendActive {
+            return .directMpv
+        }
+        if bitmapOverlayActive || !cachedBitmapProbeTracks.isEmpty {
+            return .remuxWithBitmapOverlay
+        }
+        return .remuxText
+    }
+
+    /// Only tracks the open engine can actually paint — remux hides ASS/PGS until overlay is up, etc.
+    private func finalizeSubtitleTracksForUI(_ tracks: [SubtitleTrackInfo]) -> [SubtitleTrackInfo] {
+        SubtitleTrackPlayability.playableTracks(tracks, session: currentSubtitlePlaybackSession())
     }
 
     private func resolvedPlayableSubtitleTrack(_ track: SubtitleTrackInfo) -> SubtitleTrackInfo {
@@ -6392,7 +6441,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let displayTracks = resolvedSubtitleTracksForUI()
         cachedSubtitleTracks = displayTracks
         applySubtitleUIDefaultIfNeeded(tracks: displayTracks)
-        let primarySelected = primarySubtitlesEnabled ? displayTracks.first : nil
+        let primarySelected = primarySubtitlesEnabled
+            ? SubtitleTrackPlayability.preferredDefault(in: displayTracks)
+            : nil
         populateSubtitleTrackPopUps(
             tracks: displayTracks,
             primarySelected: primarySelected,
@@ -6474,7 +6525,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
 
         let primarySelected = primarySubtitlesEnabled
-            ? await currentPrimarySubtitleTrack(in: availableTracks) ?? availableTracks.first
+            ? await currentPrimarySubtitleTrack(in: availableTracks)
+                ?? SubtitleTrackPlayability.preferredDefault(in: availableTracks)
             : nil
         let secondarySelected = secondarySubtitlesEnabled
             ? await currentSecondarySubtitleTrack(in: availableTracks)
@@ -6714,6 +6766,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             )
             return
         }
+        if bitmapOverlayActive {
+            await bitmapOverlayController.applySubtitleAppearance(
+                from: store,
+                refreshTrack: primarySubtitlesEnabled
+            )
+            bitmapOverlayBlitView.requestFrame()
+            return
+        }
         if mpvBackendActive {
             await mpvController.applySubtitleAppearance(from: store, refreshTrack: false)
             return
@@ -6769,7 +6829,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackSubtitleToggle.isHidden = !show
         playbackSubtitleToggle.isEnabled = show && !cachedSubtitleTracks.isEmpty
         playbackSubtitleToggle.subtitlesActive = primarySubtitlesEnabled
-        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.accessoryIconTintColor
+        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.subtitleToggleTintColor
+        playbackSubtitleToggle.alphaValue = 1
         let state = primarySubtitlesEnabled ? "on" : "off"
         playbackSubtitleToggle.setAccessibilityLabel("Subtitles \(state)")
         playbackSubtitleToggle.toolTip = primarySubtitlesEnabled ? "Turn subtitles off" : "Turn subtitles on"
@@ -6883,15 +6944,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 } else if case .embeddedBitmapOverlay(let subtitleIndex) = track.backendID {
                     _ = await Task.detached { [bitmapOverlayController] in
                         let tracks = bitmapOverlayController.subtitleTracks()
-                        if subtitleIndex >= 0, subtitleIndex < tracks.count,
-                           case .mpv(let id) = tracks[subtitleIndex].backendID {
+                        // ffmpeg subtitleIndex is 0-based among subtitle streams; mpv displayIndex is 1-based.
+                        if let match = tracks.first(where: { $0.displayIndex == subtitleIndex + 1 }),
+                           case .mpv(let id) = match.backendID {
+                            bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
+                        } else if subtitleIndex >= 0, subtitleIndex < tracks.count,
+                                  case .mpv(let id) = tracks[subtitleIndex].backendID {
                             bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
                         } else {
                             bitmapOverlayController.selectPreferredSubtitleLanguage("en")
                         }
                     }.value
                 }
+                playerSurfaceView.addSubview(bitmapOverlayBlitView, positioned: .above, relativeTo: nil)
                 bitmapOverlayBlitView.isHidden = false
+                syncBitmapSubtitleOverlayClock()
                 bitmapOverlayBlitView.requestFrame()
             } else {
                 bitmapOverlayBlitView.isHidden = true
@@ -7003,38 +7070,38 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         } else if let sourcePath {
             userDisabledSubtitlesForSourcePath = sourcePath
         }
+        // Prefer a native .srt/.vtt sidecar when remux can’t use embedded PGS — but never
+        // force Subs off just because an .ass (or other non-native) companion exists.
         if enable,
            !(mpvBackendActive && mpvPlaybackStarted),
            !hasNativePlayableSubtitleTracks(),
-           !cachedDiscoveredCompanions.isEmpty {
-            let popUpIndex = subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem
-            let path: String?
-            if popUpIndex > 0, popUpIndex - 1 < cachedSubtitleTracks.count {
-                switch cachedSubtitleTracks[popUpIndex - 1].backendID {
-                case .companionSidecar(let sidecarPath):
-                    path = sidecarPath
-                case .externalMpv(_, let sidecarPath):
-                    path = sidecarPath
-                default:
-                    path = cachedDiscoveredCompanions.first?.url.path
-                }
-            } else {
-                path = cachedDiscoveredCompanions.first?.url.path
-            }
-            if let path, SidecarSubtitleLoader.isNativeRenderableSidecar(path) {
-                updateSubtitleControlsAvailability()
-                Task { await applyPrimarySubtitleFromUI(autoSelectDefault: true, enabled: true) }
-                return
-            }
-            // Non-native sidecar formats stay listed but don’t force a DirectMpv reload.
-            setPrimarySubtitlesEnabled(false)
+           preferredNativeCompanionSubtitlePath() != nil {
             updateSubtitleControlsAvailability()
+            Task { await applyPrimarySubtitleFromUI(autoSelectDefault: true, enabled: true) }
             return
         }
         updateSubtitleControlsAvailability()
         Task { @MainActor in
             await applyPrimarySubtitleFromUI(autoSelectDefault: enable, enabled: enable)
         }
+    }
+
+    /// Native-renderable sidecar next to the file (SRT/VTT), if any.
+    private func preferredNativeCompanionSubtitlePath() -> String? {
+        let popUpIndex = subtitlesSettings.primaryTrackPopUp.indexOfSelectedItem
+        if popUpIndex > 0, popUpIndex - 1 < cachedSubtitleTracks.count {
+            switch cachedSubtitleTracks[popUpIndex - 1].backendID {
+            case .companionSidecar(let sidecarPath), .externalMpv(_, let sidecarPath):
+                if SidecarSubtitleLoader.isNativeRenderableSidecar(sidecarPath) {
+                    return sidecarPath
+                }
+            case .avFoundation, .mpv, .embeddedBitmapOverlay:
+                break
+            }
+        }
+        return cachedDiscoveredCompanions
+            .map(\.url.path)
+            .first { SidecarSubtitleLoader.isNativeRenderableSidecar($0) }
     }
 
     @objc private func secondarySubtitlesEnabledChanged() {
@@ -7166,17 +7233,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         let hasPlayableText = playableTracks.contains { track in
             switch track.backendID {
-            case .avFoundation, .companionSidecar, .externalMpv:
+            case .avFoundation:
+                return true
+            case .companionSidecar(let path):
+                return SidecarSubtitleLoader.isNativeRenderableSidecar(path)
+            case .externalMpv:
                 return true
             case .mpv, .embeddedBitmapOverlay:
                 return false
             }
         }
         guard !hasPlayableText else { return }
-        guard playableTracks.isEmpty else { return }
 
         let url = sourceURL
-        let hasCompanions = !cachedDiscoveredCompanions.isEmpty
+        let hasNativeCompanions = cachedDiscoveredCompanions.contains {
+            SidecarSubtitleLoader.isNativeRenderableSidecar($0.url.path)
+        }
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             let streams = FFmpegVideoFallback.probeSubtitleStreams(for: url)
@@ -7189,7 +7261,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 mpvBackendActive: false,
                 playableTextTracksEmpty: true,
                 sourceHasBitmapOnly: true,
-                hasTextSidecarActive: hasCompanions,
+                hasTextSidecarActive: hasNativeCompanions,
                 libmpvAvailable: MpvPlaybackController.isAvailable()
             )
 
@@ -7212,7 +7284,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 hasApiKey: OpenSubtitlesConfig.hasApiKey,
                 playableTracksEmpty: true,
                 sourceHasBitmapOnly: true,
-                hasCompanionSidecar: hasCompanions
+                hasCompanionSidecar: hasNativeCompanions
             )
 
             switch decision {
@@ -7270,10 +7342,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func preferredBitmapTrack(in tracks: [SubtitleTrackInfo]) -> SubtitleTrackInfo? {
-        tracks.first { track in
-            let lang = (track.language ?? "").lowercased()
-            return lang.contains("english") || lang.hasPrefix("en")
-        } ?? tracks.first
+        SubtitleTrackPlayability.preferredDefault(in: tracks)
     }
 
     private func installBitmapOverlayBlitViewIfNeeded() {
@@ -7313,10 +7382,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             case .success:
                 self.setPrimarySubtitlesEnabled(true)
                 self.startBitmapOverlaySyncTimer()
+                // Keep overlay above AVPlayer + native text host; load may race layout.
+                self.playerSurfaceView.addSubview(
+                    self.bitmapOverlayBlitView,
+                    positioned: .above,
+                    relativeTo: nil
+                )
+                self.bitmapOverlayBlitView.isHidden = false
                 if let sec = self.nativePlaybackTimeSec() {
                     self.bitmapOverlayController.seek(to: sec, exact: true)
-                    self.bitmapOverlayBlitView.requestFrame()
                 }
+                // Overlay starts paused — sync clock immediately so PGS advances with remux.
+                self.syncBitmapSubtitleOverlayClock()
+                self.bitmapOverlayBlitView.requestFrame()
                 Task { await self.refreshSubtitleSettings(syncPlayback: true, applyAppearance: false) }
                 self.hideCompatibilityFailure()
                 PlaybackTrace.emit("[DEBUG-subs] PGS overlay ready path=\(sourceURL.lastPathComponent)")
@@ -8449,6 +8527,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     func mediaLibraryDidSelectMedia(url: URL, kind: DroppedMediaKind) {
         queue.removeAll()
         playbackHistory.removeAll()
+        // Match context-menu Play: leave folder-management / mini-preview and open full.
+        dismissSidePanelsForFocusedPlayback()
         switch kind {
         case .video:
             loadVideo(url: url, replaceCurrent: true)
@@ -9130,18 +9210,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackTopRowLayoutConfigured = true
 
         playbackTopRowView.translatesAutoresizingMaskIntoConstraints = false
+        playbackTopRowView.clipsToBounds = false
         volumeCluster.translatesAutoresizingMaskIntoConstraints = false
         libraryButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        transportClusterStack.clipsToBounds = false
 
         // Far left: library. Left of transport: subs. Right of transport: queue + volume.
         // Far right: settings.
         playbackTopRowView.addSubview(libraryButton)
         playbackTopRowView.addSubview(playbackLeadingAccessoryCluster)
-        playbackTopRowView.addSubview(transportClusterStack)
         playbackTopRowView.addSubview(playbackAccessoryCluster)
         playbackTopRowView.addSubview(volumeCluster)
         playbackTopRowView.addSubview(settingsButton)
+        // Transport above side clusters so a layout squeeze can’t bury the fast button.
+        playbackTopRowView.addSubview(transportClusterStack, positioned: .above, relativeTo: nil)
 
         playbackAccessoryToVolumeConstraint = playbackAccessoryCluster.trailingAnchor.constraint(
             equalTo: volumeCluster.leadingAnchor,
@@ -9156,6 +9239,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             constant: -playbackControlClusterSpacing
         )
 
+        // Prefer centered transport, but yield so Next/Fast stay clear of the queue control.
+        let transportCenterX = transportClusterStack.centerXAnchor.constraint(
+            equalTo: playbackTopRowView.centerXAnchor
+        )
+        transportCenterX.priority = NSLayoutConstraint.Priority(700)
+        transportCenterXConstraint = transportCenterX
+
         NSLayoutConstraint.activate([
             playbackTopRowView.heightAnchor.constraint(equalToConstant: 28),
 
@@ -9164,7 +9254,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
             playbackLeadingAccessoryCluster.trailingAnchor.constraint(
                 equalTo: transportClusterStack.leadingAnchor,
-                constant: -playbackControlClusterSpacing
+                constant: -8
             ),
             playbackLeadingAccessoryCluster.leadingAnchor.constraint(
                 greaterThanOrEqualTo: libraryButton.trailingAnchor,
@@ -9172,8 +9262,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ),
             playbackLeadingAccessoryCluster.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
-            transportClusterStack.centerXAnchor.constraint(equalTo: playbackTopRowView.centerXAnchor),
+            transportCenterX,
             transportClusterStack.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
+            transportClusterStack.leadingAnchor.constraint(
+                greaterThanOrEqualTo: libraryButton.trailingAnchor,
+                constant: 8
+            ),
+            transportClusterStack.trailingAnchor.constraint(
+                lessThanOrEqualTo: playbackAccessoryCluster.leadingAnchor,
+                constant: -8
+            ),
 
             playbackAccessoryCluster.leadingAnchor.constraint(
                 greaterThanOrEqualTo: transportClusterStack.trailingAnchor,
@@ -9186,21 +9284,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             settingsButton.trailingAnchor.constraint(equalTo: playbackTopRowView.trailingAnchor),
             settingsButton.centerYAnchor.constraint(equalTo: playbackTopRowView.centerYAnchor),
 
-            transportClusterStack.trailingAnchor.constraint(
-                lessThanOrEqualTo: playbackAccessoryCluster.leadingAnchor,
-                constant: -8
-            ),
-
             playbackAccessoryToVolumeConstraint!,
             volumeToSettingsConstraint!
         ])
         volumeClusterCollapsedWidthConstraint = volumeCluster.widthAnchor.constraint(equalToConstant: 0)
         volumeClusterCollapsedWidthConstraint?.priority = .required
+        // Prefer collapsing volume / accessory spacing before crushing transport icons.
+        playbackAccessoryCluster.setContentCompressionResistancePriority(
+            NSLayoutConstraint.Priority(740),
+            for: .horizontal
+        )
+        volumeCluster.setContentCompressionResistancePriority(
+            NSLayoutConstraint.Priority(730),
+            for: .horizontal
+        )
         playbackAccessoryToSettingsConstraint?.isActive = false
         updatePlaybackVolumeChromeVisibility()
-        // Keep outer accessories above transport chrome so edge icons stay visually paired.
+        // Keep outer accessories above edge chrome; keep transport above queue/volume so Fast stays tappable.
         playbackTopRowView.addSubview(libraryButton, positioned: .above, relativeTo: nil)
         playbackTopRowView.addSubview(settingsButton, positioned: .above, relativeTo: nil)
+        playbackTopRowView.addSubview(transportClusterStack, positioned: .above, relativeTo: playbackAccessoryCluster)
     }
 
     private enum SpeedBadgePin {
@@ -9231,7 +9334,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         NSLayoutConstraint.activate([
             horizontal,
-            label.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -1),
+            // Hang below the icon so the × rate reads under the chevron, not inside it.
+            label.topAnchor.constraint(equalTo: button.bottomAnchor, constant: -1),
         ])
     }
 
@@ -9439,8 +9543,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         bottomControlsStack.addArrangedSubview(seekSlider)
         bottomControlsStack.addArrangedSubview(bottomRightControlsStack)
 
-        currentTimeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        totalTimeLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        currentTimeLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        totalTimeLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
         updatePlaybackVolumeChromeVisibility()
         bottomControlsStack.widthAnchor.constraint(equalTo: controlsStack.widthAnchor).isActive = true
     }

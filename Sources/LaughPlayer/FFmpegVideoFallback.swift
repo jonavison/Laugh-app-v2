@@ -103,6 +103,22 @@ enum FFmpegVideoFallback {
         }
     }
 
+    /// Cap `LaughPlayerFallback` size in the background (LRU; previews first).
+    static func enforceRemuxCacheBudget(protecting urls: [URL] = []) {
+        let protect = Set(urls.map { $0.standardizedFileURL.path })
+        DispatchQueue.global(qos: .utility).async {
+            let report = RemuxCacheEviction.enforceBudget(protectPaths: protect)
+            guard report.deletedCount > 0 else { return }
+            let freedGB = Double(report.deletedBytes) / (1024 * 1024 * 1024)
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-fallback] remux cache eviction deleted=%d freed=%.2fGiB remaining=%.2fGiB",
+                report.deletedCount,
+                freedGB,
+                Double(report.remainingBytes) / (1024 * 1024 * 1024)
+            ))
+        }
+    }
+
     static func isAvailable() -> Bool {
         availabilityLock.lock()
         if let cachedAvailability {
@@ -1077,6 +1093,7 @@ enum FFmpegVideoFallback {
         onProcessQueue {
             remuxCache[identity] = CacheEntry(outputURL: outputURL, sourceIdentity: identity)
         }
+        enforceRemuxCacheBudget(protecting: [outputURL])
     }
 
     private static func sourceIdentity(for inputURL: URL) -> String? {
@@ -1099,7 +1116,7 @@ enum FFmpegVideoFallback {
     }
 
     private static func makeDerivedOutputURL(for inputURL: URL, suffix: String) -> URL {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("LaughPlayerFallback", isDirectory: true)
+        let tempDir = RemuxCacheEviction.cacheDirectory()
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         let base = inputURL.deletingPathExtension().lastPathComponent
             .replacingOccurrences(of: "/", with: "-")

@@ -407,7 +407,8 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
                 title: root.displayName,
                 style: .menuButton,
                 toolTip: root.directoryURL.path,
-                symbol: "folder"
+                symbol: "folder",
+                directoryURL: root.directoryURL
             )
             return cell
         }
@@ -527,14 +528,15 @@ private final class SidebarListCell: NSTableCellView {
         style: Style,
         toolTip: String,
         symbol: String? = nil,
-        iconColor: NSColor? = nil
+        iconColor: NSColor? = nil,
+        directoryURL: URL? = nil
     ) {
         nameLabel.stringValue = title
         self.style = style
         self.toolTip = toolTip.isEmpty ? nil : toolTip
         iconTint = iconColor
         applyRowMetrics()
-        applySectionIcon(symbol: symbol)
+        applySectionIcon(symbol: symbol, directoryURL: directoryURL)
         applyTextAppearance()
     }
 
@@ -572,10 +574,44 @@ private final class SidebarListCell: NSTableCellView {
         contentTrailingConstraint.constant = -trailing
     }
 
-    private func applySectionIcon(symbol: String?) {
+    private func applySectionIcon(symbol: String?, directoryURL: URL? = nil) {
+        let pointSize: CGFloat
+        switch style {
+        case .groupLabel:
+            pointSize = LaughTheme.Sidebar.GroupLabel.iconSize
+        case .menuSubButton:
+            pointSize = LaughTheme.Sidebar.MenuSubButton.iconSize
+        case .menuButton:
+            pointSize = LaughTheme.Sidebar.MenuButton.iconSize
+        }
+
+        if let directoryURL {
+            // Clear any prior SF Symbol config from cell reuse.
+            iconView.symbolConfiguration = nil
+            let resolved = LibraryFolderIcon.resolve(
+                for: directoryURL,
+                pointSize: pointSize,
+                symbolFallback: symbol ?? "folder",
+                forceFinderAppearance: true
+            )
+            let image = resolved.image
+            image.isTemplate = resolved.isTemplate
+            iconView.image = image
+            if resolved.isTemplate {
+                iconTint = resolved.tintColor
+                iconView.contentTintColor = resolved.tintColor
+            } else {
+                iconTint = nil
+                iconView.contentTintColor = nil
+            }
+            iconView.isHidden = false
+            return
+        }
+
         guard let symbol,
               let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         else {
+            iconView.symbolConfiguration = nil
             iconView.isHidden = true
             iconView.image = nil
             iconTint = nil
@@ -592,12 +628,14 @@ private final class SidebarListCell: NSTableCellView {
             config = LaughTheme.Sidebar.MenuButton.symbolConfiguration()
         }
 
-        iconView.image = image.withSymbolConfiguration(config)
+        iconView.symbolConfiguration = config
+        iconView.image = image
         if let iconTint {
             iconView.image?.isTemplate = false
             iconView.contentTintColor = iconTint
         } else {
             iconView.image?.isTemplate = true
+            iconView.contentTintColor = nil
         }
         iconView.isHidden = false
     }
@@ -615,8 +653,10 @@ private final class SidebarListCell: NSTableCellView {
             nameLabel.font = LaughTheme.Sidebar.MenuSubButton.labelFont
             LaughTheme.applySidebarSelectionLabelStyle(to: nameLabel, selected: selected, idleColor: .secondaryLabelColor)
         }
-        if !iconView.isHidden, iconTint == nil {
+        if !iconView.isHidden, iconTint == nil, iconView.image?.isTemplate == true {
             iconView.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        } else if !iconView.isHidden, let iconTint, iconView.image?.isTemplate == true {
+            iconView.contentTintColor = iconTint
         }
     }
 }
@@ -1025,7 +1065,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
                 guard let item = collectionView.item(at: path) as? LibraryFolderGridItem else { continue }
                 item.applyMetrics(metrics)
                 let counts = MediaLibraryScanner.mediaCounts(in: folderURL)
-                item.configure(name: entry.name, itemCount: counts.total, dateModified: entry.dateModified)
+                item.configure(
+                    name: entry.name,
+                    itemCount: counts.total,
+                    dateModified: entry.dateModified,
+                    folderURL: folderURL
+                )
                 if !metrics.showsTitle {
                     item.loadPreviews(folderURL: folderURL, maxSide: metrics.thumbnailMaxSide, indexPath: path) { [weak self, weak item] images, indexPath in
                         guard let self, let item, self.thumbnailTasks[indexPath] == folderURL else { return }
@@ -1512,7 +1557,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         items.append(.separator())
         for direction in [LibraryBrowseSortDirection.ascending, .descending] {
             let item = NSMenuItem(
-                title: direction.menuTitle,
+                title: direction.menuTitle(for: sort.key),
                 action: #selector(sortDirectionChosen(_:)),
                 keyEquivalent: ""
             )
@@ -1772,7 +1817,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         guard let key = LibraryBrowseSortKey(menuTag: sender.tag) else { return }
         var sort = controller.browseSort
         guard sort.key != key else { return }
-        sort.key = key
+        sort.selectKey(key)
         controller.setSort(sort)
         updateSortControl()
     }
@@ -2001,7 +2046,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             let item = collectionView.makeItem(withIdentifier: LibraryFolderGridItem.reuseID, for: indexPath) as! LibraryFolderGridItem
             item.applyMetrics(metrics)
             let counts = MediaLibraryScanner.mediaCounts(in: folderURL)
-            item.configure(name: entry.name, itemCount: counts.total, dateModified: entry.dateModified)
+            item.configure(
+                name: entry.name,
+                itemCount: counts.total,
+                dateModified: entry.dateModified,
+                folderURL: folderURL
+            )
             if !metrics.showsTitle {
                 item.loadPreviews(folderURL: folderURL, maxSide: metrics.thumbnailMaxSide, indexPath: indexPath) { [weak self, weak item] images, path in
                     guard let self, let item, self.thumbnailTasks[path] == folderURL else { return }
@@ -2107,10 +2157,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             return buildBatchContextMenu()
         }
 
-        // Right-click outside selection replaces selection with that tile, then single-item menu.
-        controller.setMultiSelection(IndexSet(integer: indexPath.item), anchor: indexPath.item)
-        syncCollectionSelection()
-        applyVisibleSelectionChrome()
+        // Context actions target the clicked tile via menu item tags — do not select it.
         guard let entry = controller.entry(at: indexPath) else { return nil }
         return buildContextMenu(for: entry, itemIndex: indexPath.item)
     }
@@ -2341,8 +2388,8 @@ private class LibraryGridItemView: NSView {
     }
 }
 
-/// Media tile host that reports hover for Gallery border affordance.
-private final class LibraryMediaTileHostView: LibraryGridItemView {
+/// Grid tile host that reports hover for border affordance (media + folders).
+private final class LibraryTileHoverHostView: LibraryGridItemView {
     var onHoverChange: ((Bool) -> Void)?
     private var trackingAreaRef: NSTrackingArea?
 
@@ -2522,6 +2569,8 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     private var loadToken = UUID()
     private var folderURL: URL?
     private var usesIconOnlyLayout = false
+    private var isHovered = false
+    private var selectionState: LibraryTileSelectionChrome = .none
 
     private static let relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -2530,9 +2579,14 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     }()
 
     override func loadView() {
-        view = LibraryGridItemView()
+        let host = LibraryTileHoverHostView()
+        host.onHoverChange = { [weak self] hovered in
+            self?.setHovered(hovered)
+        }
+        view = host
         view.wantsLayer = true
         view.layer?.masksToBounds = false
+        view.layer?.borderWidth = 0
 
         cardView.wantsLayer = true
         cardView.layer?.cornerRadius = 6
@@ -2714,7 +2768,11 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     }
 
     func applySelectionChrome(_ chrome: LibraryTileSelectionChrome) {
+        selectionState = chrome
         selectionChrome.apply(chrome, appearance: view.effectiveAppearance, cornerRadius: 6)
+        if chrome != .none {
+            setHovered(false)
+        }
     }
 
     func applyMetrics(_ metrics: LibraryBrowseTileMetrics) {
@@ -2794,12 +2852,27 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     }
 
     private func applyFolderGlyph(pointSize: CGFloat) {
-        if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
-            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
-            let configured = folder.withSymbolConfiguration(config)
-            configured?.isTemplate = true
-            folderGlyphView.image = configured
-            folderGlyphView.contentTintColor = .secondaryLabelColor
+        guard let folderURL else {
+            if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
+                let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+                let configured = folder.withSymbolConfiguration(config)
+                configured?.isTemplate = true
+                folderGlyphView.image = configured
+                folderGlyphView.contentTintColor = .secondaryLabelColor
+            }
+            return
+        }
+        let resolved = LibraryFolderIcon.resolve(
+            for: folderURL,
+            pointSize: pointSize,
+            symbolFallback: "folder.fill",
+            forceFinderAppearance: true
+        )
+        folderGlyphView.image = resolved.image
+        if resolved.isTemplate {
+            folderGlyphView.contentTintColor = resolved.tintColor ?? .secondaryLabelColor
+        } else {
+            folderGlyphView.contentTintColor = nil
         }
     }
 
@@ -2814,9 +2887,11 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         clearThumbs()
         showEmptyPreview()
         applySelectionChrome(.none)
+        setHovered(false)
     }
 
-    func configure(name: String, itemCount: Int, dateModified: Date?) {
+    func configure(name: String, itemCount: Int, dateModified: Date?, folderURL: URL) {
+        self.folderURL = folderURL
         nameLabel.stringValue = name
         view.toolTip = name
         let countText: String
@@ -2832,6 +2907,15 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
             metaLabel.stringValue = countText
         }
         applyBadgePalette(for: name)
+        applyBadgeIcon()
+        if usesIconOnlyLayout {
+            applyFolderGlyph(pointSize: folderGlyphSideConstraint?.constant ?? 40)
+        } else {
+            // Refresh gallery empty/badge glyph now that folderURL is known.
+            if emptyIconView.isHidden == false {
+                showEmptyPreview()
+            }
+        }
     }
 
     func loadPreviews(
@@ -2935,7 +3019,15 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         leftTrailingToPreviewConstraint?.isActive = false
         leftTrailingToRightConstraint?.isActive = true
         rightColumnWidthConstraint?.isActive = true
-        if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: nil) {
+        if let folderURL {
+            let resolved = LibraryFolderIcon.resolve(
+                for: folderURL,
+                pointSize: 22,
+                symbolFallback: "folder.fill"
+            )
+            emptyIconView.image = resolved.image
+            emptyIconView.contentTintColor = resolved.isTemplate ? .secondaryLabelColor : nil
+        } else if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: nil) {
             let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
             let configured = folder.withSymbolConfiguration(config)
             configured?.isTemplate = true
@@ -2946,6 +3038,24 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     }
 
     private func applyBadgeIcon() {
+        if let folderURL {
+            let resolved = LibraryFolderIcon.resolve(
+                for: folderURL,
+                pointSize: 12,
+                symbolFallback: "folder.fill"
+            )
+            let image = resolved.image
+            image.size = NSSize(width: 14, height: 14)
+            badgeIconView.image = image
+            // Template badges keep the name-based palette tint; Finder icons stay full-color.
+            if resolved.isTemplate {
+                badgeIconView.image?.isTemplate = true
+            } else {
+                badgeIconView.image?.isTemplate = false
+                badgeIconView.contentTintColor = nil
+            }
+            return
+        }
         if let folder = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder") {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
             let configured = folder.withSymbolConfiguration(config)
@@ -2958,7 +3068,10 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
     private func applyBadgePalette(for name: String) {
         let palette = Self.badgePalette(for: name, appearance: view.effectiveAppearance)
         badgeView.layer?.backgroundColor = palette.fill.cgColor
-        badgeIconView.contentTintColor = palette.tint
+        // Finder custom icons stay full-color; SF Symbol badges take the palette tint.
+        if badgeIconView.image?.isTemplate == true {
+            badgeIconView.contentTintColor = palette.tint
+        }
         let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         badgeView.layer?.borderWidth = 1
         badgeView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor
@@ -2970,8 +3083,6 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         let card = LaughTheme.librarySidebarBackground(appearance: appearance)
         let content = LaughTheme.libraryContentBackground(appearance: appearance)
         cardView.layer?.backgroundColor = card.cgColor
-        cardView.layer?.borderWidth = 1
-        cardView.layer?.borderColor = NSColor.separatorColor.cgColor
         previewHost.layer?.borderWidth = 1
         previewHost.layer?.borderColor = NSColor.separatorColor.cgColor
         previewHost.layer?.backgroundColor = content.cgColor
@@ -2981,6 +3092,46 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         if !name.isEmpty {
             applyBadgePalette(for: name)
         }
+        // Idle vs hover border — same treatment as media tiles.
+        applyHoverBorderChrome()
+    }
+
+    private func setHovered(_ hovered: Bool) {
+        isHovered = hovered
+        applyHoverBorderChrome()
+    }
+
+    private func applyHoverBorderChrome() {
+        guard selectionState == .none else {
+            view.layer?.borderWidth = 0
+            view.layer?.borderColor = nil
+            cardView.layer?.borderWidth = 1
+            cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+            return
+        }
+        let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if usesIconOnlyLayout {
+            // Grid cards: strengthen the card rim on hover (media tiles do the same).
+            view.layer?.borderWidth = 0
+            view.layer?.borderColor = nil
+            if isHovered {
+                cardView.layer?.borderWidth = 1.5
+                cardView.layer?.borderColor = (isDark
+                    ? NSColor.white.withAlphaComponent(0.85)
+                    : NSColor.labelColor.withAlphaComponent(0.55)).cgColor
+            } else {
+                cardView.layer?.borderWidth = 1
+                cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+            }
+            return
+        }
+        // Gallery folders: outer tile rim like image Gallery hover.
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = NSColor.separatorColor.cgColor
+        view.layer?.borderWidth = isHovered ? 1.5 : 0
+        view.layer?.borderColor = isHovered
+            ? NSColor.white.withAlphaComponent(0.95).cgColor
+            : nil
     }
 
     private func mutedPreviewFill() -> NSColor {
@@ -3253,6 +3404,8 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
     private let cardView = LibraryFolderCardChromeView()
     private let thumbnailView = LibraryCoverImageView()
     private let playButton = NSImageView()
+    private let episodeBadgeView = NSView()
+    private let episodeBadgeLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
     private let metaRow = NSStackView()
     private let kindDotLabel = LibraryMediaKindDotLabel()
@@ -3277,7 +3430,7 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
     private var hasPhoto = false
     private var configuredFormat = LibraryMediaFormatBadge(title: "Image", family: .photo)
     override func loadView() {
-        let host = LibraryMediaTileHostView()
+        let host = LibraryTileHoverHostView()
         host.onHoverChange = { [weak self] hovered in
             self?.setHovered(hovered)
         }
@@ -3306,6 +3459,25 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             playButton.contentTintColor = .white
         }
         playButton.translatesAutoresizingMaskIntoConstraints = false
+
+        episodeBadgeView.wantsLayer = true
+        episodeBadgeView.layer?.cornerRadius = 4
+        episodeBadgeView.layer?.masksToBounds = true
+        episodeBadgeView.translatesAutoresizingMaskIntoConstraints = false
+        episodeBadgeView.isHidden = true
+
+        episodeBadgeLabel.isEditable = false
+        episodeBadgeLabel.isBordered = false
+        episodeBadgeLabel.isBezeled = false
+        episodeBadgeLabel.drawsBackground = false
+        episodeBadgeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        episodeBadgeLabel.textColor = .white
+        episodeBadgeLabel.alignment = .center
+        episodeBadgeLabel.maximumNumberOfLines = 1
+        episodeBadgeLabel.lineBreakMode = .byClipping
+        episodeBadgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        episodeBadgeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        episodeBadgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         configureLibraryGridNameLabel(nameLabel, fontSize: 12)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -3351,6 +3523,8 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         view.addSubview(cardView)
         cardView.addSubview(thumbnailView)
         cardView.addSubview(playButton)
+        thumbnailView.addSubview(episodeBadgeView)
+        episodeBadgeView.addSubview(episodeBadgeLabel)
         cardView.addSubview(nameLabel)
         cardView.addSubview(metaRow)
         view.addSubview(selectionChrome)
@@ -3417,6 +3591,14 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             thumbAspect,
             playButton.centerXAnchor.constraint(equalTo: thumbnailView.centerXAnchor),
             playButton.centerYAnchor.constraint(equalTo: thumbnailView.centerYAnchor),
+
+            episodeBadgeView.trailingAnchor.constraint(equalTo: thumbnailView.trailingAnchor, constant: -5),
+            episodeBadgeView.bottomAnchor.constraint(equalTo: thumbnailView.bottomAnchor, constant: -5),
+            episodeBadgeLabel.topAnchor.constraint(equalTo: episodeBadgeView.topAnchor, constant: 2),
+            episodeBadgeLabel.bottomAnchor.constraint(equalTo: episodeBadgeView.bottomAnchor, constant: -2),
+            episodeBadgeLabel.leadingAnchor.constraint(equalTo: episodeBadgeView.leadingAnchor, constant: 5),
+            episodeBadgeLabel.trailingAnchor.constraint(equalTo: episodeBadgeView.trailingAnchor, constant: -5),
+
             nameTop,
             nameLeading,
             nameTrailing,
@@ -3439,6 +3621,7 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         ])
 
         applyCardChrome()
+        applyEpisodeBadgeChrome()
     }
 
     func applySelectionChrome(_ chrome: LibraryTileSelectionChrome) {
@@ -3540,6 +3723,13 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             thumbnailView.layer?.borderWidth = 0
             thumbnailView.layer?.borderColor = nil
         }
+        applyEpisodeBadgeChrome()
+    }
+
+    private func applyEpisodeBadgeChrome() {
+        episodeBadgeView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
+        episodeBadgeView.layer?.borderWidth = 0
+        episodeBadgeLabel.textColor = .white
     }
 
     private func setHovered(_ hovered: Bool) {
@@ -3580,6 +3770,8 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         thumbnailView.clearImage()
         nameLabel.stringValue = ""
         metaLabel.stringValue = ""
+        episodeBadgeLabel.stringValue = ""
+        episodeBadgeView.isHidden = true
         configuredFormat = LibraryMediaFormatBadge(title: "Image", family: .photo)
         view.toolTip = nil
         onDeselectRequested = nil
@@ -3595,6 +3787,14 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         configuredFormat = MediaKindDetector.formatBadge(for: url)
         kindDotLabel.apply(badge: configuredFormat, appearance: view.effectiveAppearance)
         metaLabel.stringValue = LibraryMediaMetaFormatting.sizeLabel(fileSize)
+        if let marker = EpisodeMarkerParser.parse(from: url.lastPathComponent) {
+            episodeBadgeLabel.stringValue = marker.badgeText
+            episodeBadgeView.isHidden = false
+            applyEpisodeBadgeChrome()
+        } else {
+            episodeBadgeLabel.stringValue = ""
+            episodeBadgeView.isHidden = true
+        }
         guard !hasPhoto else { return }
         let symbol = kind == .video ? "film" : "photo"
         if let placeholder = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {

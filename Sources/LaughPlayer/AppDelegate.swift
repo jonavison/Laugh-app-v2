@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LaughTheme.activate()
         SubtitleFont.registerIfNeeded()
         FFmpegVideoFallback.warmAvailabilityCache()
+        FFmpegVideoFallback.enforceRemuxCacheBudget()
         MpvPlaybackController.warmAvailabilityCache()
         MediaThumbnailGenerator.performLaunchMigrations()
         LaunchLog.emit("applicationWillFinishLaunching")

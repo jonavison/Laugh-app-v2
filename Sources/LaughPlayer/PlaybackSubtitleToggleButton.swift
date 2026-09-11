@@ -17,6 +17,7 @@ final class PlaybackSubtitleToggleButton: NSButton {
         isBordered = false
         bezelStyle = .accessoryBarAction
         title = ""
+        alphaValue = 1
         toolTip = "Toggle subtitles"
         setButtonType(.momentaryPushIn)
         setContentHuggingPriority(.required, for: .horizontal)
@@ -31,14 +32,24 @@ final class PlaybackSubtitleToggleButton: NSButton {
         NSSize(width: 26, height: MusicStylePlaybackBar.accessoryButtonHeight)
     }
 
+    override var isEnabled: Bool {
+        didSet {
+            // Keep full opacity — AppKit otherwise fades disabled accessory buttons.
+            alphaValue = 1
+            needsDisplay = true
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+        // Skip super — accessory bezels / disabled fade introduce unwanted transparency.
         guard !isHidden else { return }
+
+        let tint = Self.opaqueTint(from: contentTintColor ?? MusicStylePlaybackBar.subtitleToggleTintColor)
 
         let text = Self.labelText as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: Self.font,
-            .foregroundColor: contentTintColor ?? NSColor.labelColor
+            .foregroundColor: tint
         ]
         let textSize = text.size(withAttributes: attributes)
         let origin = NSPoint(
@@ -55,7 +66,17 @@ final class PlaybackSubtitleToggleButton: NSButton {
         path.lineWidth = 1.25
         path.move(to: NSPoint(x: textRect.minX - slashInset, y: textRect.maxY + slashInset))
         path.line(to: NSPoint(x: textRect.maxX + slashInset, y: textRect.minY - slashInset))
-        (contentTintColor ?? NSColor.labelColor).setStroke()
+        tint.setStroke()
         path.stroke()
+    }
+
+    private static func opaqueTint(from color: NSColor) -> NSColor {
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        return NSColor(
+            deviceRed: rgb.redComponent,
+            green: rgb.greenComponent,
+            blue: rgb.blueComponent,
+            alpha: 1
+        )
     }
 }

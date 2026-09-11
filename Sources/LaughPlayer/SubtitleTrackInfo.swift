@@ -259,6 +259,23 @@ enum SubtitleAppearanceStyle {
     /// User-facing position: 0 = bottom of screen, 100 = top.
     static let positionMin: Double = 0
     static let positionMax: Double = 100
+    static let positionEdgePadding: CGFloat = 48
+
+    /// Distance from the container bottom to the subtitle baseline (bottom of text).
+    /// Continuous from bottom (0) → top (100); no mid-range snap to center.
+    static func bottomInset(
+        userPosition: Double,
+        containerHeight: CGFloat,
+        textHeight: CGFloat,
+        edgePadding: CGFloat = positionEdgePadding
+    ) -> CGFloat {
+        let clamped = max(positionMin, min(positionMax, userPosition))
+        let t = clamped / positionMax
+        let safeHeight = max(containerHeight, edgePadding * 2 + 1)
+        let safeText = max(textHeight, 1)
+        let travel = max(0, safeHeight - edgePadding * 2 - safeText)
+        return edgePadding + CGFloat(t) * travel
+    }
 
     /// mpv `sub-pos`: 100 = bottom, 0 = top (inverse of user position).
     static func mpvSubPos(fromUserPosition user: Double) -> Double {
@@ -278,6 +295,41 @@ enum SubtitleAppearanceStyle {
     static let fontSizeMax: Double = 72
     static let borderWidthMin: Double = 0
     static let borderWidthMax: Double = 8
+
+    /// Settings font size is authored for this playback-surface height (matches mpv `sub-font-size`).
+    static let referenceViewportHeight: CGFloat = 720
+
+    /// How much larger/smaller the surface is vs the authored reference height.
+    static func viewportScale(containerHeight: CGFloat) -> CGFloat {
+        guard containerHeight > 1 else { return 1 }
+        return containerHeight / referenceViewportHeight
+    }
+
+    /// Absolute AppKit overlay font size for the current surface height.
+    static func resolvedOverlayFontSize(
+        fontSize: Double,
+        scale: Double,
+        containerHeight: CGFloat
+    ) -> CGFloat {
+        let clampedFont = max(fontSizeMin, min(fontSizeMax, fontSize))
+        let clampedScale = max(scaleMin, min(scaleMax, scale))
+        let authored = CGFloat(clampedFont * clampedScale)
+        return max(10, authored * viewportScale(containerHeight: containerHeight))
+    }
+
+    /// Outline width scaled with the same viewport factor as the overlay font.
+    static func resolvedOverlayBorderWidth(
+        borderWidth: Double,
+        containerHeight: CGFloat
+    ) -> CGFloat {
+        let clamped = max(borderWidthMin, min(borderWidthMax, borderWidth))
+        return max(0, CGFloat(clamped) * viewportScale(containerHeight: containerHeight))
+    }
+
+    /// Bottom/top padding that grows/shrinks with the surface so position stays proportional.
+    static func resolvedPositionEdgePadding(containerHeight: CGFloat) -> CGFloat {
+        max(16, positionEdgePadding * viewportScale(containerHeight: containerHeight))
+    }
 
     static func assForceStyle(from store: SettingsStore) -> String {
         let font = assBGRHex(from: store.subtitleFontColor)
@@ -348,8 +400,10 @@ enum NativeSubtitleAppearance {
         }
 
         let verticalPosition = max(0, min(100, store.subtitlePosition))
+        // AVFoundation: 0 = top of video, 100 = bottom — invert our bottom→top slider.
+        let avPosition = 100 - verticalPosition
         if let rule = AVTextStyleRule(textMarkupAttributes: [
-            "TextPositionPercentageRelativeToVideoHeight": NSNumber(value: verticalPosition)
+            "TextPositionPercentageRelativeToVideoHeight": NSNumber(value: avPosition)
         ]) {
             rules.append(rule)
         }

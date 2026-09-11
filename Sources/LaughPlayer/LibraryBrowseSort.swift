@@ -1,6 +1,6 @@
 import Foundation
 
-enum LibraryBrowseSortKey: String, CaseIterable {
+enum LibraryBrowseSortKey: String, CaseIterable, Codable {
     case name
     case dateModified
     case dateAdded
@@ -16,16 +16,48 @@ enum LibraryBrowseSortKey: String, CaseIterable {
         case .kind: return "Kind"
         }
     }
+
+    /// Finder-like default direction when the user picks this key.
+    var preferredDirection: LibraryBrowseSortDirection {
+        switch self {
+        case .dateModified, .dateAdded, .size:
+            return .descending
+        case .name, .kind:
+            return .ascending
+        }
+    }
+
+    var isDateKey: Bool {
+        self == .dateModified || self == .dateAdded
+    }
 }
 
-enum LibraryBrowseSortDirection: Equatable {
+enum LibraryBrowseSortDirection: String, Equatable, Codable {
     case ascending
     case descending
 
-    var menuTitle: String {
-        switch self {
-        case .ascending: return "Ascending"
-        case .descending: return "Descending"
+    func menuTitle(for key: LibraryBrowseSortKey) -> String {
+        switch key {
+        case .dateModified, .dateAdded:
+            switch self {
+            case .ascending: return "Oldest First"
+            case .descending: return "Newest First"
+            }
+        case .name:
+            switch self {
+            case .ascending: return "A to Z"
+            case .descending: return "Z to A"
+            }
+        case .size:
+            switch self {
+            case .ascending: return "Smallest First"
+            case .descending: return "Largest First"
+            }
+        case .kind:
+            switch self {
+            case .ascending: return "Ascending"
+            case .descending: return "Descending"
+            }
         }
     }
 
@@ -41,11 +73,17 @@ enum LibraryBrowseSortDirection: Equatable {
     }
 }
 
-struct LibraryBrowseSort: Equatable {
+struct LibraryBrowseSort: Equatable, Codable {
     var key: LibraryBrowseSortKey
     var direction: LibraryBrowseSortDirection
 
     static let `default` = LibraryBrowseSort(key: .name, direction: .ascending)
+
+    /// Applies a new sort key and switches to that key’s Finder-like direction.
+    mutating func selectKey(_ key: LibraryBrowseSortKey) {
+        self.key = key
+        direction = key.preferredDirection
+    }
 }
 
 extension LibraryBrowseSortKey {
@@ -59,34 +97,65 @@ extension LibraryBrowseSortKey {
     }
 }
 
+/// Resolves “Date Added” the way Finder does: when the item was added to its parent directory.
+enum LibraryBrowseDateMetadata {
+    static func dateAdded(addedToDirectory: Date?, creation: Date?) -> Date? {
+        addedToDirectory ?? creation
+    }
+}
+
 enum LibraryBrowseItemSorter {
     static func sorted(_ entries: [LibraryBrowseEntry], by sort: LibraryBrowseSort) -> [LibraryBrowseEntry] {
         entries.sorted { lhs, rhs in
-            let order = compare(lhs, rhs, key: sort.key)
-            return sort.direction == .ascending ? order : !order
+            let primary = compare(lhs, rhs, key: sort.key)
+            if primary != .orderedSame {
+                return sort.direction == .ascending
+                    ? primary == .orderedAscending
+                    : primary == .orderedDescending
+            }
+            let nameOrder = lhs.name.compare(rhs.name, options: [.numeric, .caseInsensitive])
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            return lhs.name < rhs.name
         }
     }
 
-    private static func compare(_ lhs: LibraryBrowseEntry, _ rhs: LibraryBrowseEntry, key: LibraryBrowseSortKey) -> Bool {
+    private static func compare(
+        _ lhs: LibraryBrowseEntry,
+        _ rhs: LibraryBrowseEntry,
+        key: LibraryBrowseSortKey
+    ) -> ComparisonResult {
         switch key {
         case .kind:
             let lk = kindRank(lhs)
             let rk = kindRank(rhs)
-            if lk != rk { return lk < rk }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            if lk != rk {
+                return lk < rk ? .orderedAscending : .orderedDescending
+            }
+            return .orderedSame
         case .name:
-            if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
-            return lhs.name.compare(rhs.name, options: [.numeric, .caseInsensitive]) == .orderedAscending
+            if lhs.isFolder != rhs.isFolder {
+                return lhs.isFolder ? .orderedAscending : .orderedDescending
+            }
+            return lhs.name.compare(rhs.name, options: [.numeric, .caseInsensitive])
         case .dateModified:
-            if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
-            return (lhs.dateModified ?? .distantPast) < (rhs.dateModified ?? .distantPast)
+            return compareDates(lhs.dateModified, rhs.dateModified)
         case .dateAdded:
-            if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
-            return (lhs.dateAdded ?? .distantPast) < (rhs.dateAdded ?? .distantPast)
+            return compareDates(lhs.dateAdded, rhs.dateAdded)
         case .size:
-            if lhs.isFolder != rhs.isFolder { return lhs.isFolder && !rhs.isFolder }
-            return (lhs.size ?? 0) < (rhs.size ?? 0)
+            let ls = lhs.size ?? 0
+            let rs = rhs.size ?? 0
+            if ls == rs { return .orderedSame }
+            return ls < rs ? .orderedAscending : .orderedDescending
         }
+    }
+
+    private static func compareDates(_ lhs: Date?, _ rhs: Date?) -> ComparisonResult {
+        let left = lhs ?? .distantPast
+        let right = rhs ?? .distantPast
+        if left == right { return .orderedSame }
+        return left < right ? .orderedAscending : .orderedDescending
     }
 
     private static func kindRank(_ entry: LibraryBrowseEntry) -> Int {
