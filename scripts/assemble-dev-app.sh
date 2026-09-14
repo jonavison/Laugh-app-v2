@@ -26,6 +26,9 @@ MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
 DEV_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/Packaging/RELEASE_VERSION")-dev"
 
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/lib/sparkle-common.sh"
+
 if [[ ! -x "${BIN}" ]]; then
   echo "[assemble-dev-app] Missing binary: ${BIN}" >&2
   exit 1
@@ -42,11 +45,22 @@ if [[ -d "Sources/LaughPlayer/codec-tools" ]]; then
 fi
 
 if [[ -d "${SPM_BUNDLE}" ]]; then
+  # Contents/Resources only — app-root .bundle breaks Developer ID codesign.
+  rm -rf "${APP_DIR}/LaughPlayer_LaughPlayer.bundle" "${RESOURCES}/LaughPlayer_LaughPlayer.bundle"
   cp -R "${SPM_BUNDLE}" "${RESOURCES}/LaughPlayer_LaughPlayer.bundle"
 fi
 
+# Binary links Sparkle — embed the framework (no SUFeedURL → updates stay disabled).
+stage_embed_sparkle_framework "${APP_DIR}"
+
 # Named accent for NSAccentColorName (must be Assets.car — not a raw .colorset folder).
 ./scripts/compile-accent-assets.sh "${RESOURCES}"
+
+ICON_PLIST_ENTRIES=""
+if [[ -f "${ROOT_DIR}/Packaging/Resources/AppIcon.icns" ]]; then
+  cp "${ROOT_DIR}/Packaging/Resources/AppIcon.icns" "${RESOURCES}/AppIcon.icns"
+  ICON_PLIST_ENTRIES=$'  <key>CFBundleIconFile</key>\n  <string>AppIcon</string>\n'
+fi
 
 cat > "${CONTENTS}/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -71,7 +85,7 @@ cat > "${CONTENTS}/Info.plist" <<EOF
   <string>${DEV_VERSION}</string>
   <key>CFBundleVersion</key>
   <string>1</string>
-  <key>LSMinimumSystemVersion</key>
+${ICON_PLIST_ENTRIES}  <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSBackgroundOnly</key>
   <false/>
@@ -106,5 +120,9 @@ cat > "${CONTENTS}/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
+fi
 
 echo "[assemble-dev-app] Ready: ${APP_DIR}" >&2

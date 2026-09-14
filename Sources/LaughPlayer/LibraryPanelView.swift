@@ -67,6 +67,8 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
     private let plateView = LibraryPanelPlateView(style: .sidebar)
     private let scroll = NSScrollView()
     private let table = NSTableView()
+    private let topOverflowFade = ScrollOverflowFadeView()
+    private let bottomOverflowFade = ScrollOverflowFadeView()
     private let toolbar = NSStackView()
     private let trailingDivider = NSView()
     private let addFolderButton = NSButton(title: "", target: nil, action: nil)
@@ -114,6 +116,9 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
         super.viewDidChangeEffectiveAppearance()
         trailingDivider.layer?.backgroundColor = NSColor.separatorColor.cgColor
         applyToolbarButtonChrome()
+        refreshOverflowFadeFloor()
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
     }
 
     private func configureSubviews() {
@@ -156,9 +161,19 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
         scroll.borderType = .noBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
+        topOverflowFade.edge = .top
+        topOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+        bottomOverflowFade.edge = .bottom
+        bottomOverflowFade.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(scroll)
+        addSubview(topOverflowFade)
+        addSubview(bottomOverflowFade)
         addSubview(toolbar)
         addSubview(trailingDivider)
+        refreshOverflowFadeFloor()
+        topOverflowFade.attach(to: scroll)
+        bottomOverflowFade.attach(to: scroll)
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -177,11 +192,14 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyTitleBarContentInset()
+        updateOverflowFades()
     }
 
     override func layout() {
         super.layout()
         applyTitleBarContentInset()
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
     }
 
     private func applyTitleBarContentInset() {
@@ -198,6 +216,16 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.edgeInset),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarMetrics.edgeInset),
             scroll.bottomAnchor.constraint(equalTo: toolbar.topAnchor, constant: -Metrics.listToToolbarSpacing),
+
+            topOverflowFade.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            topOverflowFade.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            topOverflowFade.topAnchor.constraint(equalTo: scroll.topAnchor),
+            topOverflowFade.heightAnchor.constraint(equalToConstant: 28),
+
+            bottomOverflowFade.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            bottomOverflowFade.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+            bottomOverflowFade.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            bottomOverflowFade.heightAnchor.constraint(equalToConstant: 28),
 
             toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetrics.edgeInset + SidebarMetrics.rowTextInset),
             toolbar.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -SidebarMetrics.edgeInset),
@@ -231,14 +259,33 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
         var frame = table.frame
         let widthChanged = abs(frame.size.width - targetWidth) > 0.5
         let heightChanged = abs(frame.size.height - targetHeight) > 0.5
-        guard widthChanged || heightChanged else { return }
-
-        frame.size.width = targetWidth
-        frame.size.height = targetHeight
-        table.frame = frame
-        if widthChanged {
-            table.sizeLastColumnToFit()
+        if widthChanged || heightChanged {
+            frame.size.width = targetWidth
+            frame.size.height = targetHeight
+            table.frame = frame
+            if widthChanged {
+                table.sizeLastColumnToFit()
+            }
         }
+        updateOverflowFades()
+    }
+
+    private func refreshOverflowFadeFloor() {
+        let floor = LaughTheme.librarySidebarBackground(appearance: effectiveAppearance)
+        topOverflowFade.floorColor = floor
+        bottomOverflowFade.floorColor = floor
+    }
+
+    private func updateOverflowFades() {
+        refreshOverflowFadeFloor()
+        topOverflowFade.attach(to: scroll)
+        bottomOverflowFade.attach(to: scroll)
+        addSubview(topOverflowFade, positioned: .above, relativeTo: scroll)
+        addSubview(bottomOverflowFade, positioned: .above, relativeTo: scroll)
+        // Keep the trailing hairline above the fades.
+        addSubview(trailingDivider, positioned: .above, relativeTo: nil)
+        topOverflowFade.refreshOverflow(animated: false)
+        bottomOverflowFade.refreshOverflow(animated: false)
     }
 
     private func sidebarContentHeight(rowCount: Int) -> CGFloat {
@@ -305,6 +352,7 @@ final class LibrarySidebarView: NSView, NSTableViewDelegate, NSTableViewDataSour
         applyToolbarButtonChrome()
         needsLayout = true
         updateScrollerVisibility()
+        updateOverflowFades()
     }
 
     @objc private func selectionChanged() {

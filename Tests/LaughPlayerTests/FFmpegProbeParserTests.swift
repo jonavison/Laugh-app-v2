@@ -64,11 +64,13 @@ final class FFmpegProbeParserTests: XCTestCase {
         XCTAssertFalse(FFmpegProbeParser.needsFragmentedAudioTranscode(audioCodec: nil))
     }
 
-    func testProgressivePreviewSkippedWhenAudioWouldFullFileTranscode() {
-        XCTAssertTrue(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: "ac3"))
-        XCTAssertTrue(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: "eac3"))
+    func testProgressivePreviewNotSkippedForTranscodeAudio_usesCapInstead() {
+        // Uncapped AAC preview used to be skipped; capped progressive is preferred.
+        XCTAssertFalse(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: "ac3"))
+        XCTAssertFalse(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: "eac3"))
         XCTAssertFalse(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: "aac"))
         XCTAssertFalse(FFmpegVideoFallback.shouldSkipProgressivePreview(audioCodec: nil))
+        XCTAssertEqual(FFmpegVideoFallback.audioTranscodePreviewCapSec, 120, accuracy: 0.1)
     }
 
     func testPreviewByteReadinessRejectsStubHeader() {

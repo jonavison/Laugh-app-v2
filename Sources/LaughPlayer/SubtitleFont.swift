@@ -46,14 +46,15 @@ enum SubtitleFont {
     }
 
     private static var bundledFontURL: URL? {
-        if let url = Bundle.module.url(
+        let bundle = ResourceBundle.bundle
+        if let url = bundle.url(
             forResource: resourceName,
             withExtension: resourceExtension,
             subdirectory: "Resources/Fonts"
         ) {
             return url
         }
-        return Bundle.module.url(
+        return bundle.url(
             forResource: resourceName,
             withExtension: resourceExtension
         )

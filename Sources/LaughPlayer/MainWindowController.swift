@@ -92,18 +92,40 @@ final class MainWindowController: NSWindowController {
         LaunchLog.emit("\(context): frame=\(window.frame) visible=\(window.isVisible) key=\(window.isKeyWindow)")
     }
 
-    func openVideoPanel() {
+    func openMediaPanel() {
         guard let window else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.allowsOtherFileTypes = true
-        panel.allowedContentTypes = VideoAssetLoader.openPanelContentTypes()
+        panel.allowedContentTypes =
+            VideoAssetLoader.openPanelContentTypes() + MediaKindDetector.openPanelImageContentTypes()
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            guard !urls.isEmpty else { return }
+            self?.playerViewController.openMediaFiles(urls)
+        }
+    }
+
+    func openFolderPanel() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Choose a folder to browse in the media library."
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            self?.playerViewController.loadVideo(url: url)
+            self?.playerViewController.openLibraryFolder(url)
         }
+    }
+
+    /// Empty-state Open button — same unified media picker as File → Open…
+    func openVideoPanel() {
+        openMediaPanel()
     }
 
     func openMediaURLs(_ urls: [URL]) {
@@ -125,19 +147,6 @@ final class MainWindowController: NSWindowController {
 
     func advancePlaybackQueue() {
         playerViewController.advancePlaybackQueue()
-    }
-
-    func openImagePanel() {
-        guard let window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = MediaKindDetector.openPanelImageContentTypes()
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.playerViewController.loadImage(url: url)
-        }
     }
 
     func commandPlayPause() { playerViewController.commandTogglePlayPause() }

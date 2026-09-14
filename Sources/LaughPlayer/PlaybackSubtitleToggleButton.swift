@@ -44,7 +44,7 @@ final class PlaybackSubtitleToggleButton: NSButton {
         // Skip super — accessory bezels / disabled fade introduce unwanted transparency.
         guard !isHidden else { return }
 
-        let tint = Self.opaqueTint(from: contentTintColor ?? MusicStylePlaybackBar.subtitleToggleTintColor)
+        let tint = Self.opaqueTint(from: contentTintColor ?? MusicStylePlaybackBar.accessoryIconTintColor)
 
         let text = Self.labelText as NSString
         let attributes: [NSAttributedString.Key: Any] = [

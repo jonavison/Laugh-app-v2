@@ -65,6 +65,8 @@ enum PlaybackResumeStore {
         guard let duration, duration.isFinite, duration > minimumResumeSeconds else {
             return false
         }
+        // Corrupt / cross-file writes can leave a resume past the real duration.
+        if seconds > duration { return true }
         if seconds >= duration - endCompletionRemainingSeconds { return true }
         if seconds / duration >= endCompletionFraction { return true }
         return false

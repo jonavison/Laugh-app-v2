@@ -1,6 +1,7 @@
 import AppKit
+import Sparkle
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var windowController: MainWindowController?
     private var preferencesWindowController: PreferencesWindowController?
     private var pendingOpenFileURLs: [URL] = []
@@ -18,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         LaunchLog.emit("applicationDidFinishLaunching: begin")
         buildMainMenu()
+        LaughSparkleUpdater.install(into: self)
 
         LaunchLog.emit("applicationDidFinishLaunching: creating main window")
         let controller = MainWindowController()
@@ -63,6 +65,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bringMainWindowToFront()
         return true
+    }
+
+    /// Custom items appear above the system Dock menu (Show All Windows, Options, Quit…).
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu(title: "Dock")
+        menu.addItem(dockMenuItem(title: "Open…", action: #selector(dockOpenMedia)))
+        menu.addItem(dockMenuItem(title: "Open Folder…", action: #selector(dockOpenFolder)))
+        menu.addItem(.separator())
+        menu.addItem(dockMenuItem(title: "Play / Pause", action: #selector(dockPlayPause)))
+        menu.addItem(dockMenuItem(title: "Stop and Close", action: #selector(dockStopAndClose)))
+        menu.addItem(.separator())
+        menu.addItem(dockMenuItem(title: "Toggle Library", action: #selector(dockToggleLibrary)))
+        menu.addItem(dockMenuItem(title: "Preferences…", action: #selector(dockOpenPreferences)))
+        return menu
+    }
+
+    private func dockMenuItem(title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func dockOpenMedia() {
+        bringMainWindowToFront()
+        openMedia()
+    }
+
+    @objc private func dockOpenFolder() {
+        bringMainWindowToFront()
+        openFolder()
+    }
+
+    @objc private func dockPlayPause() {
+        bringMainWindowToFront()
+        commandPlayPause()
+    }
+
+    @objc private func dockStopAndClose() {
+        bringMainWindowToFront()
+        commandStopAndClose()
+    }
+
+    @objc private func dockToggleLibrary() {
+        bringMainWindowToFront()
+        commandToggleLibrary()
+    }
+
+    @objc private func dockOpenPreferences() {
+        bringMainWindowToFront()
+        openPreferences()
     }
 
     private func consumePendingOpenFileURLs() {
@@ -123,6 +175,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioItem.submenu = buildAudioMenu()
         menu.addItem(audioItem)
 
+        let windowItem = NSMenuItem()
+        windowItem.submenu = buildWindowMenu()
+        menu.addItem(windowItem)
+
         let helpItem = NSMenuItem()
         helpItem.submenu = buildHelpMenu()
         menu.addItem(helpItem)
@@ -134,10 +190,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         title: String,
         action: Selector,
         key: String = "",
+        modifiers: NSEvent.ModifierFlags = .command,
+        target: AnyObject? = nil
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        // nil target → responder chain / NSApp (required for terminate: / performClose:).
+        item.target = target ?? self
+        if !key.isEmpty {
+            item.keyEquivalentModifierMask = modifiers
+        }
+        return item
+    }
+
+    /// System actions that must not target AppDelegate (validation would disable them).
+    private func systemMenuItem(
+        title: String,
+        action: Selector,
+        key: String = "",
         modifiers: NSEvent.ModifierFlags = .command
     ) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        item.target = self
+        item.target = nil
         if !key.isEmpty {
             item.keyEquivalentModifierMask = modifiers
         }
@@ -145,17 +218,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func buildAppMenu() -> NSMenu {
-        let menu = NSMenu(title: "App")
+        let menu = NSMenu(title: "LaughPlayer")
+        menu.addItem(menuItem(title: "About LaughPlayer", action: #selector(showAbout), key: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(menuItem(title: "Preferences…", action: #selector(openPreferences), key: ","))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(menuItem(title: "Quit LaughPlayer", action: #selector(NSApplication.terminate(_:)), key: "q"))
+        menu.addItem(systemMenuItem(title: "Quit LaughPlayer", action: #selector(NSApplication.terminate(_:)), key: "q"))
         return menu
     }
 
     private func buildFileMenu() -> NSMenu {
         let menu = NSMenu(title: "File")
-        menu.addItem(menuItem(title: "Open Video…", action: #selector(openVideo), key: "o"))
-        menu.addItem(menuItem(title: "Open Image…", action: #selector(openImage), key: "O", modifiers: [.command, .shift]))
+        menu.addItem(menuItem(title: "Open…", action: #selector(openMedia), key: "o"))
+        menu.addItem(menuItem(title: "Open Folder…", action: #selector(openFolder), key: "O", modifiers: [.command, .shift]))
+        return menu
+    }
+
+    private func buildWindowMenu() -> NSMenu {
+        let menu = NSMenu(title: "Window")
+        menu.addItem(systemMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), key: "w"))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(systemMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), key: "m"))
+        menu.addItem(systemMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), key: ""))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(systemMenuItem(title: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), key: ""))
         return menu
     }
 
@@ -216,18 +302,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildHelpMenu() -> NSMenu {
         let menu = NSMenu(title: "Help")
+        if LaughSparkleUpdater.isAvailable {
+            menu.addItem(menuItem(title: "Check for Updates…", action: #selector(checkForUpdates), key: ""))
+            menu.addItem(NSMenuItem.separator())
+        }
         menu.addItem(menuItem(title: "Keyboard Shortcuts…", action: #selector(showKeyboardShortcuts), key: "/"))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(menuItem(title: "Laugh on the Web…", action: #selector(openLaughWebsite), key: ""))
         return menu
+    }
+
+    // MARK: - App / Help
+
+    @objc private func showAbout() {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "LaughPlayer",
+            .version: build,
+            .applicationVersion: short
+        ]
+        if let credits = aboutCreditsAttributedString() {
+            options[.credits] = credits
+        }
+        NSApp.orderFrontStandardAboutPanel(options: options)
+    }
+
+    private func aboutCreditsAttributedString() -> NSAttributedString? {
+        let text = "Avison · avison-soft.com/laugh"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+        return NSAttributedString(string: text, attributes: attrs)
+    }
+
+    @objc private func checkForUpdates() {
+        LaughSparkleUpdater.checkForUpdates()
+    }
+
+    @objc private func openLaughWebsite() {
+        guard let url = URL(string: "https://avison-soft.com/laugh") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - File
 
-    @objc private func openVideo() {
-        windowController?.openVideoPanel()
+    @objc private func openMedia() {
+        windowController?.openMediaPanel()
     }
 
-    @objc private func openImage() {
-        windowController?.openImagePanel()
+    @objc private func openFolder() {
+        windowController?.openFolderPanel()
     }
 
     // MARK: - Playback commands

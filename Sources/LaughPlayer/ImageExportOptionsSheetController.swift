@@ -437,7 +437,7 @@ final class ImageExportOptionsSheetController: NSWindowController {
     }
 }
 
-private final class IntegerOnlyFormatter: NumberFormatter {
+private final class IntegerOnlyFormatter: NumberFormatter, @unchecked Sendable {
     override init() {
         super.init()
         numberStyle = .none
@@ -453,7 +453,7 @@ private final class IntegerOnlyFormatter: NumberFormatter {
     }
 }
 
-private final class DPIFormatter: NumberFormatter {
+private final class DPIFormatter: NumberFormatter, @unchecked Sendable {
     override init() {
         super.init()
         numberStyle = .decimal

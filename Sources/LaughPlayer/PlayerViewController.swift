@@ -265,6 +265,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var lastVideoTrackSummary: String = "Unknown"
     private var lastPlaybackTraceSecond: Int = -1
     private var isSeekingFromUI = false
+    /// After A→B, AVPlayer may still hold A's item; block timeline paint/persist until B's item matches.
+    private var blockTimelineUntilItemMatches = false
     private var seekGeneration = 0
     /// Sticky across rapid seek bursts: first seek pauses, later seeks see rate==0.
     private var resumePlaybackAfterSeek = false
@@ -321,6 +323,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var progressiveExtendInProgress = false
     private var lastProgressiveExtendWallTime: CFAbsoluteTime = 0
     private var progressiveExtentMonitorToken: Int = 0
+    /// Cancels in-flight “wait for remux then seek” work when the user scrubs again.
+    private var progressiveSeekToken: Int = 0
     /// One ffmpeg probe per playable remux path — detects sparse incomplete remux freezes.
     private var sparseRemuxFreezeCheckedPath: String?
     /// Avoid re-tipping bitmap-only subs on every subtitle refresh for the same source.
@@ -1128,6 +1132,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         _ = handleDroppedURLs(urls, queueOnly: false)
     }
 
+    /// Browse `folder` in the library panel (does not add a permanent library root).
+    func openLibraryFolder(_ folder: URL) {
+        mediaLibraryController.revealFolder(folder)
+        if activeMediaKind == .empty {
+            showFullMediaLibrary()
+        } else {
+            showPlaybackLibrarySidebarOnly()
+        }
+    }
+
     func loadVideo(url: URL, replaceCurrent: Bool = true, startAt: CMTime? = nil, forceDirectMpv: Bool = false) {
         pendingVideoLoadWorkItem?.cancel()
         pendingVideoLoadWorkItem = nil
@@ -1183,8 +1197,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             fallbackStartedAt = nil
             fallbackResumeTargetSec = nil
             fallbackLastMethod = nil
-            activePreviewFullTargetURL = nil
-            activePreviewSourceDurationSec = nil
             FFmpegVideoFallback.terminateRunningProcesses()
             updateSeekBarPreparingState()
             print("[DEBUG-fallback] invalidated due to switch to \(url.lastPathComponent)")
@@ -1196,6 +1208,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         resetNativeSubtitlePresentationForSourceChange()
         stopBitmapSubtitleOverlay()
         cachedBitmapProbeTracks = []
+
+        let previousMediaURL = currentMediaURL
+        let switchingSource = previousMediaURL.map {
+            $0.standardizedFileURL.path != url.standardizedFileURL.path
+        } ?? false
+
+        // Capture resume for the outgoing file BEFORE tearing down mpv/AV clocks.
+        if switchingSource {
+            persistPlaybackResumePosition(force: true)
+            // Until the new item is attached, refuse to paint/persist — the previous
+            // AVPlayer item is intentionally left in place (Core Audio), so its clock
+            // must not be attributed to the new source.
+            blockTimelineUntilItemMatches = true
+        }
+
         if mpvBackendActive {
             stopMpvBackend()
         }
@@ -1209,11 +1236,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastPlaybackTraceSecond = -1
         let generation = videoLoadGeneration
 
-        let previousMediaURL = currentMediaURL
-        // Remember where we left the previous video before switching away.
-        if let previousMediaURL,
-           previousMediaURL.standardizedFileURL.path != url.standardizedFileURL.path {
-            persistPlaybackResumePosition(force: true)
+        // Drop previous file's preview/duration ownership before retargeting URLs.
+        clearPreviewPlaybackState()
+        if switchingSource {
+            activePlaybackFileURL = nil
+            observedItemPlayableURL = nil
+            currentTimeLabel.stringValue = "···"
+            totalTimeLabel.stringValue = "--:--"
+            seekSlider.maxValue = 1
+            seekSlider.doubleValue = 0
         }
 
         if let startAt {
@@ -1359,6 +1390,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     /// Show playback chrome and animated seek bar immediately while remux/decode prepares.
     private func enterInstantPlaybackPrepareUI(for url: URL, probeDuration: Bool = true) {
         playbackPrepareActive = true
+        // Prevent prepare UI from re-painting the previous file's duration.
+        activePreviewSourceDurationSec = nil
         hideSettingsSheet()
         hideCompatibilityFailure()
         showVideoChrome()
@@ -1510,7 +1543,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let pending = pendingStartTimeAfterLoad
         pendingStartTimeAfterLoad = nil
         let pendingSec = pending.map { CMTimeGetSeconds($0) } ?? 0
-        let targetSec = (pendingSec.isFinite && pendingSec >= 0) ? pendingSec : 0
+        var targetSec = (pendingSec.isFinite && pendingSec >= 0) ? pendingSec : 0
+        let knownDuration = activeSession?.durationSec ?? 0
+        if knownDuration.isFinite, knownDuration > 1, targetSec > knownDuration {
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-resume] clamp/discard %.2fs > duration %.2fs — start at 0",
+                targetSec,
+                knownDuration
+            ))
+            PlaybackResumeStore.clear(for: sourceURL)
+            targetSec = 0
+        }
 
         let shouldPlay = pendingResumePlayingAfterLoad ?? true
         pendingResumePlayingAfterLoad = nil
@@ -1548,8 +1591,86 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 await self.applySubtitleAppearanceToPlayback()
             }
             PlaybackTrace.emit("[DEBUG-mpv] playback started path=\(sourceURL.path)")
+            self.maybeStartSwitchStressHarness(generation: generation)
         }
         start()
+    }
+
+    private static var switchStressHarnessStarted = false
+
+    private func maybeStartSwitchStressHarness(generation: Int) {
+        guard PlaybackSwitchStressHarness.isEnabled else { return }
+        guard !Self.switchStressHarnessStarted else { return }
+        Self.switchStressHarnessStarted = true
+        Task { @MainActor in
+            await PlaybackSwitchStressHarness.run(
+                generation: generation,
+                currentGeneration: { [weak self] in self?.videoLoadGeneration ?? -1 },
+                currentSourceURL: { [weak self] in
+                    self?.playbackSourceURL ?? self?.currentMediaURL
+                },
+                loadVideo: { [weak self] url in
+                    self?.loadVideo(url: url, replaceCurrent: true)
+                },
+                seekBySeconds: { [weak self] delta in
+                    self?.commandSeek(bySeconds: delta)
+                },
+                playbackRate: { [weak self] in
+                    guard let self else { return 0 }
+                    if self.mpvBackendActive {
+                        return self.activeSession?.isPlaying == true ? self.preferredPlaybackRate : 0
+                    }
+                    return self.player.rate
+                },
+                currentTimeSec: { [weak self] in
+                    guard let self else { return 0 }
+                    if let source = self.playbackSourceURL ?? self.currentMediaURL {
+                        if self.mpvBackendActive {
+                            guard self.mpvPlaybackStarted else { return 0 }
+                        } else if self.player.currentItem != nil,
+                                  !self.currentPlayerItemMatchesSource(source) {
+                            return 0
+                        }
+                    }
+                    if self.mpvBackendActive, let session = self.activeSession {
+                        return session.currentTimeSec
+                    }
+                    return CMTimeGetSeconds(self.player.currentTime())
+                },
+                durationSec: { [weak self] in
+                    guard let self else { return 0 }
+                    if let source = self.playbackSourceURL ?? self.currentMediaURL {
+                        if self.mpvBackendActive {
+                            guard self.mpvPlaybackStarted else {
+                                return self.activePreviewSourceDurationSec ?? 0
+                            }
+                        } else if self.player.currentItem != nil,
+                                  !self.currentPlayerItemMatchesSource(source) {
+                            // Stale AV item from previous file — never report its duration.
+                            return self.activePreviewSourceDurationSec ?? 0
+                        }
+                    }
+                    if self.mpvBackendActive, let session = self.activeSession {
+                        let d = session.durationSec
+                        return d.isFinite && d > 0 ? d : (self.activePreviewSourceDurationSec ?? 0)
+                    }
+                    // Capped AAC progressive reports ~120s on the AV item — use source duration.
+                    if self.isPreviewPlaybackActive,
+                       let preview = self.activePreviewSourceDurationSec,
+                       preview > 0 {
+                        return preview
+                    }
+                    if let item = self.player.currentItem {
+                        let d = CMTimeGetSeconds(item.duration)
+                        if d.isFinite, d > 0 { return d }
+                    }
+                    if let preview = self.activePreviewSourceDurationSec, preview > 0 {
+                        return preview
+                    }
+                    return 0
+                }
+            )
+        }
     }
 
     private func refreshMpvDebugMetadata() {
@@ -1707,7 +1828,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         updateAspectRatio(asset: asset)
         updatePlayPauseButtonIcon()
-        updateTimelineUI()
+        // Do not updateTimelineUI() before replaceCurrentItem — the previous item is still
+        // on the player and would paint the wrong duration onto this source.
 
         // Item must be the player's current item before status can leave `.unknown`.
         connectPlayerToVideoSurfaces()
@@ -1792,14 +1914,44 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     /// True when the player's current item is the same logical source (native path or remux of it).
     private func currentPlayerItemMatchesSource(_ sourceURL: URL) -> Bool {
         guard let asset = player.currentItem?.asset as? AVURLAsset else { return false }
-        let playing = asset.url.standardizedFileURL
+        return PlaybackSourceIdentity.playerURL(
+            asset.url,
+            matchesSource: sourceURL,
+            remuxURLs: knownRemuxURLs(for: sourceURL)
+        )
+    }
+
+    /// Remux / progressive preview URLs tracked for `sourceURL` right now.
+    /// Hot path — must not call `cachedPlayableURL` (disk/ffprobe); that stalled every timeline tick.
+    private func knownRemuxURLs(for sourceURL: URL) -> [URL] {
         let source = sourceURL.standardizedFileURL
-        if playing == source { return true }
-        if isGeneratedFallbackURL(playing),
-           playbackSourceURL?.standardizedFileURL == source {
-            return true
+        guard playbackSourceURL?.standardizedFileURL == source else { return [] }
+        var urls: [URL] = []
+        if let active = activePlaybackFileURL, isGeneratedFallbackURL(active) {
+            urls.append(active)
         }
-        return false
+        if let observed = observedItemPlayableURL, isGeneratedFallbackURL(observed) {
+            urls.append(observed)
+        }
+        return urls
+    }
+
+    private func clearTimelineBlockIfItemMatches() {
+        guard blockTimelineUntilItemMatches else { return }
+        guard let source = playbackSourceURL ?? currentMediaURL else { return }
+        if mpvBackendActive {
+            guard mpvPlaybackStarted else { return }
+            if let active = activePlaybackFileURL?.standardizedFileURL {
+                let sourcePath = source.standardizedFileURL
+                let ok = active == sourcePath
+                    || (isGeneratedFallbackURL(active) && playbackSourceURL?.standardizedFileURL == sourcePath)
+                guard ok else { return }
+            }
+            blockTimelineUntilItemMatches = false
+            return
+        }
+        guard currentPlayerItemMatchesSource(source) else { return }
+        blockTimelineUntilItemMatches = false
     }
 
     private func isActivelyPlayingSource(_ url: URL) -> Bool {
@@ -1866,7 +2018,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     let method = self.fallbackLastMethod ?? "unknown"
                     print(String(format: "[DEBUG-fallback] handoff ready method=%@ total=%.2fms resumeTarget=%.3fs resumeDelta=%.3fs", method, totalMs, currentSec, resumeDelta))
                     self.fallbackStartedAt = nil
-                    self.fallbackResumeTargetSec = nil
+                    // Progressive preview defers deep resume until full remux upgrade — do not
+                    // clear that target on the early preview handoff (was seeking to ~4s).
+                    let deferredDeepResume = method == "remux-preview"
+                        && (self.fallbackResumeTargetSec ?? 0) > 2
+                    if !deferredDeepResume {
+                        self.fallbackResumeTargetSec = nil
+                    }
                     self.fallbackLastMethod = nil
                 }
                 self.logPlaybackHealthSnapshot(reason: "ready_to_play", item: item)
@@ -1885,6 +2043,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     await self.refreshAudioTrackPicker()
                     await self.refreshSubtitleSettings()
                 }
+                self.maybeStartSwitchStressHarness(generation: generation)
                 Task { @MainActor in
                     await PlaybackSeekStressHarness.run(
                         generation: generation,
@@ -1913,9 +2072,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
 
-        performCooperativeSeek(to: target, precise: true) { finished in
+        let targetSec = CMTimeGetSeconds(target)
+        PlaybackTrace.emit(String(
+            format: "[DEBUG-resume] seek-before-play → %.2fs",
+            targetSec
+        ))
+        // Loose tolerance for open-resume — precise seeks into HEVC remuxes have hung/crashed.
+        performCooperativeSeek(to: target, precise: false) { finished in
             guard finished else {
-                print("[DEBUG-playback] seek-before-play failed")
+                print("[DEBUG-playback] seek-before-play failed — starting anyway")
+                startPlayback()
                 return
             }
             startPlayback()
@@ -1977,7 +2143,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         let tolerance = precise
             ? .zero
-            : CMTime(seconds: 0.5, preferredTimescale: 600)
+            : CMTime(seconds: 0.35, preferredTimescale: 600)
 
         player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             DispatchQueue.main.async {
@@ -2784,9 +2950,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         freezeWatchdog.reset()
         endSecurityScopedAccess()
         suspendPlayerOutputForStillOrEmpty()
+        clearPreviewPlaybackState()
+        leavePlaybackPrepareUI()
+        blockTimelineUntilItemMatches = false
+        currentTimeLabel.stringValue = "00:00"
+        totalTimeLabel.stringValue = "00:00"
+        seekSlider.maxValue = 1
+        seekSlider.doubleValue = 0
         currentMediaURL = nil
         playbackSourceURL = nil
         activePlaybackFileURL = nil
+        observedItemPlayableURL = nil
         imageSurfaceView.clearImage()
         clearImageFolderCarousel()
         cancelImageCropMode()
@@ -3777,8 +3951,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         FFmpegVideoFallback.terminateRunningProcesses()
         clearPreviewPlaybackState(preserveSourceDuration: playbackPrepareActive)
 
+        // Prefer an already-planned resume (PlaybackResumeStore / explicit startAt). Never replace
+        // that with .zero just because the still-attached AVPlayer item is the *previous* file.
         let resumeTime: CMTime
-        if let mpvResumeSec, mpvResumeSec.isFinite, mpvResumeSec > 0 {
+        if let pending = pendingStartTimeAfterLoad {
+            let sec = CMTimeGetSeconds(pending)
+            resumeTime = (sec.isFinite && sec >= 0) ? pending : .zero
+        } else if let mpvResumeSec, mpvResumeSec.isFinite, mpvResumeSec > 0 {
             resumeTime = CMTime(seconds: mpvResumeSec, preferredTimescale: 600)
         } else {
             resumeTime = currentPlayerItemMatchesSource(inputURL) ? player.currentTime() : .zero
@@ -3810,7 +3989,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }
                 return
             }
-            let remuxStart = FFmpegVideoFallback.beginRemux(inputURL: inputURL)
+            let remuxStart = FFmpegVideoFallback.beginRemux(
+                inputURL: inputURL,
+                preferStartSec: rawResumeTargetSec.isFinite ? max(0, rawResumeTargetSec) : 0
+            )
             await MainActor.run {
                 guard activeGeneration == self.videoLoadGeneration else { return }
                 self.applyRemuxStart(
@@ -4068,6 +4250,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         activePlayableDurationSec = 0
         progressiveExtendInProgress = false
         progressiveExtentMonitorToken += 1
+        progressiveSeekToken += 1
         updateSeekBarPreparingState()
     }
 
@@ -6895,7 +7078,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackSubtitleToggle.isHidden = !show
         playbackSubtitleToggle.isEnabled = show && !cachedSubtitleTracks.isEmpty
         playbackSubtitleToggle.subtitlesActive = primarySubtitlesEnabled
-        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.subtitleToggleTintColor
+        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.accessoryIconTintColor
         playbackSubtitleToggle.alphaValue = 1
         let state = primarySubtitlesEnabled ? "on" : "off"
         playbackSubtitleToggle.setAccessibilityLabel("Subtitles \(state)")
@@ -7013,10 +7196,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                         // ffmpeg subtitleIndex is 0-based among subtitle streams; mpv displayIndex is 1-based.
                         if let match = tracks.first(where: { $0.displayIndex == subtitleIndex + 1 }),
                            case .mpv(let id) = match.backendID {
-                            bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
+                            _ = bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
                         } else if subtitleIndex >= 0, subtitleIndex < tracks.count,
                                   case .mpv(let id) = tracks[subtitleIndex].backendID {
-                            bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
+                            _ = bitmapOverlayController.setSubtitleTrackID(id, secondary: false)
                         } else {
                             bitmapOverlayController.selectPreferredSubtitleLanguage("en")
                         }
@@ -9656,6 +9839,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateTimelineUI() {
         guard !isSeekingFromUI else { return }
+        clearTimelineBlockIfItemMatches()
+        if blockTimelineUntilItemMatches {
+            presentTimelinePlaceholders()
+            updateSeekBarPreparingState()
+            return
+        }
+        // Never paint/persist the previous item's clock onto a newly selected source.
+        if let source = playbackSourceURL ?? currentMediaURL {
+            if mpvBackendActive {
+                guard mpvPlaybackStarted else {
+                    presentTimelinePlaceholders()
+                    updateSeekBarPreparingState()
+                    return
+                }
+            } else if player.currentItem != nil, !currentPlayerItemMatchesSource(source) {
+                presentTimelinePlaceholders()
+                updateSeekBarPreparingState()
+                return
+            }
+        }
         if mpvBackendActive, let session = activeSession {
             let durationSec = session.durationSec
             let currentSec = session.currentTimeSec
@@ -9756,6 +9959,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         seekSlider.flatBarCell?.isPreparing = false
         seekSlider.isEnabled = true
         seekSlider.needsDisplay = true
+    }
+
+    /// Seek chrome while the logical source and AVPlayer item disagree (A→B handoff).
+    private func presentTimelinePlaceholders() {
+        currentTimeLabel.stringValue = "···"
+        // Keep a probed duration for the *new* source if we already have one; never keep the
+        // previous item's maxValue (that is the visible "wrong duration" bug).
+        if let preview = activePreviewSourceDurationSec, preview > 1 {
+            seekSlider.maxValue = preview
+            totalTimeLabel.stringValue = formatTime(preview)
+        } else {
+            totalTimeLabel.stringValue = "--:--"
+            seekSlider.maxValue = 1
+        }
+        seekSlider.doubleValue = 0
     }
 
     private func formatTime(_ sec: Double) -> String {
@@ -9900,16 +10118,24 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         let target = CMTime(seconds: targetSec, preferredTimescale: 600)
-        // Precise seek for bar clicks — loose tolerance on HEVC remuxes often lands on a
-        // non-decodable point and leaves a frozen frame at roughly the same look.
-        performCooperativeSeek(to: target, precise: true) { [weak self] _ in
+        // Large scrub jumps: slight tolerance is much faster on HEVC remuxes and still
+        // lands near the click. Tiny nudges stay exact.
+        let currentSec = mpvBackendActive
+            ? (activeSession?.currentTimeSec ?? 0)
+            : CMTimeGetSeconds(player.currentTime())
+        let jump = abs(targetSec - (currentSec.isFinite ? currentSec : 0))
+        let precise = jump < 1.5
+        performCooperativeSeek(to: target, precise: precise) { [weak self] _ in
             guard let self else { return }
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
             PlaybackTrace.emit(String(
-                format: "[DEBUG-ui] seek_bar done=%.0fms rate=%.2f t=%.2f",
+                format: "[DEBUG-ui] seek_bar done=%.0fms precise=%@ rate=%.2f t=%.2f",
                 elapsedMs,
+                precise.description,
                 self.player.rate,
-                CMTimeGetSeconds(self.player.currentTime())
+                self.mpvBackendActive
+                    ? (self.activeSession?.currentTimeSec ?? 0)
+                    : CMTimeGetSeconds(self.player.currentTime())
             ))
         }
         DispatchQueue.main.async { [weak self] in
@@ -9920,51 +10146,105 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func performProgressiveSeek(to targetSec: Double) {
         guard let previewURL = observedItemPlayableURL,
               let sourceURL = playbackSourceURL ?? currentMediaURL else { return }
-        let wasPlaying = player.rate > 0
-        player.pause()
-        showCompatibilityFailure("Buffering seek…")
+        let wasPlaying = player.rate > 0 || (pendingResumePlayingAfterLoad == true)
+        let generation = videoLoadGeneration
+        progressiveSeekToken += 1
+        let seekToken = progressiveSeekToken
+
+        // Deep seeks almost always wait on the full remux — make sure it is running.
+        if let fullTarget = activePreviewFullTargetURL {
+            _ = FFmpegVideoFallback.ensureBackgroundFullRemux(
+                inputURL: sourceURL,
+                outputURL: fullTarget
+            )
+        }
+
+        // Soft-land on the tip of what's already playable instead of freezing on a banner.
+        let tip = max(0, activePlayableDurationSec - 0.35)
+        if tip > 1, tip + 1 < targetSec {
+            performCooperativeSeek(
+                to: CMTime(seconds: tip, preferredTimescale: 600),
+                precise: false
+            )
+        } else if player.rate > 0 {
+            player.pause()
+        }
+
+        PlaybackTrace.emit(String(
+            format: "[DEBUG-fallback] progressive seek wait target=%.1fs playable=%.1fs",
+            targetSec,
+            activePlayableDurationSec
+        ))
 
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            let pollIntervalNs: UInt64 = 2_000_000_000
-            let maxWaitNs: UInt64 = 120 * 1_000_000_000
+            let pollIntervalNs: UInt64 = 200_000_000
+            let maxWaitNs: UInt64 = 90 * 1_000_000_000
             var waited: UInt64 = 0
+            var ticks = 0
 
             while waited < maxWaitNs {
                 if Task.isCancelled { return }
+                let stillValid = await MainActor.run {
+                    seekToken == self.progressiveSeekToken
+                        && generation == self.videoLoadGeneration
+                        && self.isPreviewPlaybackActive
+                }
+                guard stillValid else { return }
 
                 if let fullTarget = await MainActor.run(body: { self.activePreviewFullTargetURL }),
                    FFmpegVideoFallback.isFullRemuxReady(at: fullTarget) {
                     await MainActor.run {
+                        guard seekToken == self.progressiveSeekToken else { return }
                         self.hideCompatibilityFailure()
                         self.pendingStartTimeAfterLoad = CMTime(seconds: targetSec, preferredTimescale: 600)
                         self.pendingResumePlayingAfterLoad = wasPlaying
                         self.clearPreviewPlaybackState()
                         self.fallbackConvertedOutputPaths.insert(fullTarget.path)
+                        PlaybackTrace.emit(String(
+                            format: "[DEBUG-fallback] progressive seek → full remux t=%.1fs waitedMs=%.0f",
+                            targetSec,
+                            Double(waited) / 1_000_000
+                        ))
                         self.resolveAndAttach(
                             playableURL: fullTarget,
                             sourceURL: sourceURL,
-                            generation: self.videoLoadGeneration
+                            generation: generation
                         )
                     }
                     return
                 }
 
-                let playable = FFmpegVideoFallback.remuxOutputDurationSec(at: previewURL) ?? 0
-                if playable >= targetSec - 2 {
-                    await MainActor.run {
-                        self.hideCompatibilityFailure()
-                        self.activePlayableDurationSec = max(self.activePlayableDurationSec, playable)
-                        self.pendingStartTimeAfterLoad = CMTime(seconds: targetSec, preferredTimescale: 600)
-                        self.pendingResumePlayingAfterLoad = wasPlaying
-                        self.progressiveExtendInProgress = true
-                        self.resolveAndAttach(
-                            playableURL: previewURL,
-                            sourceURL: sourceURL,
-                            generation: self.videoLoadGeneration
-                        )
+                // Duration probe is relatively expensive — only every ~1s.
+                ticks += 1
+                if ticks % 5 == 0 {
+                    let playable = FFmpegVideoFallback.remuxOutputDurationSec(at: previewURL) ?? 0
+                    if playable >= targetSec - 2 {
+                        await MainActor.run {
+                            guard seekToken == self.progressiveSeekToken else { return }
+                            self.hideCompatibilityFailure()
+                            self.activePlayableDurationSec = max(self.activePlayableDurationSec, playable)
+                            self.pendingStartTimeAfterLoad = CMTime(seconds: targetSec, preferredTimescale: 600)
+                            self.pendingResumePlayingAfterLoad = wasPlaying
+                            self.progressiveExtendInProgress = true
+                            PlaybackTrace.emit(String(
+                                format: "[DEBUG-fallback] progressive seek → preview extent t=%.1fs playable=%.1fs",
+                                targetSec,
+                                playable
+                            ))
+                            self.resolveAndAttach(
+                                playableURL: previewURL,
+                                sourceURL: sourceURL,
+                                generation: generation
+                            )
+                        }
+                        return
                     }
-                    return
+                    await MainActor.run {
+                        if playable > self.activePlayableDurationSec {
+                            self.activePlayableDurationSec = playable
+                        }
+                    }
                 }
 
                 try? await Task.sleep(nanoseconds: pollIntervalNs)
@@ -9972,8 +10252,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
 
             await MainActor.run {
+                guard seekToken == self.progressiveSeekToken else { return }
                 self.hideCompatibilityFailure()
-                self.showCompatibilityFailure("Seek target is not remuxed yet. Try again shortly.")
+                self.showCompatibilityFailure("Seek target is not ready yet. Try again shortly.")
             }
         }
     }
@@ -10622,8 +10903,23 @@ extension PlayerViewController {
     /// Remember playhead for the current source video (UserDefaults). Skips remux cache paths.
     private func persistPlaybackResumePosition(force: Bool = false) {
         guard activeMediaKind == .video else { return }
+        clearTimelineBlockIfItemMatches()
+        if blockTimelineUntilItemMatches { return }
         let source = playbackSourceURL ?? currentMediaURL
         guard let source, !isGeneratedFallbackURL(source) else { return }
+        // Refuse to write while the player/mpv is still on another file (or not ready yet).
+        if mpvBackendActive {
+            guard mpvPlaybackStarted else { return }
+            if let active = activePlaybackFileURL?.standardizedFileURL {
+                let sourcePath = source.standardizedFileURL
+                let activeIsSource = active == sourcePath
+                let activeIsRemuxOfSource = isGeneratedFallbackURL(active)
+                    && playbackSourceURL?.standardizedFileURL == sourcePath
+                guard activeIsSource || activeIsRemuxOfSource else { return }
+            }
+        } else {
+            guard player.currentItem != nil, currentPlayerItemMatchesSource(source) else { return }
+        }
 
         let now = CFAbsoluteTimeGetCurrent()
         if !force, (now - lastResumePersistAt) < 2.5 {

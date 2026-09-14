@@ -8,9 +8,52 @@ final class PlaybackRoutePlannerTests: XCTestCase {
             mpvAvailable: true,
             remuxAvailable: true,
             videoCodecTag: "h264",
-            hasSidecars: false
+            hasSidecars: false,
+            audioCodec: "aac",
+            presentCapable: true
         ))
         XCTAssertEqual(route, .compatibilityRemux(reason: "container.mkv"))
+    }
+
+    func testMKVEAC3UsesRemuxForWatchQualityWhenPresentCapable() {
+        // Software-blit DirectMpv is too soft/low-FPS for normal watch; remux + AVPlayer.
+        let route = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: "h264",
+            hasSidecars: false,
+            audioCodec: "eac3",
+            presentCapable: true
+        ))
+        XCTAssertEqual(route, .compatibilityRemux(reason: "container.mkv"))
+    }
+
+    func testMKVEAC3FallsBackToRemuxWhenPresentNotCapable() {
+        let route = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: "h264",
+            hasSidecars: false,
+            audioCodec: "eac3",
+            presentCapable: false
+        ))
+        XCTAssertEqual(route, .compatibilityRemux(reason: "container.mkv"))
+    }
+
+    func testOversizedSourcePrefersDirectMpvWhenPresentCapable() {
+        let route = PlaybackRoutePlanner.route(from: .init(
+            pathExtension: "mkv",
+            mpvAvailable: true,
+            remuxAvailable: true,
+            videoCodecTag: "h264",
+            hasSidecars: false,
+            audioCodec: "aac",
+            sourceBytes: RemuxCacheEviction.maxFullRemuxRetainBytes + 1,
+            presentCapable: true
+        ))
+        XCTAssertEqual(route, .directMpv(reason: "source.oversized"))
     }
 
     func testMKVWithoutMpvUsesRemux() {

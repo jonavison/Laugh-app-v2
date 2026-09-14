@@ -1,0 +1,5 @@
+# Paste the single-line Ed25519 public key from:
+#   ./scripts/sparkle-generate-keys.sh
+#
+# Example format (not a real key):
+#   abcDEF123base64Ed25519PublicKey==

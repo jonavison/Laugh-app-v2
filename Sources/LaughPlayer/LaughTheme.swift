@@ -11,7 +11,7 @@ enum LaughTheme {
 
     /// Brand teal. Prefer this over `NSColor.controlAccentColor` / `.systemBlue`.
     static var accent: NSColor {
-        NSColor(named: "AccentColor", bundle: .module) ?? fallbackAccent
+        NSColor(named: "AccentColor", bundle: ResourceBundle.bundle) ?? fallbackAccent
     }
 
     /// Alias for interactive brand fills (sliders, toggles, selected rings).

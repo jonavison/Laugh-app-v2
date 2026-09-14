@@ -6,6 +6,24 @@ Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is product
 
 ## [Unreleased]
 
+### Fixed
+- Ship native **arm64** ffmpeg (martin-riedl) instead of Intel evermeet, and thin Sparkle to the host CPU — removes the macOS “Intel-based Apps / Rosetta” warning on Apple Silicon.
+
+### Fixed
+- Production builds no longer ship Homebrew-linked `ffmpeg`/`mpv` (they only worked on the build Mac). Packaging now uses portable evermeet ffmpeg and relocates mpv dylibs to `@loader_path`, so MKV remux works for other users.
+
+### Fixed
+- Launch crash on clean installs: SPM resource bundle was only under `Contents/Resources/`, while `Bundle.module` looks next to `Contents/` (and otherwise fell back to a machine-local `.build` path). Packaged apps now embed the bundle at the app root and use a resilient `ResourceBundle` locator.
+
+### Fixed
+- Installer actually runs post-install scripts (`require-scripts=true`), registers LaughPlayer with Launch Services, and opens Applications so the app is visible after install.
+- Ship a drag-to-Applications **DMG** (`create-dmg.sh`) as a clearer install path than the unsigned `.pkg` alone.
+
+### Added
+- **About LaughPlayer** in the app menu (system About panel with version, build, and icon).
+- **Help → Check for Updates…** via Sparkle 2 for shipped apps (`https://avison-soft.com/laugh/appcast.xml`); packaging embeds Sparkle + Ed25519 public key. Dev builds omit the feed.
+- Help → **Laugh on the Web…** opens `avison-soft.com/laugh`.
+
 ### Changed
 - Marketing version reset to **0.3.0** (pre-production). Packaging scripts read `Packaging/RELEASE_VERSION` instead of hard-coded `1.0.0`.
 

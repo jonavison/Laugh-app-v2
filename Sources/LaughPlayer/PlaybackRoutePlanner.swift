@@ -17,6 +17,10 @@ enum PlaybackRoutePlanner {
         var hasSidecars: Bool
         /// Open-time EmbeddedSubtitleTrack codecs from ffmpeg probe (empty if unknown).
         var subtitleCodecs: [String] = []
+        /// Primary audio codec from ffmpeg probe (nil if unknown).
+        var audioCodec: String? = nil
+        /// Source file size in bytes (0 if unknown).
+        var sourceBytes: Int64 = 0
         /// Static present capability (software blit today).
         var presentCapable: Bool = false
     }
@@ -60,7 +64,14 @@ enum PlaybackRoutePlanner {
             subtitleCodecs = []
         }
 
+        let sourceBytes = Int64(
+            (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        )
+
         if remuxContainerExtensions.contains(ext) {
+            let audioCodec = remuxAvailable || mpvAvailable
+                ? FFmpegVideoFallback.probePrimaryAudioCodec(for: url)
+                : nil
             return route(from: Inputs(
                 pathExtension: ext,
                 mpvAvailable: mpvAvailable,
@@ -68,6 +79,8 @@ enum PlaybackRoutePlanner {
                 videoCodecTag: nil,
                 hasSidecars: false,
                 subtitleCodecs: subtitleCodecs,
+                audioCodec: audioCodec,
+                sourceBytes: sourceBytes,
                 presentCapable: presentCapable
             ))
         }
@@ -84,6 +97,7 @@ enum PlaybackRoutePlanner {
             videoCodecTag: codecTag,
             hasSidecars: hasSidecars,
             subtitleCodecs: subtitleCodecs,
+            sourceBytes: sourceBytes,
             presentCapable: presentCapable
         ))
     }
@@ -118,8 +132,21 @@ enum PlaybackRoutePlanner {
             return .directMpv(reason: "subs.bitmapOnly")
         }
 
+        // AC-3/E-AC-3: prefer CompatibilityRemux + AVPlayer for watch quality.
+        // DirectMpv software blit (CPU present) looks soft / low-FPS on 1080p HEVC — only use
+        // it when remux is unavailable or the source is too large to retain a remux twin.
+        // Progressive preview is capped (see FFmpegVideoFallback.audioTranscodePreviewCapSec)
+        // so open need not blank-wait on a full remux.
+
+        // Huge sources must not get a retained full remux twin (budget / disk). Prefer mpv.
+        if RemuxCacheEviction.sourceTooLargeForRetainedRemux(byteCount: inputs.sourceBytes),
+           mpvAvailable,
+           inputs.presentCapable {
+            return .directMpv(reason: "source.oversized")
+        }
+
         // Picture is AVPlayer (Metal) by default. Software blit DirectMpv is for bitmap
-        // routing (above) or when remux is unavailable.
+        // routing (above), oversized (above), or when remux is unavailable.
         if remuxContainerExtensions.contains(ext) {
             if remuxAvailable {
                 return .compatibilityRemux(reason: "container.\(ext)")

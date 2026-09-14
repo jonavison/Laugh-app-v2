@@ -1,10 +1,20 @@
 import Foundation
 
 /// Keeps CompatibilityRemux temp MP4s from filling the system temp volume.
+///
+/// Policy:
+/// - **Budget:** soft ceiling for the whole `LaughPlayerFallback/` folder (LRU).
+/// - **Per-file cap:** never *retain* a full remux larger than `maxFullRemuxRetainBytes`
+///   (120 GB twins are refused; oversized files are deleted when unprotected).
+/// - **Previews** (capped progressive packages) are preferred over full remuxes in eviction order.
 enum RemuxCacheEviction {
-    /// Soft ceiling for `…/T/LaughPlayerFallback/` — remuxes are near source size, so this is
-    /// “a few recent films,” not a permanent archive.
+    /// Soft ceiling for `…/T/LaughPlayerFallback/`.
+    /// ~a handful of ≤4 GiB remuxes or many small progressive packages — not a film archive.
     static let defaultBudgetBytes: Int64 = 12 * 1024 * 1024 * 1024
+
+    /// Never keep a single full remux above this size. Play huge sources via DirectMpv
+    /// (or progressive package only); do not mirror a 120 GB file in temp.
+    static let maxFullRemuxRetainBytes: Int64 = 4 * 1024 * 1024 * 1024
 
     struct Report: Equatable {
         var deletedCount: Int
@@ -24,6 +34,16 @@ enum RemuxCacheEviction {
         fileManager: FileManager = .default
     ) -> URL {
         fileManager.temporaryDirectory.appendingPathComponent("LaughPlayerFallback", isDirectory: true)
+    }
+
+    /// True when a full remux is small enough to keep for warm reopen.
+    static func shouldRetainFullRemux(byteCount: Int64) -> Bool {
+        byteCount > 0 && byteCount <= maxFullRemuxRetainBytes
+    }
+
+    /// Source files above the retain cap should not drive a retained full remux.
+    static func sourceTooLargeForRetainedRemux(byteCount: Int64) -> Bool {
+        byteCount > maxFullRemuxRetainBytes
     }
 
     /// Lists remux cache `.mp4` files with size + mtime (for tests and eviction).
@@ -58,18 +78,26 @@ enum RemuxCacheEviction {
         return entries
     }
 
-    /// Eviction order: previews first (oldest first), then full remuxes (oldest first).
+    /// Eviction order: oversize full remuxes first, then previews (oldest first),
+    /// then remaining full remuxes (oldest first).
     static func deletionOrder(_ entries: [Entry]) -> [Entry] {
+        let oversizeFull = entries
+            .filter { !$0.isPreview && !shouldRetainFullRemux(byteCount: $0.byteCount) }
+            .sorted { $0.modifiedAt < $1.modifiedAt }
         let previews = entries.filter(\.isPreview).sorted { $0.modifiedAt < $1.modifiedAt }
-        let full = entries.filter { !$0.isPreview }.sorted { $0.modifiedAt < $1.modifiedAt }
-        return previews + full
+        let full = entries
+            .filter { !$0.isPreview && shouldRetainFullRemux(byteCount: $0.byteCount) }
+            .sorted { $0.modifiedAt < $1.modifiedAt }
+        return oversizeFull + previews + full
     }
 
-    /// Deletes oldest cache files until `total <= budgetBytes`. Never deletes `protectPaths`.
+    /// Deletes oversize full remuxes (always, unless protected), then oldest files until
+    /// `total <= budgetBytes`. Never deletes `protectPaths` (active playback outputs).
     @discardableResult
     static func enforceBudget(
         in directory: URL? = nil,
         budgetBytes: Int64 = defaultBudgetBytes,
+        maxFullRemuxBytes: Int64 = maxFullRemuxRetainBytes,
         protectPaths: Set<String> = [],
         fileManager: FileManager = .default
     ) -> Report {
@@ -79,27 +107,32 @@ enum RemuxCacheEviction {
         var total = entries.reduce(Int64(0)) { $0 + $1.byteCount }
         var deletedCount = 0
         var deletedBytes: Int64 = 0
+        var remainingEntries = entries
 
-        guard total > budgetBytes else {
-            return Report(
-                deletedCount: 0,
-                deletedBytes: 0,
-                remainingBytes: total,
-                fileCount: entries.count
-            )
-        }
-
-        for entry in deletionOrder(entries) {
-            if total <= budgetBytes { break }
+        func delete(_ entry: Entry) {
             let path = entry.url.standardizedFileURL.path
-            if protected.contains(path) { continue }
+            if protected.contains(path) { return }
             do {
                 try fileManager.removeItem(at: entry.url)
                 total -= entry.byteCount
                 deletedBytes += entry.byteCount
                 deletedCount += 1
+                remainingEntries.removeAll { $0.url.standardizedFileURL.path == path }
             } catch {
-                continue
+                return
+            }
+        }
+
+        // 1) Always drop full remuxes that exceed the per-file retain cap.
+        for entry in remainingEntries where !entry.isPreview && entry.byteCount > maxFullRemuxBytes {
+            delete(entry)
+        }
+
+        // 2) LRU until under the soft folder budget.
+        if total > budgetBytes {
+            for entry in deletionOrder(remainingEntries) {
+                if total <= budgetBytes { break }
+                delete(entry)
             }
         }
 
@@ -107,7 +140,7 @@ enum RemuxCacheEviction {
             deletedCount: deletedCount,
             deletedBytes: deletedBytes,
             remainingBytes: max(0, total),
-            fileCount: entries.count - deletedCount
+            fileCount: remainingEntries.count
         )
     }
 }

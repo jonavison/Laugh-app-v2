@@ -173,7 +173,7 @@ enum FFmpegVideoFallback {
     }
 
     private static func noteIncompleteRemuxFailure() {
-        _ = onProcessQueue { lastFailureIndicatesIncomplete = true }
+        onProcessQueue { lastFailureIndicatesIncomplete = true }
     }
 
     /// Reads the primary video stream codec tag from ffmpeg's header probe (stderr).
@@ -221,11 +221,19 @@ enum FFmpegVideoFallback {
         FFmpegProbeParser.needsFragmentedAudioTranscode(audioCodec: probePrimaryAudioCodec(for: inputURL))
     }
 
-    /// Fragmented AC-3/E-AC-3 preview transcodes the *whole* soundtrack to AAC.
-    /// For a 2h rip that is slower than waiting for stream-copy remux, and fights the full remux for disk.
+    /// Formerly skipped progressive for AC-3/E-AC-3 because an *uncapped* AAC preview
+    /// re-encodes the whole soundtrack (slower than stream-copy remux on long rips).
+    /// Capped progressive (`audioTranscodePreviewCapSec`) starts picture in ~1s; full
+    /// stream-copy remux still upgrades in the background. Always prefer that over a
+    /// multi-second blank wait.
     static func shouldSkipProgressivePreview(audioCodec: String?) -> Bool {
-        FFmpegProbeParser.needsFragmentedAudioTranscode(audioCodec: audioCodec)
+        _ = audioCodec
+        return false
     }
+
+    /// Max seconds of AAC stereo for fragmented preview when stream-copy isn't possible.
+    /// Long enough to cover early playback + short resumes; deep seeks wait for full remux.
+    static let audioTranscodePreviewCapSec: Double = 120
 
     private static func progressivePreviewStrategy(for inputURL: URL) -> RemuxStrategy {
         RemuxStrategy(RemuxOpenStrategy.progressive(
@@ -453,7 +461,11 @@ enum FFmpegVideoFallback {
     /// Cache hit returns immediately; otherwise starts progressive preview only.
     /// Full remux runs after preview attaches (see PlayerViewController) so two ffmpeg
     /// processes are not stream-copying the same 4K source at once.
-    static func beginRemux(inputURL: URL) -> RemuxStart {
+    ///
+    /// `preferStartSec` past `audioTranscodePreviewCapSec` forces a blocking full remux for
+    /// AC-3/E-AC-3 (progressive cannot seek there). Callers with DirectMpv should route
+    /// those opens to mpv instead.
+    static func beginRemux(inputURL: URL, preferStartSec: Double = 0) -> RemuxStart {
         guard sourceReadyForRemux(inputURL) else {
             PlaybackTrace.emit(
                 "[DEBUG-fallback] refuse remux — unreadable header path=\(inputURL.lastPathComponent)"
@@ -466,15 +478,26 @@ enum FFmpegVideoFallback {
         }
         let fullURL = makeOutputURL(for: inputURL)
         let previewURL = makePreviewOutputURL(for: inputURL)
-        let skipPreview = shouldSkipProgressivePreview(audioCodec: probePrimaryAudioCodec(for: inputURL))
-        if skipPreview {
-            guard fullyReady else {
-                PlaybackTrace.emit(
-                    "[DEBUG-fallback] refuse full-only remux while source still downloading path=\(inputURL.lastPathComponent)"
-                )
-                return .failed
+        let oversized = sourceTooLargeForRetainedRemux(inputURL)
+        let needsAudioTx = requiresFragmentedAudioTranscode(for: inputURL)
+        let deepPastPreviewCap = preferStartSec > audioTranscodePreviewCapSec - 10
+        // Huge sources: progressive package only — never block on / retain a full twin.
+        if oversized {
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] oversized source — progressive package only path=\(inputURL.lastPathComponent)"
+            )
+            if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
+                return .progressivePreview(preview: previewURL, fullTarget: fullURL)
             }
-            PlaybackTrace.emit("[DEBUG-fallback] skip progressive preview (would transcode full-length audio) input=\(inputURL.lastPathComponent)")
+            return .failed
+        }
+        if needsAudioTx, deepPastPreviewCap, fullyReady {
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-fallback] blocking full remux (resume %.0fs past %.0fs preview cap) input=%@",
+                preferStartSec,
+                audioTranscodePreviewCapSec,
+                inputURL.lastPathComponent
+            ))
             _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
             if waitUntilBackgroundFullRemuxReady(outputURL: fullURL, timeoutSec: 180) {
                 storeCache(inputURL: inputURL, outputURL: fullURL)
@@ -483,6 +506,11 @@ enum FFmpegVideoFallback {
             return .failed
         }
         if launchProgressiveRemux(inputURL: inputURL, previewURL: previewURL, fullTargetURL: fullURL) {
+            // Start the seekable twin immediately so deep scrub / resume isn't stuck on
+            // “Buffering seek…” waiting for a remux that hasn't begun yet.
+            if !oversized {
+                _ = launchBackgroundFullRemux(inputURL: inputURL, outputURL: fullURL)
+            }
             return .progressivePreview(preview: previewURL, fullTarget: fullURL)
         }
         guard fullyReady else { return .failed }
@@ -495,9 +523,16 @@ enum FFmpegVideoFallback {
     }
 
     /// Start the full seekable remux once progressive playback is already on screen.
+    /// Skips for oversized sources — only the progressive package is kept.
     @discardableResult
     static func ensureBackgroundFullRemux(inputURL: URL, outputURL: URL) -> Bool {
-        launchBackgroundFullRemux(inputURL: inputURL, outputURL: outputURL)
+        if sourceTooLargeForRetainedRemux(inputURL) {
+            PlaybackTrace.emit(
+                "[DEBUG-fallback] skip full remux retain — source over size cap path=\(inputURL.lastPathComponent)"
+            )
+            return false
+        }
+        return launchBackgroundFullRemux(inputURL: inputURL, outputURL: outputURL)
     }
 
     private static func waitUntilBackgroundFullRemuxReady(outputURL: URL, timeoutSec: TimeInterval) -> Bool {
@@ -849,7 +884,7 @@ enum FFmpegVideoFallback {
                     )
                 if byteReady, !remuxLooksTooSparseForPlayback(at: previewURL) {
                     markOutputReadyIfValid(previewURL, inputURL: inputURL)
-                    _ = onProcessQueue {
+                    onProcessQueue {
                         previewFullTargets[previewURL] = fullTargetURL
                     }
                     PlaybackTrace.emit(
@@ -915,15 +950,21 @@ enum FFmpegVideoFallback {
         }
     }
 
-    /// Cap progressive remux to the contiguous downloaded head so the MP4 timeline has no holes.
+    /// Cap progressive remux so the MP4 timeline has no holes (incomplete downloads) and so
+    /// AC-3/E-AC-3 AAC previews never re-encode a full feature film.
     private static func progressiveRemuxDurationCapSec(for inputURL: URL) -> Double? {
-        guard IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) else { return nil }
-        let head = IncompleteMediaProbe.contiguousHeadFraction(at: inputURL)
-        guard head >= 0.02 else { return nil }
-        guard let duration = probeSourceDurationSec(for: inputURL), duration.isFinite, duration > 1 else {
-            return nil
+        if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+            let head = IncompleteMediaProbe.contiguousHeadFraction(at: inputURL)
+            guard head >= 0.02 else { return nil }
+            guard let duration = probeSourceDurationSec(for: inputURL), duration.isFinite, duration > 1 else {
+                return nil
+            }
+            return max(15, duration * head * 0.90)
         }
-        return max(15, duration * head * 0.90)
+        if requiresFragmentedAudioTranscode(for: inputURL) {
+            return audioTranscodePreviewCapSec
+        }
+        return nil
     }
 
     private static func remuxArguments(
@@ -1089,11 +1130,37 @@ enum FFmpegVideoFallback {
     }
 
     private static func storeCache(inputURL: URL, outputURL: URL) {
+        let outputBytes = Int64(
+            (try? outputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        )
+        // Never index / retain a full remux above the per-file cap (e.g. 120 GB twin).
+        // Progressive `-preview-` packages stay eligible for reuse while under the folder budget.
+        let isPreview = outputURL.lastPathComponent.contains("-preview-")
+        if !isPreview, !RemuxCacheEviction.shouldRetainFullRemux(byteCount: outputBytes) {
+            PlaybackTrace.emit(String(
+                format: "[DEBUG-fallback] refuse retain oversize remux bytes=%.2fGiB cap=%.2fGiB path=%@",
+                Double(outputBytes) / (1024 * 1024 * 1024),
+                Double(RemuxCacheEviction.maxFullRemuxRetainBytes) / (1024 * 1024 * 1024),
+                outputURL.lastPathComponent
+            ))
+            invalidateCache(for: inputURL)
+            // Keep the active output while playing; next budget pass deletes it when unprotected.
+            enforceRemuxCacheBudget(protecting: [outputURL])
+            return
+        }
         guard let identity = sourceIdentity(for: inputURL) else { return }
         onProcessQueue {
             remuxCache[identity] = CacheEntry(outputURL: outputURL, sourceIdentity: identity)
         }
         enforceRemuxCacheBudget(protecting: [outputURL])
+    }
+
+    /// True when the source is too large to keep a full CompatibilityRemux on disk.
+    static func sourceTooLargeForRetainedRemux(_ inputURL: URL) -> Bool {
+        let bytes = Int64(
+            (try? inputURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        )
+        return RemuxCacheEviction.sourceTooLargeForRetainedRemux(byteCount: bytes)
     }
 
     private static func sourceIdentity(for inputURL: URL) -> String? {

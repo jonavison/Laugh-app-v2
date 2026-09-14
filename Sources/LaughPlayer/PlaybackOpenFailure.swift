@@ -316,7 +316,10 @@ enum PlaybackErrorFormatter {
         if FFmpegVideoFallback.isAvailable() {
             return "LaughPlayer will try a compatibility remux when available."
         }
-        return "Bundled ffmpeg was not found. Run ./scripts/bundle-codec-tools.sh and rebuild."
+        if BundledCodecTools.ffmpegExecutablePath() != nil {
+            return "Compatibility tools are present but failed to start (often a bad codec bundle). Reinstall LaughPlayer."
+        }
+        return "Bundled ffmpeg was not found. Reinstall LaughPlayer, or ask the distributor to rebuild with ./scripts/bundle-codec-tools.sh."
     }
 
     private static func shortDetail(from error: Error?) -> String? {

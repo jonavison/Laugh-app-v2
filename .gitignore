@@ -38,3 +38,9 @@ Sources/LaughPlayer/codec-tools/lib/
 
 # Local OpenSubtitles consumer Api-Key (never commit)
 Packaging/opensubtitles-api-key.local
+
+# Sparkle / release secrets
+Packaging/sparkle/ed25519-private-key.pem
+Packaging/release-env.local
+.build/sparkle-releases/
+

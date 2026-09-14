@@ -17,7 +17,7 @@ elif ! "${TARGET_DIR}/ffmpeg" -version >/dev/null 2>&1; then
 fi
 
 if [[ "${need_ffmpeg}" == true ]]; then
-  echo "[setup-codec-tools] Installing portable ffmpeg (evermeet.cx)..."
+  echo "[setup-codec-tools] Installing portable ffmpeg (native arch)..."
   ./scripts/fetch-ffmpeg-portable.sh
 else
   echo "[setup-codec-tools] ffmpeg already OK"

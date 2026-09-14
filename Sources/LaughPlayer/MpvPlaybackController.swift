@@ -89,7 +89,7 @@ final class MpvPlaybackController: @unchecked Sendable {
         if let mainResource = Bundle.main.resourceURL?.path {
             candidates.append("\(mainResource)/codec-tools/lib/libmpv.2.dylib")
         }
-        if let moduleResource = Bundle.module.resourceURL?.path {
+        if let moduleResource = ResourceBundle.bundle.resourceURL?.path {
             candidates.append("\(moduleResource)/codec-tools/lib/libmpv.2.dylib")
         }
         let cwd = FileManager.default.currentDirectoryPath

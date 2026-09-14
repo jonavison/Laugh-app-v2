@@ -16,10 +16,19 @@ Build helpers:
 - `./scripts/build-direct.sh` (auto-bundles codec tools first)
 - `./scripts/build-appstore.sh`
 - `./scripts/bundle-codec-tools.sh` (bundles `ffmpeg` required, `mpv` optional)
-- `./scripts/create-app-bundle.sh` (creates `dist/LaughPlayer.app`)
+- `./scripts/create-app-bundle.sh` (creates `dist/LaughPlayer.app`; embeds Sparkle for shipped updates)
 - `./scripts/create-pkg.sh` or `pnpm run pkg` (creates `dist/LaughPlayer-Installer.pkg`)
+- `./scripts/create-dmg.sh` (drag-to-Applications `dist/LaughPlayer-<version>.dmg` — clearest install UX)
+- `./scripts/build-macos-release.sh` (Developer ID sign + notarize + DMG; needs `Packaging/release-env.local`)
+
 
 Note: codec bundling does not auto-install dependencies. Provide prebuilt binaries in `Sources/LaughPlayer/codec-tools/bin/`.
+
+## Menus & updates
+
+- **LaughPlayer → About LaughPlayer** — system About panel (version + build + icon).
+- **Help → Check for Updates…** — Sparkle 2 (shipped `.app` only; feed `https://avison-soft.com/laugh/appcast.xml`).
+- Dev app (`DevLaughPlayer.app`) has no update feed on purpose.
 
 ## Codec strategy
 

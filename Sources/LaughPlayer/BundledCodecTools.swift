@@ -17,7 +17,11 @@ enum BundledCodecTools {
             candidates.append("\(mainResource)/codec-tools/bin/\(name)")
             candidates.append("\(mainResource)/Resources/codec-tools/bin/\(name)")
         }
-        if let moduleResource = Bundle.module.resourceURL?.path {
+        // SPM Bundle.module location (app root) and Contents/Resources copy.
+        let appRoot = Bundle.main.bundleURL.path
+        candidates.append("\(appRoot)/LaughPlayer_LaughPlayer.bundle/codec-tools/bin/\(name)")
+        candidates.append("\(appRoot)/Contents/Resources/LaughPlayer_LaughPlayer.bundle/codec-tools/bin/\(name)")
+        if let moduleResource = ResourceBundle.bundle.resourceURL?.path {
             candidates.append("\(moduleResource)/codec-tools/bin/\(name)")
             candidates.append("\(moduleResource)/Resources/codec-tools/bin/\(name)")
         }
@@ -38,7 +42,10 @@ enum BundledCodecTools {
             candidates.append("\(mainResource)/codec-tools/bin/\(name)")
             candidates.append("\(mainResource)/Resources/codec-tools/bin/\(name)")
         }
-        if let moduleResource = Bundle.module.resourceURL?.path {
+        let appRoot = Bundle.main.bundleURL.path
+        candidates.append("\(appRoot)/LaughPlayer_LaughPlayer.bundle/codec-tools/bin/\(name)")
+        candidates.append("\(appRoot)/Contents/Resources/LaughPlayer_LaughPlayer.bundle/codec-tools/bin/\(name)")
+        if let moduleResource = ResourceBundle.bundle.resourceURL?.path {
             candidates.append("\(moduleResource)/codec-tools/bin/\(name)")
             candidates.append("\(moduleResource)/Resources/codec-tools/bin/\(name)")
         }

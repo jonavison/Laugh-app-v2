@@ -96,21 +96,12 @@ enum MusicStylePlaybackBar {
         button.title = ""
         button.alphaValue = 1
         button.toolTip = "Toggle subtitles"
-        button.contentTintColor = subtitleToggleTintColor
+        button.contentTintColor = accessoryIconTintColor
         pinButtonSize(button, width: 26, height: accessoryButtonHeight)
     }
 
+    /// Same grey as other playback-bar accessory symbols (library, etc.).
     static var accessoryIconTintColor: NSColor { .secondaryLabelColor }
-
-    /// Solid (non-vibrancy) tint for the drawn SUB glyph — matches secondary weight without alpha.
-    static var subtitleToggleTintColor: NSColor {
-        NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return isDark
-                ? NSColor(srgbRed: 0.78, green: 0.78, blue: 0.78, alpha: 1)
-                : NSColor(srgbRed: 0.35, green: 0.35, blue: 0.35, alpha: 1)
-        }
-    }
 
     private static func pinButtonSize(_ button: NSButton, width: CGFloat, height: CGFloat) {
         button.translatesAutoresizingMaskIntoConstraints = false

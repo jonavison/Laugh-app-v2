@@ -7,6 +7,11 @@ final class PlaybackResumeStoreTests: XCTestCase {
         XCTAssertEqual(PlaybackResumeStore.sanitizedResumeSeconds(12, duration: 120) ?? 0, 12, accuracy: 0.01)
     }
 
+    func testClearsWhenPastDuration() {
+        XCTAssertTrue(PlaybackResumeStore.shouldClear(seconds: 200, duration: 120))
+        XCTAssertNil(PlaybackResumeStore.sanitizedResumeSeconds(200, duration: 120))
+    }
+
     func testClearsNearEndByRemaining() {
         XCTAssertTrue(PlaybackResumeStore.shouldClear(seconds: 115, duration: 120))
         XCTAssertNil(PlaybackResumeStore.sanitizedResumeSeconds(115, duration: 120))
