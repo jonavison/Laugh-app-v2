@@ -6,6 +6,33 @@ Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is product
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-15
+
+Fresh notarized DMG of current `main` (the previous 0.9.4 DMG predated several polish fixes).
+
+### Fixed
+- Progressive deep seek no longer pauses on a “Buffering seek…” banner — full remux starts earlier, polls faster, soft-lands on playable tip.
+- Library **sidebar** top/bottom scroll overflow fades.
+- Playback-bar **SUB** label uses the same grey as the other bar icons.
+
+### Changed
+- Remux cache: **12 GiB** folder budget; never retain a full remux **>4 GiB** (huge sources prefer DirectMpv / progressive package only).
+- Sparkle update zips host on **GitHub Releases**; site serves `appcast.xml` only (zips exceed GitHub’s 100 MB repo limit).
+
+## [0.9.4] - 2026-09-14
+
+### Fixed
+- Episode A→B→C switches no longer copy playhead/duration across files; resume store keys by source identity.
+- Native **arm64** ffmpeg + host-arch Sparkle (no Intel/Rosetta Gatekeeper warning).
+- Packaging: portable codecs, resource bundle location, DMG install path, post-install registration.
+
+### Added
+- File menu Open… / Open Folder…; Window Close; reliable Quit; Dock essentials.
+- **Help → Check for Updates…** (Sparkle 2) and About panel for shipped apps.
+- Notarized DMG / Sparkle / signing scripts; switch-stress harnesses.
+
+## Prior notes (folded from earlier Unreleased)
+
 ### Fixed
 - Ship native **arm64** ffmpeg (martin-riedl) instead of Intel evermeet, and thin Sparkle to the host CPU — removes the macOS “Intel-based Apps / Rosetta” warning on Apple Silicon.
 
