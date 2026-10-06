@@ -187,6 +187,8 @@ final class ScrollOverflowFadeView: NSView {
 
 /// Hard clip for the settings scroll column — keeps overflow fades off the video surface.
 final class SettingsScrollClipHostView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true

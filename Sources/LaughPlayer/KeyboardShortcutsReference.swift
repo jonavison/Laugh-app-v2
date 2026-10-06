@@ -65,6 +65,8 @@ enum KeyboardShortcutsReference {
     ⌥⌘E — Cycle EQ preset (extended playback only)
 
     IMAGE
+    ← / → — Previous / next image in folder
+    Info button (beside Library) — Toggle Info column
     ⌘+ / ⌘- — Zoom in / out
     ⌘0 — Reset zoom (fit)
     Double-click image — Toggle fit / actual size

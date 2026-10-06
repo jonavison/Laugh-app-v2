@@ -54,17 +54,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var isImageCropMode = false
     private let imageLeadingAccessoryCluster = NSStackView()
     private let imageTransportCluster = NSStackView()
-    private let imageLibraryButton = NSButton(title: "Library", target: nil, action: nil)
-    private let imageQueuePreviousButton = NSButton(title: "", target: nil, action: nil)
-    private let imageZoomOutButton = NSButton(title: "Zoom −", target: nil, action: nil)
-    private let imageActualSizeButton = NSButton(title: "Actual", target: nil, action: nil)
-    private let imageZoomInButton = NSButton(title: "Zoom +", target: nil, action: nil)
-    private let imageFitButton = NSButton(title: "Fit", target: nil, action: nil)
-    private let imageCropButton = NSButton(title: "Crop", target: nil, action: nil)
-    private let imageRotateLeftButton = NSButton(title: "Rotate Left", target: nil, action: nil)
-    private let imageRotateRightButton = NSButton(title: "Rotate Right", target: nil, action: nil)
-    private let imageQueueNextButton = NSButton(title: "", target: nil, action: nil)
-    private let imageSettingsButton = NSButton(title: "Settings", target: nil, action: nil)
+    private let imageLibraryButton = ChromeHoverButton()
+    private let imageInfoButton = ChromeHoverButton()
+    private let imageQueuePreviousButton = ChromeHoverButton()
+    private let imageZoomOutButton = ChromeHoverButton()
+    private let imageActualSizeButton = ChromeHoverButton()
+    private let imageZoomInButton = ChromeHoverButton()
+    private let imageFitButton = ChromeHoverButton()
+    private let imageCropButton = ChromeHoverButton()
+    private let imageRotateLeftButton = ChromeHoverButton()
+    private let imageRotateRightButton = ChromeHoverButton()
+    private let imageQueueNextButton = ChromeHoverButton()
+    private let imageSettingsButton = ChromeHoverButton()
     private var imageTopRowLayoutConfigured = false
     private let controlsStack = NSStackView()
     private let transportClusterStack = NSStackView()
@@ -83,31 +84,35 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var miniPreviewHeightConstraint: NSLayoutConstraint?
     private let transportSpeedLeftCluster = NSStackView()
     private let playbackSpeedSlowLabel = NSTextField(labelWithString: "")
-    private let queuePreviousButton = NSButton(title: "", target: nil, action: nil)
-    private let speedStepDownButton = NSButton(title: "", target: nil, action: nil)
-    private let playPauseButton = NSButton(title: "Play", target: nil, action: nil)
+    private let queuePreviousButton = ChromeHoverButton()
+    private let speedStepDownButton = ChromeHoverButton()
+    private let playPauseButton = ChromeHoverButton()
     private let transportSpeedRightCluster = NSStackView()
-    private let speedStepUpButton = NSButton(title: "", target: nil, action: nil)
-    private let queueNextButton = NSButton(title: "", target: nil, action: nil)
+    private let speedStepUpButton = ChromeHoverButton()
+    private let queueNextButton = ChromeHoverButton()
     private let playbackSpeedFastLabel = NSTextField(labelWithString: "")
-    private let queueButton = NSButton(title: "Queue", target: nil, action: nil)
-    private let settingsButton = NSButton(title: "Settings", target: nil, action: nil)
+    private let queueButton = ChromeHoverButton()
+    private let settingsButton = ChromeHoverButton()
     private let playbackAccessoryCluster = NSStackView()
     private let imageAccessoryCluster = NSStackView()
-    private let libraryButton = NSButton(title: "Library", target: nil, action: nil)
+    private let libraryButton = ChromeHoverButton()
     private let mediaLibraryController = MediaLibraryController()
     private lazy var librarySidebar = LibrarySidebarView(controller: mediaLibraryController)
     private lazy var libraryBrowse = LibraryBrowseView(controller: mediaLibraryController)
     private let playbackMiniPreview = PlaybackMiniPreviewView()
     private let titleBarChromeStrip = TitleBarChromeStripView()
     private var titleBarChromeHeightConstraint: NSLayoutConstraint?
-    private let rightSettingsSheet = NSVisualEffectView()
+    private let rightSettingsSheet = ImmersivePanelVisualEffectView()
+    /// Left docked ImageInfo column — toggled from the image bar Info control (and opened with Edits).
+    private let leftImageInfoSheet = ImageInfoSidebarView()
     /// Opaque floor for image studio — covers the visual-effect sheet so the edit column matches content chrome.
-    private let settingsColumnFillView = NSView()
+    private let settingsColumnFillView = ImmersivePanelFillView()
+    /// Leading hairline on the edit column — same token as Info’s trailing edge.
+    private let settingsLeadingDivider = ImmersivePanelFillView()
     /// Opaque wash-over-floor fill so the floating tools bar isn’t lightened by the photo underneath.
     private let imageToolsBarFillView = NSView()
-    private let videoSettingsTabsRow = NSStackView()
-    private let imageSettingsTabsRow = NSStackView()
+    private let videoSettingsTabsRow = ImmersivePanelStackView()
+    private let imageSettingsTabsRow = ImmersivePanelStackView()
     private var videoSettingsTabButtons: [HoverTextButton] = []
     private var imageSettingsTabButtons: [HoverTextButton] = []
     private var videoSettingsTabHeaders: [SettingsTabHeaderItemView] = []
@@ -119,8 +124,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let settingsScrollView = NSScrollView()
     private let settingsTopOverflowFade = ScrollOverflowFadeView()
     private let settingsBottomOverflowFade = ScrollOverflowFadeView()
-    private let videoTabView = NSStackView()
-    private let audioTabView = NSStackView()
+    private let videoTabView = ImmersivePanelStackView()
+    private let audioTabView = ImmersivePanelStackView()
     private let audioSettings = AudioSettingsControls()
     private var cachedAudioTracks: [AudioTrackInfo] = []
     private var suppressAudioTrackPopUpAction = false
@@ -139,16 +144,29 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var pendingCompanionSubtitlePath: String?
     private var userDisabledSubtitlesForSourcePath: String?
     private var cachedDiscoveredCompanions: [DiscoveredCompanionSubtitle] = []
-    private let subtitlesTabView = NSStackView()
+    private let subtitlesTabView = ImmersivePanelStackView()
     private let nativeSubtitleOverlay = NativeSubtitleOverlay()
     private let playbackSubtitleToggle = PlaybackSubtitleToggleButton()
-    private let imageTabView = NSStackView()
-    private let imageFitTabView = NSStackView()
+    private let imageTabView = ImmersivePanelStackView()
+    private let imageFitTabView = ImmersivePanelStackView()
     private let imageAdjustSession = ImageAdjustSession()
     private let imageSelectionSession = ImageSelectionSession()
     private let imageAdjustControls = ImageAdjustControls()
     private var imageSectionHeaders: [ImageAdjustSection: CollapsibleSettingsSectionView] = [:]
     private var imageSubjectSelectHeader: CollapsibleSettingsSectionView?
+    private enum DevelopSampleMode {
+        case none
+        case whiteBalance
+        case vignetteCenter
+    }
+    private var developSampleMode: DevelopSampleMode = .none {
+        didSet {
+            imageSurfaceView.developSampleEnabled = developSampleMode != .none
+            if developSampleMode != .whiteBalance {
+                imageAdjustControls.setWhiteBalanceEyedropperActive(false)
+            }
+        }
+    }
     private let subjectSelectAutoButton = NSButton(title: "Auto Select", target: nil, action: nil)
     private let subjectSelectClearButton = NSButton(title: "Clear", target: nil, action: nil)
     private let subjectSelectCancelDownloadButton = NSButton(title: "Cancel Download", target: nil, action: nil)
@@ -189,17 +207,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var imageFolderSiblings: [LibraryMediaFile] = []
     private var imageSurfaceBottomConstraint: NSLayoutConstraint?
     private var imageSurfaceLeadingConstraint: NSLayoutConstraint?
+    private var imageSurfaceLeadingToInfoConstraint: NSLayoutConstraint?
     private var imageSurfaceTrailingConstraint: NSLayoutConstraint?
     private var imageSurfaceTopConstraint: NSLayoutConstraint?
     private var imageCarouselHeightConstraint: NSLayoutConstraint?
     private var imageCarouselLeadingConstraint: NSLayoutConstraint?
+    private var imageCarouselLeadingToInfoConstraint: NSLayoutConstraint?
     private var imageCarouselTrailingConstraint: NSLayoutConstraint?
     private var imageCarouselTrailingToSidebarConstraint: NSLayoutConstraint?
     private var imageMetaBarLeadingConstraint: NSLayoutConstraint?
+    private var imageMetaBarLeadingToInfoConstraint: NSLayoutConstraint?
     private var imageMetaBarTrailingConstraint: NSLayoutConstraint?
     private var imageMetaBarTrailingToSidebarConstraint: NSLayoutConstraint?
     private var imageMetaBarBottomConstraint: NSLayoutConstraint?
     private var imageSurfaceTrailingToSidebarConstraint: NSLayoutConstraint?
+    private var leftImageInfoWidthConstraint: NSLayoutConstraint?
+    private var leftImageInfoTopConstraint: NSLayoutConstraint?
     private var libraryBrowseTrailingToEdgeConstraint: NSLayoutConstraint?
     private var libraryBrowseWidthConstraint: NSLayoutConstraint?
     private let imageCarouselHeight: CGFloat = 100
@@ -214,7 +237,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var activeMediaKind: ActiveMediaKind = .empty
     private let seekSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let volumeCluster = NSStackView()
-    private let volumeMuteButton = NSButton(title: "", target: nil, action: nil)
+    private let volumeMuteButton = ChromeHoverButton()
     private let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let currentTimeLabel = NSTextField(labelWithString: "00:00")
     private let totalTimeLabel = NSTextField(labelWithString: "00:00")
@@ -261,6 +284,27 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var lastVideoCodecFourCC: String?
     private var lastVideoSize: CGSize?
     private var lastImageSize: CGSize?
+    /// Cancels stale async image decodes when stepping through siblings quickly.
+    private var imageLoadGeneration = 0
+    /// Folder whose siblings are currently cached in `imageFolderSiblings`.
+    private var imageFolderSiblingsDirectory: URL?
+    /// Coalesces decode / Info refresh while ←/→ is held (key-repeat scrubbing).
+    private var imageSiblingScrubSettleWork: DispatchWorkItem?
+    private var imageSiblingScrubUpgradeWork: DispatchWorkItem?
+    /// Aspect-correct previews for smooth scrub (path → image + natural pixels).
+    private var imageSiblingPreviewCache: [String: (image: NSImage, pixelSize: CGSize)] = [:]
+    /// Cheap ImageIO size cache so hold-to-scrub never re-opens files for aspect on main.
+    private var imageSiblingPixelSizeCache: [String: CGSize] = [:]
+    /// Paths currently decoding on the scrub preload queue (dedupe).
+    private var imageSiblingPreloadInFlight: Set<String> = []
+    private let imageSiblingPreloadQueue = DispatchQueue(
+        label: "com.laugh.imageSiblingPreload",
+        qos: .utility
+    )
+    private var imageSiblingScrubLastStepAt: CFAbsoluteTime = 0
+    private var imageSiblingScrubStepCount = 0
+    /// Latched while ←/→ keep cancelling settle — forces soft quality until the burst parks.
+    private var imageSiblingScrubBurstActive = false
     private var lastAudioSummary: String = "Unknown"
     private var lastVideoTrackSummary: String = "Unknown"
     private var lastPlaybackTraceSecond: Int = -1
@@ -549,6 +593,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.updateImageStudioCommitFooter()
         }
         imageAdjustControls.bind(to: imageAdjustSession)
+        imageAdjustControls.onWhiteBalanceEyedropperToggle = { [weak self] active in
+            guard let self else { return }
+            if active {
+                self.developSampleMode = .whiteBalance
+            } else {
+                self.restoreDevelopSampleModeAfterEyedropper()
+            }
+        }
+        imageSurfaceView.onDevelopSample = { [weak self] pixel in
+            self?.handleDevelopSample(at: pixel)
+        }
         imageAdjustSession.onChange = { [weak self] quality in
             guard let self else { return }
             self.imageSurfaceView.setAdjustParameters(
@@ -625,10 +680,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         rightSettingsSheet.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(rightSettingsSheet)
 
+        leftImageInfoSheet.isHidden = true
+        leftImageInfoSheet.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(leftImageInfoSheet)
+
         settingsColumnFillView.translatesAutoresizingMaskIntoConstraints = false
         settingsColumnFillView.wantsLayer = true
         settingsColumnFillView.isHidden = true
         rightSettingsSheet.addSubview(settingsColumnFillView, positioned: .below, relativeTo: nil)
+
+        settingsLeadingDivider.translatesAutoresizingMaskIntoConstraints = false
+        settingsLeadingDivider.wantsLayer = true
+        rightSettingsSheet.addSubview(settingsLeadingDivider)
 
         videoSettingsTabsRow.translatesAutoresizingMaskIntoConstraints = false
         rightSettingsSheet.addSubview(videoSettingsTabsRow)
@@ -692,7 +755,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         transportClusterStack.orientation = .horizontal
         transportClusterStack.alignment = .centerY
         transportClusterStack.distribution = .fill
-        transportClusterStack.spacing = 4
+        transportClusterStack.spacing = 2
 
         transportSpeedLeftCluster.orientation = .horizontal
         transportSpeedLeftCluster.alignment = .centerY
@@ -765,16 +828,26 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         )
 
         imageSurfaceLeadingConstraint = imageSurfaceView.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageSurfaceLeadingToInfoConstraint = imageSurfaceView.leadingAnchor.constraint(
+            equalTo: leftImageInfoSheet.trailingAnchor,
+            constant: 12
+        )
         imageSurfaceTrailingConstraint = imageSurfaceView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         imageSurfaceTopConstraint = imageSurfaceView.topAnchor.constraint(equalTo: view.topAnchor)
         imageSurfaceBottomConstraint = imageSurfaceView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         imageCarouselHeightConstraint = imageFolderCarousel.heightAnchor.constraint(equalToConstant: imageCarouselHeight)
         imageCarouselLeadingConstraint = imageFolderCarousel.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageCarouselLeadingToInfoConstraint = imageFolderCarousel.leadingAnchor.constraint(
+            equalTo: leftImageInfoSheet.trailingAnchor
+        )
         imageCarouselTrailingConstraint = imageFolderCarousel.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         imageCarouselTrailingToSidebarConstraint = imageFolderCarousel.trailingAnchor.constraint(
             equalTo: rightSettingsSheet.leadingAnchor
         )
         imageMetaBarLeadingConstraint = imageStudioMetaBar.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        imageMetaBarLeadingToInfoConstraint = imageStudioMetaBar.leadingAnchor.constraint(
+            equalTo: leftImageInfoSheet.trailingAnchor
+        )
         imageMetaBarTrailingConstraint = imageStudioMetaBar.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         imageMetaBarTrailingToSidebarConstraint = imageStudioMetaBar.trailingAnchor.constraint(
             equalTo: rightSettingsSheet.leadingAnchor
@@ -783,9 +856,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             equalTo: rightSettingsSheet.leadingAnchor,
             constant: -12
         )
+        leftImageInfoWidthConstraint = leftImageInfoSheet.widthAnchor.constraint(equalToConstant: 0)
+        leftImageInfoTopConstraint = leftImageInfoSheet.topAnchor.constraint(equalTo: view.topAnchor)
         imageCarouselTrailingToSidebarConstraint?.isActive = false
         imageMetaBarTrailingToSidebarConstraint?.isActive = false
         imageSurfaceTrailingToSidebarConstraint?.isActive = false
+        imageSurfaceLeadingToInfoConstraint?.isActive = false
+        imageCarouselLeadingToInfoConstraint?.isActive = false
+        imageMetaBarLeadingToInfoConstraint?.isActive = false
         rightEdgeHotZoneToWindowTrailingConstraint = rightEdgeHotZoneAffordance.trailingAnchor.constraint(
             equalTo: view.trailingAnchor
         )
@@ -873,10 +951,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             rightSettingsSheet.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             settingsPanelWidthConstraint!,
 
+            leftImageInfoSheet.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftImageInfoSheet.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            leftImageInfoTopConstraint!,
+            leftImageInfoWidthConstraint!,
+
             settingsColumnFillView.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor),
             settingsColumnFillView.trailingAnchor.constraint(equalTo: rightSettingsSheet.trailingAnchor),
             settingsColumnFillView.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor),
             settingsColumnFillView.bottomAnchor.constraint(equalTo: rightSettingsSheet.bottomAnchor),
+
+            settingsLeadingDivider.leadingAnchor.constraint(equalTo: rightSettingsSheet.leadingAnchor),
+            settingsLeadingDivider.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor),
+            settingsLeadingDivider.bottomAnchor.constraint(equalTo: rightSettingsSheet.bottomAnchor),
+            settingsLeadingDivider.widthAnchor.constraint(equalToConstant: 1),
 
             videoSettingsTabsRow.topAnchor.constraint(equalTo: rightSettingsSheet.topAnchor, constant: settingsTabsTopInset),
             videoSettingsTabsRow.heightAnchor.constraint(equalToConstant: 34),
@@ -2216,10 +2304,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     func loadImage(url: URL) {
         pendingVideoLoadWorkItem?.cancel()
         pendingVideoLoadWorkItem = nil
-        guard let loaded = ImageDisplayLoader.loadDisplayImage(at: url) else {
-            showUnsupportedFileMessage("Could not open this image file.")
-            return
-        }
+        imageSiblingScrubSettleWork?.cancel()
+        imageSiblingScrubSettleWork = nil
+        imageSiblingScrubUpgradeWork?.cancel()
+        imageSiblingScrubUpgradeWork = nil
+        imageSiblingScrubStepCount = 0
+        imageSiblingScrubBurstActive = false
+
         let now = CFAbsoluteTimeGetCurrent()
         if lastLoadRequestURL == url.path, (now - lastLoadRequestAt) < 0.35 {
             print("[DEBUG-playback] skipped duplicate image load path=\(url.path)")
@@ -2228,6 +2319,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         lastLoadRequestURL = url.path
         lastLoadRequestAt = now
         print("[DEBUG-playback] Loading image: \(url.path)")
+
         persistPlaybackResumePosition(force: true)
         if !suppressPlaybackHistoryAppend, let currentMediaURL {
             playbackHistory.append(currentMediaURL)
@@ -2239,7 +2331,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         stopMpvBackend()
         suspendPlayerOutputForStillOrEmpty()
 
-        lastImageSize = loaded.pixelSize
         lastVideoSize = nil
         lastVideoCodecFourCC = nil
         lastAudioSummary = "Unknown"
@@ -2247,42 +2338,109 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateVideoInfoLabels()
         cancelImageCropMode()
         imageSelectionSession.setSourceToken(url.path)
-        imageSurfaceView.setImage(loaded.image, naturalSize: loaded.pixelSize)
-        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
-        refreshSubjectSelectChrome()
+
         // Already browsing photos in studio: swap the image without forcing the edit column open.
         let stayingInImageStudio = activeMediaKind == .image
             && playbackLibraryOverlay == .closed
         activeMediaKind = .image
         RecentlyViewedStore.shared.record(url: url, kind: .image)
         refreshImageFolderCarousel(for: url)
+
+        // Instant placeholder from the filmstrip thumb (already decoded) while ImageIO runs.
+        let placeholderSize = ImageDisplayLoader.pixelSize(at: url) ?? lastImageSize
+        if let thumb = imageFolderCarousel.thumbnailImage(for: url),
+           let natural = placeholderSize, natural.width > 0, natural.height > 0 {
+            lastImageSize = natural
+            imageSurfaceView.setImage(thumb, naturalSize: natural)
+            imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        }
+
         if stayingInImageStudio {
-            // Preserve edit-column visibility; only refresh studio chrome for the new photo.
-            imageAdjustSession.setShowingBefore(false)
-            applyImageBeforeAfterPresentation()
-            syncImageStudioFilmstripVisibility()
-            updateImageZoomPercentLabel()
+            // Keep chrome lean on sibling steps — heavy layout/info work stays deferred.
+            if imageAdjustSession.isShowingBefore {
+                imageAdjustSession.setShowingBefore(false)
+                applyImageBeforeAfterPresentation()
+            }
             refreshImageStudioMetaBar()
+            refreshImageInfoSidebar()
             syncPlayingWindowTitle()
-            updateImageStudioLayoutInsets()
-            imageFolderCarousel.layoutSubtreeIfNeeded()
         } else {
             showImageChrome()
         }
-
         applyWindowAspectFromSettings()
+
+        // Progressive decode: tiny preview first, then fit-quality upgrade.
+        imageLoadGeneration += 1
+        let generation = imageLoadGeneration
+        let decodeURL = url
+        let hadPlaceholder = imageFolderCarousel.thumbnailImage(for: url) != nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preview = ImageDisplayLoader.loadQuickPreview(at: decodeURL)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard generation == self.imageLoadGeneration else { return }
+                guard self.currentMediaURL?.standardizedFileURL == decodeURL.standardizedFileURL else { return }
+                if let preview {
+                    self.applyDecodedImage(
+                        preview,
+                        for: decodeURL,
+                        replacingPixelsOnly: hadPlaceholder
+                    )
+                }
+            }
+
+            let full = ImageDisplayLoader.loadDisplayImage(at: decodeURL)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard generation == self.imageLoadGeneration else { return }
+                guard self.currentMediaURL?.standardizedFileURL == decodeURL.standardizedFileURL else { return }
+                guard let full else {
+                    if preview == nil, !hadPlaceholder {
+                        self.showUnsupportedFileMessage("Could not open this image file.")
+                    }
+                    return
+                }
+                self.applyDecodedImage(
+                    full,
+                    for: decodeURL,
+                    replacingPixelsOnly: hadPlaceholder || preview != nil
+                )
+            }
+        }
+    }
+
+    private func applyDecodedImage(
+        _ loaded: (image: NSImage, pixelSize: CGSize),
+        for url: URL,
+        replacingPixelsOnly: Bool
+    ) {
+        lastImageSize = loaded.pixelSize
+        cacheSiblingScrubPreview(loaded, for: url)
+        if replacingPixelsOnly {
+            imageSurfaceView.replaceBaseImage(loaded.image, naturalSize: loaded.pixelSize)
+        } else {
+            imageSurfaceView.setImage(loaded.image, naturalSize: loaded.pixelSize)
+        }
+        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        refreshSubjectSelectChrome()
+        updateImageZoomPercentLabel()
+        refreshImageStudioMetaBar()
     }
 
     private func refreshImageFolderCarousel(for url: URL) {
-        let folder = url.deletingLastPathComponent()
+        let folder = url.deletingLastPathComponent().standardizedFileURL
         let sort = mediaLibraryController.browseSort
-        imageFolderSiblings = MediaLibraryScanner.imageFiles(in: folder, sort: sort)
+        // Same-folder sibling steps: keep the cached strip — only restyle selection.
+        if imageFolderSiblingsDirectory != folder || imageFolderSiblings.isEmpty {
+            imageFolderSiblingsDirectory = folder
+            imageFolderSiblings = MediaLibraryScanner.imageFiles(in: folder, sort: sort)
+        }
         imageFolderCarousel.setImages(imageFolderSiblings, selected: url)
-        updateImageStudioLayoutInsets()
     }
 
     private func clearImageFolderCarousel() {
         imageFolderSiblings = []
+        imageFolderSiblingsDirectory = nil
         imageFolderCarousel.clear()
         updateImageStudioLayoutInsets()
     }
@@ -2961,6 +3119,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackSourceURL = nil
         activePlaybackFileURL = nil
         observedItemPlayableURL = nil
+        imageLoadGeneration += 1
+        imageSiblingScrubSettleWork?.cancel()
+        imageSiblingScrubSettleWork = nil
+        imageSiblingScrubUpgradeWork?.cancel()
+        imageSiblingScrubUpgradeWork = nil
+        imageSiblingPreviewCache.removeAll(keepingCapacity: true)
+        imageSiblingPixelSizeCache.removeAll(keepingCapacity: true)
+        imageSiblingPreloadInFlight.removeAll(keepingCapacity: true)
+        imageSiblingScrubStepCount = 0
+        imageSiblingScrubLastStepAt = 0
+        imageSiblingScrubBurstActive = false
         imageSurfaceView.clearImage()
         clearImageFolderCarousel()
         cancelImageCropMode()
@@ -2983,6 +3152,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         dragHostView.setImageStudioGradientActive(false)
         dragHostView.setPlaybackBackdropActive(false)
         hideSettingsSheet()
+        hideLeftImageInfoSheet()
         removeEdgeHotZoneClickMonitor()
         showFullMediaLibrary()
         applyContextualSettingsTabs()
@@ -3006,6 +3176,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageSurfaceView.isHidden = true
         imageFolderCarousel.isHidden = true
         imageStudioMetaBar.isHidden = true
+        hideLeftImageInfoSheet()
         cancelImageCropMode()
         clearImageFolderCarousel()
         applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
@@ -3100,8 +3271,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         var bottom: CGFloat = 0
 
         if isImage {
-            // Integrated split: photo / meta / carousel pin to the edit column leading edge
-            // so opening the sidebar truly pushes the content column (not an overlay sheet).
+            // Integrated split: photo / meta / carousel pin between left Info + right Edits
+            // so opening the sidebars truly pushes the content column (not overlay sheets).
             leading = imageStudioMargin
             top = imageStudioTopMargin
 
@@ -3122,6 +3293,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }
             }
 
+            let infoOpen = isLeftImageInfoFullyOpen()
+
             imageCarouselTrailingConstraint?.isActive = false
             imageMetaBarTrailingConstraint?.isActive = false
             imageSurfaceTrailingConstraint?.isActive = false
@@ -3130,7 +3303,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageSurfaceTrailingToSidebarConstraint?.isActive = true
             imageSurfaceTrailingToSidebarConstraint?.constant = -12
 
-            // Full-bleed meta + filmstrip; edge open/close ignores clicks over this chrome.
+            imageSurfaceLeadingToInfoConstraint?.isActive = infoOpen
+            imageCarouselLeadingToInfoConstraint?.isActive = infoOpen
+            imageMetaBarLeadingToInfoConstraint?.isActive = infoOpen
+            imageSurfaceLeadingConstraint?.isActive = !infoOpen
+            imageCarouselLeadingConstraint?.isActive = !infoOpen
+            imageMetaBarLeadingConstraint?.isActive = !infoOpen
+
+            // Full-bleed meta + filmstrip when Info is closed; pin to Info trailing when open.
             imageCarouselLeadingConstraint?.constant = 0
             imageMetaBarLeadingConstraint?.constant = 0
             imageCarouselTrailingToSidebarConstraint?.constant = 0
@@ -3141,6 +3321,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             syncImageStudioIntegratedChromeAppearance()
             view.layoutSubtreeIfNeeded()
             layoutImageStudioSidebarDivider()
+            leftImageInfoSheet.applyStudioChromeBackground()
             imageFolderCarousel.refreshEdgeFades()
             // Sidebar width changes the clip; keep the selected thumb visible (esp. first/last).
             imageFolderCarousel.recenterSelected(animated: false)
@@ -3152,6 +3333,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageCarouselTrailingToSidebarConstraint?.isActive = false
             imageMetaBarTrailingToSidebarConstraint?.isActive = false
             imageSurfaceTrailingToSidebarConstraint?.isActive = false
+            imageSurfaceLeadingToInfoConstraint?.isActive = false
+            imageCarouselLeadingToInfoConstraint?.isActive = false
+            imageMetaBarLeadingToInfoConstraint?.isActive = false
+            imageSurfaceLeadingConstraint?.isActive = true
+            imageCarouselLeadingConstraint?.isActive = true
+            imageMetaBarLeadingConstraint?.isActive = true
             imageCarouselTrailingConstraint?.isActive = true
             imageMetaBarTrailingConstraint?.isActive = true
             imageSurfaceTrailingConstraint?.isActive = true
@@ -3165,7 +3352,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             styleRightSettingsPanel()
         }
 
-        imageSurfaceLeadingConstraint?.constant = leading
+        if !isImage || !isLeftImageInfoFullyOpen() {
+            imageSurfaceLeadingConstraint?.constant = leading
+        }
         if !isImage {
             imageSurfaceTrailingConstraint?.constant = trailing
         }
@@ -3185,16 +3374,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func syncSettingsPanelGeometry() {
         let scale = max(lastAppliedUIScale, 1)
         let sheetVisible = !rightSettingsSheet.isHidden
+        let titleInset = max(30, ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window))
 
         switch activeMediaKind {
         case .image:
-            settingsPanelTopConstraint?.constant = max(30, ImmersiveWindowChrome.titleBarChromeStripHeight(for: view.window))
+            settingsPanelTopConstraint?.constant = titleInset
             imageSettingsTabsTopConstraint?.constant = 12
             settingsPanelWidthConstraint?.constant = sheetVisible
                 ? imageStudioSettingsTargetWidth(scale: scale)
                 : 0
-            if sheetVisible {
+            leftImageInfoTopConstraint?.constant = titleInset
+            leftImageInfoWidthConstraint?.constant = leftImageInfoSheet.isHidden
+                ? 0
+                : imageStudioSettingsTargetWidth(scale: scale)
+            if !leftImageInfoSheet.isHidden || sheetVisible {
                 layoutImageStudioSidebarDivider()
+                leftImageInfoSheet.applyStudioChromeBackground()
             }
         case .video:
             settingsPanelTopConstraint?.constant = 0
@@ -3202,9 +3397,62 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             settingsPanelWidthConstraint?.constant = sheetVisible
                 ? videoSettingsTargetWidth(scale: scale)
                 : 0
+            leftImageInfoTopConstraint?.constant = 0
+            leftImageInfoWidthConstraint?.constant = 0
         case .empty:
             settingsPanelTopConstraint?.constant = 0
             settingsPanelWidthConstraint?.constant = 0
+            leftImageInfoTopConstraint?.constant = 0
+            leftImageInfoWidthConstraint?.constant = 0
+        }
+    }
+
+    private func isLeftImageInfoFullyOpen() -> Bool {
+        !leftImageInfoSheet.isHidden && (leftImageInfoWidthConstraint?.constant ?? 0) > 1
+    }
+
+    private func showLeftImageInfoSheet() {
+        guard activeMediaKind == .image else { return }
+        leftImageInfoSheet.isHidden = false
+        refreshImageInfoSidebar()
+        syncSettingsPanelGeometry()
+        leftImageInfoSheet.applyStudioChromeBackground()
+        updateImageStudioLayoutInsets()
+        raisePlaybackChromeToFront()
+        syncEdgeHotZoneAffordances()
+        updateImageInfoButtonAppearance()
+    }
+
+    private func hideLeftImageInfoSheet() {
+        guard !leftImageInfoSheet.isHidden else {
+            leftImageInfoWidthConstraint?.constant = 0
+            updateImageInfoButtonAppearance()
+            return
+        }
+        leftImageInfoSheet.isHidden = true
+        leftImageInfoWidthConstraint?.constant = 0
+        if activeMediaKind == .image {
+            updateImageStudioLayoutInsets()
+            raisePlaybackChromeToFront()
+            syncEdgeHotZoneAffordances()
+        }
+        updateImageInfoButtonAppearance()
+    }
+
+    private func refreshImageInfoSidebar() {
+        guard activeMediaKind == .image, let url = currentMediaURL else {
+            leftImageInfoSheet.clear()
+            return
+        }
+        let requested = url.standardizedFileURL
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let metadata = ImageFileMetadata.load(from: requested)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.activeMediaKind == .image,
+                      self.currentMediaURL?.standardizedFileURL == requested else { return }
+                self.leftImageInfoSheet.configure(metadata)
+            }
         }
     }
 
@@ -3219,6 +3467,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         styleImageToolsBar()
         imageStudioMetaBar.applyStudioChromeBackground()
         imageFolderCarousel.applyStudioChromeBackground()
+        leftImageInfoSheet.applyStudioChromeBackground()
     }
 
     /// Opaque fill + separator border matching how the edit column reads over studio floor
@@ -3371,11 +3620,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let fadeFloor = LaughTheme.imageStudioFloorColor(appearance: appearance)
         settingsTopOverflowFade.floorColor = fadeFloor
         settingsBottomOverflowFade.floorColor = fadeFloor
-        if rightSettingsSheet.layer?.sublayers?.contains(where: { $0.name == "imageStudioLeadingDivider" }) != true {
-            let divider = CALayer()
-            divider.name = "imageStudioLeadingDivider"
-            rightSettingsSheet.layer?.addSublayer(divider)
-        }
         layoutImageStudioSidebarDivider()
 
         if activeMediaKind == .image {
@@ -3389,15 +3633,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func layoutImageStudioSidebarDivider() {
-        guard let layer = rightSettingsSheet.layer,
-              let divider = layer.sublayers?.first(where: { $0.name == "imageStudioLeadingDivider" })
-        else { return }
         let appearance = view.effectiveAppearance
-        let border = LaughTheme.imageStudioChromeBorder(appearance: appearance)
-        divider.frame = CGRect(x: 0, y: 0, width: 1, height: layer.bounds.height)
-        divider.backgroundColor = border.cgColor
+        let edge = LaughTheme.imageStudioSidebarEdgeBorder(appearance: appearance)
+        settingsLeadingDivider.layer?.backgroundColor = edge.cgColor
+        // Keep above the wash fill — if this slips under, the edge reads darker than Info’s.
+        rightSettingsSheet.addSubview(
+            settingsLeadingDivider,
+            positioned: .above,
+            relativeTo: settingsColumnFillView
+        )
         if activeMediaKind == .image {
-            imageControlsContainer.layer?.borderColor = border.cgColor
+            imageControlsContainer.layer?.borderColor =
+                LaughTheme.imageStudioChromeBorder(appearance: appearance).cgColor
             imageToolsBarFillView.layer?.backgroundColor =
                 LaughTheme.imageStudioPanelWashResolved(appearance: appearance).cgColor
         }
@@ -3504,7 +3751,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         // Filmstrip / meta above edge strips so thumbs & favorites receive clicks first.
         view.addSubview(imageFolderCarousel, positioned: .above, relativeTo: imageSurfaceView)
         view.addSubview(imageStudioMetaBar, positioned: .above, relativeTo: imageFolderCarousel)
-        // Image studio: edit sidebar is a full-height column above the left content strip.
+        // Image studio: Info (left) + Edits (right) are full-height columns around the content strip.
+        if activeMediaKind == .image, !leftImageInfoSheet.isHidden {
+            view.addSubview(leftImageInfoSheet, positioned: .above, relativeTo: imageStudioMetaBar)
+        }
         if activeMediaKind == .image, !rightSettingsSheet.isHidden {
             view.addSubview(rightSettingsSheet, positioned: .above, relativeTo: imageStudioMetaBar)
             ensureSettingsTabRowsAboveContent()
@@ -3550,6 +3800,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if !titleBarChromeStrip.isHidden {
             view.addSubview(leftEdgeHotZoneAffordance, positioned: .above, relativeTo: titleBarChromeStrip)
             view.addSubview(rightEdgeHotZoneAffordance, positioned: .above, relativeTo: leftEdgeHotZoneAffordance)
+        }
+        if !leftImageInfoSheet.isHidden {
+            view.addSubview(leftImageInfoSheet, positioned: .above, relativeTo: titleBarChromeStrip)
+            // Keep the library open-zone strip visible over the Info column’s leading edge.
+            view.addSubview(leftEdgeHotZoneAffordance, positioned: .above, relativeTo: leftImageInfoSheet)
         }
         if !rightSettingsSheet.isHidden {
             // Keep the close-zone strip visible beside the settings column.
@@ -4445,17 +4700,27 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func configureImageControls() {
-        styleIconButton(imageQueuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: 13)
-        styleIconButton(imageZoomOutButton, symbol: "minus.magnifyingglass", label: "Zoom out")
-        styleIconButton(imageActualSizeButton, symbol: "1.magnifyingglass", label: "Actual size")
-        styleIconButton(imageZoomInButton, symbol: "plus.magnifyingglass", label: "Zoom in")
-        styleIconButton(imageFitButton, symbol: "arrow.up.left.and.arrow.down.right", label: "Fit")
-        styleIconButton(imageCropButton, symbol: "crop", label: "Crop")
-        styleIconButton(imageRotateLeftButton, symbol: "rotate.left", label: "Rotate left")
-        styleIconButton(imageRotateRightButton, symbol: "rotate.right", label: "Rotate right")
-        styleIconButton(imageQueueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: 13)
-        pinTransportIconButtonSize(imageQueuePreviousButton)
-        pinTransportIconButtonSize(imageQueueNextButton)
+        let icon = MusicStylePlaybackBar.controlIconPointSize
+        styleIconButton(imageQueuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: icon)
+        styleIconButton(imageZoomOutButton, symbol: "minus.magnifyingglass", label: "Zoom out", pointSize: icon)
+        styleIconButton(imageActualSizeButton, symbol: "1.magnifyingglass", label: "Actual size", pointSize: icon)
+        styleIconButton(imageZoomInButton, symbol: "plus.magnifyingglass", label: "Zoom in", pointSize: icon)
+        styleIconButton(imageFitButton, symbol: "arrow.up.left.and.arrow.down.right", label: "Fit", pointSize: icon)
+        styleIconButton(imageCropButton, symbol: "crop", label: "Crop", pointSize: icon)
+        styleIconButton(imageRotateLeftButton, symbol: "rotate.left", label: "Rotate left", pointSize: icon)
+        styleIconButton(imageRotateRightButton, symbol: "rotate.right", label: "Rotate right", pointSize: icon)
+        styleIconButton(imageQueueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: icon)
+        [
+            imageQueuePreviousButton,
+            imageZoomOutButton,
+            imageActualSizeButton,
+            imageZoomInButton,
+            imageFitButton,
+            imageCropButton,
+            imageRotateLeftButton,
+            imageRotateRightButton,
+            imageQueueNextButton
+        ].forEach { pinTransportIconButtonSize($0) }
 
         imageQueuePreviousButton.target = self
         imageZoomOutButton.target = self
@@ -4468,6 +4733,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageQueueNextButton.target = self
         imageSettingsButton.target = self
         imageLibraryButton.target = self
+        imageInfoButton.target = self
 
         imageQueuePreviousButton.action = #selector(queuePreviousPressed)
         imageZoomOutButton.action = #selector(imageZoomOut)
@@ -4480,6 +4746,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageQueueNextButton.action = #selector(queueNextPressed)
         imageSettingsButton.action = #selector(settingsPressed)
         imageLibraryButton.action = #selector(libraryPressed)
+        imageInfoButton.action = #selector(imageInfoPressed)
 
         imageCropBar.onAspectChange = { [weak self] in
             self?.imageCropAspectChanged()
@@ -4504,18 +4771,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         imageLeadingAccessoryCluster.orientation = .horizontal
         imageLeadingAccessoryCluster.alignment = .centerY
-        imageLeadingAccessoryCluster.spacing = 0
+        imageLeadingAccessoryCluster.spacing = 4
         imageLeadingAccessoryCluster.translatesAutoresizingMaskIntoConstraints = false
         imageLeadingAccessoryCluster.setContentHuggingPriority(.required, for: .horizontal)
         imageLeadingAccessoryCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
         if !imageLeadingAccessoryCluster.arrangedSubviews.contains(imageLibraryButton) {
             imageLeadingAccessoryCluster.addArrangedSubview(imageLibraryButton)
         }
+        if !imageLeadingAccessoryCluster.arrangedSubviews.contains(imageInfoButton) {
+            imageLeadingAccessoryCluster.addArrangedSubview(imageInfoButton)
+        }
 
         imageTransportCluster.orientation = .horizontal
         imageTransportCluster.alignment = .centerY
         imageTransportCluster.distribution = .fill
-        imageTransportCluster.spacing = 8
+        imageTransportCluster.spacing = 2
         imageTransportCluster.translatesAutoresizingMaskIntoConstraints = false
         imageTransportCluster.setContentHuggingPriority(.required, for: .horizontal)
         imageTransportCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -4617,24 +4887,28 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func configureControls() {
         configurePlaybackAccessoryClusters()
-        styleIconButton(queuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: 13)
-        styleIconButton(speedStepDownButton, symbol: "backward.fill", label: "Slower", pointSize: 13)
-        styleIconButton(speedStepUpButton, symbol: "forward.fill", label: "Faster", pointSize: 13)
-        styleIconButton(queueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: 13)
+        let icon = MusicStylePlaybackBar.controlIconPointSize
+        styleIconButton(queuePreviousButton, symbol: "backward.end.fill", label: "Previous in queue", pointSize: icon)
+        styleIconButton(speedStepDownButton, symbol: "backward.fill", label: "Slower", pointSize: icon)
+        styleIconButton(speedStepUpButton, symbol: "forward.fill", label: "Faster", pointSize: icon)
+        styleIconButton(queueNextButton, symbol: "forward.end.fill", label: "Next in queue", pointSize: icon)
         configureTransportSpeedLabel(playbackSpeedSlowLabel, alignment: .left)
         configureTransportSpeedLabel(playbackSpeedFastLabel, alignment: .right)
         configurePlaybackBarAccessoryButton(libraryButton, symbol: "folder", label: "Library")
         configurePlaybackBarAccessoryButton(imageLibraryButton, symbol: "folder", label: "Library")
+        configurePlaybackBarAccessoryButton(imageInfoButton, symbol: "info.circle", label: "Info")
         configurePlaybackBarAccessoryButton(queueButton, symbol: "list.bullet", label: "Queue")
         configurePlaybackBarAccessoryButton(settingsButton, symbol: "gearshape", label: "Settings")
         configurePlaybackBarAccessoryButton(imageSettingsButton, symbol: "gearshape", label: "Settings")
+        updateImageInfoButtonAppearance()
 
         playPauseButton.bezelStyle = .accessoryBarAction
         playPauseButton.isBordered = false
         playPauseButton.target = self
         playPauseButton.action = #selector(togglePlayPause)
         playPauseButton.setButtonType(.momentaryPushIn)
-        pinTransportIconButtonSize(playPauseButton, width: 32, height: 28)
+        let side = MusicStylePlaybackBar.controlSize
+        pinTransportIconButtonSize(playPauseButton, width: side, height: side)
         pinTransportIconButtonSize(queuePreviousButton)
         pinTransportIconButtonSize(speedStepDownButton)
         pinTransportIconButtonSize(speedStepUpButton)
@@ -4672,8 +4946,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         volumeMuteButton.target = self
         volumeMuteButton.action = #selector(volumeMuteButtonPressed)
-        styleIconButton(volumeMuteButton, symbol: "speaker.wave.2.fill", label: "Mute", pointSize: 13)
-        pinTransportIconButtonSize(volumeMuteButton, width: 24, height: 24)
+        styleIconButton(volumeMuteButton, symbol: "speaker.wave.2.fill", label: "Mute", pointSize: icon)
+        pinTransportIconButtonSize(volumeMuteButton)
 
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeSliderChanged)
@@ -4752,13 +5026,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
         for (groupIndex, (group, tools)) in ImageDevelopOutline.visibleGroups.enumerated() {
             if groupIndex > 0 {
-                let groupGap = NSView()
+                let groupGap = ImmersivePanelFillView()
                 groupGap.translatesAutoresizingMaskIntoConstraints = false
                 groupGap.heightAnchor.constraint(equalToConstant: ImageDevelopOutlineStyle.groupSpacing).isActive = true
                 imageTabView.addArrangedSubview(groupGap)
             }
 
-            let groupColumn = NSStackView()
+            let groupColumn = ImmersivePanelStackView()
             groupColumn.orientation = .vertical
             groupColumn.alignment = .leading
             groupColumn.spacing = ImageDevelopOutlineStyle.titleToTools
@@ -4768,7 +5042,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             groupColumn.addArrangedSubview(groupHeader)
             groupHeader.widthAnchor.constraint(equalTo: groupColumn.widthAnchor).isActive = true
 
-            let toolsColumn = NSStackView()
+            let toolsColumn = ImmersivePanelStackView()
             toolsColumn.orientation = .vertical
             toolsColumn.alignment = .leading
             toolsColumn.spacing = ImageDevelopOutlineStyle.toolRowSpacing
@@ -5403,8 +5677,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self?.imageAdjustSession.resetSection(section)
         }
         header.onExpandedChange = { [weak self] expanded in
-            guard expanded else { return }
-            self?.collapseOtherImageAdjustSections(except: section)
+            guard let self else { return }
+            if expanded {
+                self.collapseOtherImageAdjustSections(except: section)
+            }
+            self.updateDevelopSampleMode(for: section, expanded: expanded)
         }
         imageSectionHeaders[section] = header
         stack.addArrangedSubview(block)
@@ -5428,8 +5705,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self.configureSubjectSelectCard(card)
         }
         header.onExpandedChange = { [weak self] expanded in
-            guard expanded else { return }
-            self?.collapseOtherImageAdjustSectionsForSubjectSelect()
+            guard let self else { return }
+            if expanded {
+                self.collapseOtherImageAdjustSectionsForSubjectSelect()
+                if self.developSampleMode == .vignetteCenter {
+                    self.developSampleMode = .none
+                }
+            }
         }
         imageSubjectSelectHeader = header
         stack.addArrangedSubview(block)
@@ -5859,6 +6141,45 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageSubjectSelectHeader?.setExpanded(false, animated: true)
     }
 
+    private func updateDevelopSampleMode(for section: ImageAdjustSection, expanded: Bool) {
+        if developSampleMode == .whiteBalance { return }
+        if section == .vignette, expanded {
+            developSampleMode = .vignetteCenter
+        } else if developSampleMode == .vignetteCenter {
+            developSampleMode = .none
+        }
+    }
+
+    private func restoreDevelopSampleModeAfterEyedropper() {
+        if imageSectionHeaders[.vignette]?.isCurrentlyExpanded == true {
+            developSampleMode = .vignetteCenter
+        } else {
+            developSampleMode = .none
+        }
+    }
+
+    private func handleDevelopSample(at pixel: CGPoint) {
+        switch developSampleMode {
+        case .whiteBalance:
+            guard let rgb = imageSurfaceView.sampleLinearRGB(at: pixel) else { return }
+            let wb = ImageAdjustParameters.whiteBalanceOffsets(
+                fromNeutralRGB: rgb.r,
+                g: rgb.g,
+                b: rgb.b
+            )
+            imageAdjustControls.applyWhiteBalanceSample(temperature: wb.temperature, tint: wb.tint)
+            // applyWhiteBalanceSample turns the eyedropper off; restore vignette pick if that tool is open.
+        case .vignetteCenter:
+            let size = imageSurfaceView.naturalPixelSize
+            guard size.width > 1, size.height > 1 else { return }
+            let nx = max(0, min(1, Double(pixel.x / size.width)))
+            let ny = max(0, min(1, Double(pixel.y / size.height)))
+            imageAdjustControls.setVignetteCenter(x: nx, y: ny)
+        case .none:
+            break
+        }
+    }
+
     private func configureImageAdjustCard(_ card: SettingsSectionCard, for section: ImageAdjustSection) {
         switch section {
         case .develop:
@@ -5876,6 +6197,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 title: "Contrast",
                 slider: imageAdjustControls.contrastSlider,
                 valueLabel: imageAdjustControls.contrastValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Smart Contrast",
+                slider: imageAdjustControls.smartContrastSlider,
+                valueLabel: imageAdjustControls.smartContrastValueLabel
             ))
             card.addRow(SettingsRowFactory.sliderRow(
                 title: "Highlights",
@@ -5923,6 +6249,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 slider: imageAdjustControls.tintSlider,
                 valueLabel: imageAdjustControls.tintValueLabel
             ))
+            card.addRow(SettingsRowFactory.fullWidthRow(imageAdjustControls.whiteBalanceEyedropperButton))
             card.addRow(SettingsRowFactory.sliderRow(
                 title: "Color balance",
                 slider: imageAdjustControls.colorBalanceSlider,
@@ -5942,6 +6269,28 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 title: "Split amount",
                 slider: imageAdjustControls.splitAmountSlider,
                 valueLabel: imageAdjustControls.splitAmountValueLabel
+            ))
+        case .curves:
+            imageAdjustControls.curveChannelPopUp.controlSize = .small
+            card.addRow(SettingsRowFactory.fullWidthRow(imageAdjustControls.curveChannelPopUp))
+            card.addFinalRow(SettingsRowFactory.fullWidthRow(imageAdjustControls.curveEditor))
+        case .hsl:
+            imageAdjustControls.hslChannelPopUp.controlSize = .small
+            card.addRow(SettingsRowFactory.fullWidthRow(imageAdjustControls.hslChannelPopUp))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Hue",
+                slider: imageAdjustControls.hslHueSlider,
+                valueLabel: imageAdjustControls.hslHueValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Saturation",
+                slider: imageAdjustControls.hslSatSlider,
+                valueLabel: imageAdjustControls.hslSatValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Luminance",
+                slider: imageAdjustControls.hslLumaSlider,
+                valueLabel: imageAdjustControls.hslLumaValueLabel
             ))
         case .dramatic:
             card.addFinalRow(SettingsRowFactory.sliderRow(
@@ -6104,9 +6453,19 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             ))
         case .details:
             card.addRow(SettingsRowFactory.sliderRow(
-                title: "Sharpness",
+                title: "Amount",
                 slider: imageAdjustControls.sharpnessSlider,
                 valueLabel: imageAdjustControls.sharpnessValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Radius",
+                slider: imageAdjustControls.sharpenRadiusSlider,
+                valueLabel: imageAdjustControls.sharpenRadiusValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Detail",
+                slider: imageAdjustControls.sharpenDetailSlider,
+                valueLabel: imageAdjustControls.sharpenDetailValueLabel
             ))
             card.addRow(SettingsRowFactory.sliderRow(
                 title: "Definition",
@@ -6119,10 +6478,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 valueLabel: imageAdjustControls.structureValueLabel
             ))
         case .denoise:
-            card.addFinalRow(SettingsRowFactory.sliderRow(
-                title: "Denoise",
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Luminance",
                 slider: imageAdjustControls.denoiseSlider,
                 valueLabel: imageAdjustControls.denoiseValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Color",
+                slider: imageAdjustControls.denoiseColorSlider,
+                valueLabel: imageAdjustControls.denoiseColorValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Detail",
+                slider: imageAdjustControls.denoiseDetailSlider,
+                valueLabel: imageAdjustControls.denoiseDetailValueLabel
             ))
         case .vignette:
             card.addRow(SettingsRowFactory.sliderRow(
@@ -6130,10 +6499,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 slider: imageAdjustControls.vignetteSlider,
                 valueLabel: imageAdjustControls.vignetteValueLabel
             ))
-            card.addFinalRow(SettingsRowFactory.sliderRow(
+            card.addRow(SettingsRowFactory.sliderRow(
                 title: "Midpoint",
                 slider: imageAdjustControls.vignetteMidpointSlider,
                 valueLabel: imageAdjustControls.vignetteMidpointValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Center X",
+                slider: imageAdjustControls.vignetteCenterXSlider,
+                valueLabel: imageAdjustControls.vignetteCenterXValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Center Y",
+                slider: imageAdjustControls.vignetteCenterYSlider,
+                valueLabel: imageAdjustControls.vignetteCenterYValueLabel
             ))
         case .dodgeBurn:
             card.addRow(SettingsRowFactory.sliderRow(
@@ -6150,6 +6529,27 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 title: "Softness",
                 slider: imageAdjustControls.dodgeBurnSoftnessSlider,
                 valueLabel: imageAdjustControls.dodgeBurnSoftnessValueLabel
+            ))
+        case .optics:
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Distortion",
+                slider: imageAdjustControls.distortionSlider,
+                valueLabel: imageAdjustControls.distortionValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Chromatic Aberration",
+                slider: imageAdjustControls.chromaticAberrationSlider,
+                valueLabel: imageAdjustControls.chromaticAberrationValueLabel
+            ))
+            card.addRow(SettingsRowFactory.sliderRow(
+                title: "Defringe Purple",
+                slider: imageAdjustControls.defringePurpleSlider,
+                valueLabel: imageAdjustControls.defringePurpleValueLabel
+            ))
+            card.addFinalRow(SettingsRowFactory.sliderRow(
+                title: "Defringe Green",
+                slider: imageAdjustControls.defringeGreenSlider,
+                valueLabel: imageAdjustControls.defringeGreenValueLabel
             ))
         }
     }
@@ -7078,7 +7478,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         playbackSubtitleToggle.isHidden = !show
         playbackSubtitleToggle.isEnabled = show && !cachedSubtitleTracks.isEmpty
         playbackSubtitleToggle.subtitlesActive = primarySubtitlesEnabled
-        playbackSubtitleToggle.contentTintColor = MusicStylePlaybackBar.accessoryIconTintColor
+        playbackSubtitleToggle.idleTintColor = MusicStylePlaybackBar.accessoryIconTintColor
         playbackSubtitleToggle.alphaValue = 1
         let state = primarySubtitlesEnabled ? "on" : "off"
         playbackSubtitleToggle.setAccessibilityLabel("Subtitles \(state)")
@@ -8482,6 +8882,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func ensureSettingsTabRowsAboveContent() {
         rightSettingsSheet.addSubview(settingsColumnFillView, positioned: .below, relativeTo: settingsScrollClipHost)
+        // Hairline must stay above the wash fill (same stacking as Info’s trailing edge).
+        rightSettingsSheet.addSubview(
+            settingsLeadingDivider,
+            positioned: .above,
+            relativeTo: settingsColumnFillView
+        )
         rightSettingsSheet.addSubview(videoSettingsTabsRow, positioned: .above, relativeTo: settingsScrollClipHost)
         rightSettingsSheet.addSubview(imageSettingsTabsRow, positioned: .above, relativeTo: settingsScrollClipHost)
         settingsScrollClipHost.addSubview(settingsTopOverflowFade, positioned: .above, relativeTo: settingsScrollView)
@@ -8508,9 +8914,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
         }
         if activeMediaKind == .image {
+            showLeftImageInfoSheet()
             updateImageZoomPercentLabel()
             updateImageStudioLayoutInsets()
             updateImageStudioCommitFooter()
+        } else {
+            hideLeftImageInfoSheet()
         }
         view.layoutSubtreeIfNeeded()
         raisePlaybackChromeToFront()
@@ -8611,6 +9020,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         immersiveChromeVisible = false
 
         hideSettingsSheet()
+        hideLeftImageInfoSheet()
         applyLibraryBrowseLayoutMode(dockedForImageStudio: false)
         librarySidebar.isHidden = false
         libraryBrowse.isHidden = false
@@ -8814,6 +9224,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return hitView === button || hitView.isDescendant(of: button)
     }
 
+    private func isImageInfoToggleButtonClick(for event: NSEvent) -> Bool {
+        guard activeMediaKind == .image else { return false }
+        let pointInView = view.convert(event.locationInWindow, from: nil)
+        guard let hitView = view.hitTest(pointInView) else { return false }
+        return hitView === imageInfoButton || hitView.isDescendant(of: imageInfoButton)
+    }
+
     private func shouldKeepSettingsSheetOpen(for event: NSEvent) -> Bool {
         if suppressSettingsDismissForColorPicker { return true }
         let pointInView = view.convert(event.locationInWindow, from: nil)
@@ -8821,6 +9238,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         if isPointOverImageStudioBottomChrome(pointInView) { return true }
         if isPointInRightSettingsCloseZone(pointInView) { return false }
         if rightSettingsSheet.frame.contains(pointInView) { return true }
+        if !leftImageInfoSheet.isHidden, leftImageInfoSheet.frame.contains(pointInView) { return true }
         // Image studio: keep the edit column open when clicking photo / chrome,
         // but allow the toolbar Settings gear to toggle it (handled separately).
         if activeMediaKind == .image {
@@ -8969,6 +9387,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 if self.isSettingsToggleButtonClick(for: event) {
                     self.hideSettingsSheet()
                     return nil
+                }
+                if self.isImageInfoToggleButtonClick(for: event) {
+                    return event
                 }
                 if self.shouldKeepSettingsSheetOpen(for: event) {
                     return event
@@ -9643,8 +10064,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         return ceil(width) + 2
     }()
 
-    private static let playbackBarAccessoryButtonSize = NSSize(width: 24, height: 24)
-    private static let playbackBarAccessoryIconPointSize: CGFloat = 12
+    private static let playbackBarAccessoryButtonSize = NSSize(
+        width: MusicStylePlaybackBar.controlSize,
+        height: MusicStylePlaybackBar.controlSize
+    )
+    private static let playbackBarAccessoryIconPointSize: CGFloat = MusicStylePlaybackBar.controlIconPointSize
 
     private func configurePlaybackBarAccessoryButton(_ button: NSButton, symbol: String, label: String) {
         styleIconButton(
@@ -9671,6 +10095,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             button.image = image.withSymbolConfiguration(config)
             button.image?.isTemplate = true
+        }
+        if let chrome = button as? ChromeHoverButton {
+            chrome.idleTintColor = MusicStylePlaybackBar.accessoryIconTintColor
+        } else {
+            button.contentTintColor = MusicStylePlaybackBar.accessoryIconTintColor
         }
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -9807,7 +10236,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    private func pinTransportIconButtonSize(_ button: NSButton, width: CGFloat = 28, height: CGFloat = 28) {
+    private func pinTransportIconButtonSize(
+        _ button: NSButton,
+        width: CGFloat = MusicStylePlaybackBar.controlSize,
+        height: CGFloat = MusicStylePlaybackBar.controlSize
+    ) {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.widthAnchor.constraint(equalToConstant: width).isActive = true
         button.heightAnchor.constraint(equalToConstant: height).isActive = true
@@ -9820,11 +10253,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let symbol = playing ? "pause.fill" : "play.fill"
         let label = playing ? "Pause" : "Play"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
-            let config = NSImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+            let config = NSImage.SymbolConfiguration(
+                pointSize: MusicStylePlaybackBar.playPauseIconPointSize,
+                weight: .semibold
+            )
             playPauseButton.image = image.withSymbolConfiguration(config)
             playPauseButton.image?.isTemplate = true
         }
         playPauseButton.title = ""
+        playPauseButton.idleTintColor = MusicStylePlaybackBar.accessoryIconTintColor
         playbackMiniPreview.setPlaying(playing)
         syncIdleSleepGuard(isPlaying: playing)
     }
@@ -10447,6 +10884,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
+    @objc private func imageInfoPressed() {
+        guard activeMediaKind == .image, playbackLibraryOverlay == .closed else { return }
+        if isLeftImageInfoFullyOpen() {
+            hideLeftImageInfoSheet()
+        } else {
+            showLeftImageInfoSheet()
+        }
+    }
+
+    private func updateImageInfoButtonAppearance() {
+        let open = activeMediaKind == .image && isLeftImageInfoFullyOpen()
+        imageInfoButton.toolTip = open ? "Hide Info" : "Show Info"
+        imageInfoButton.idleTintColor = MusicStylePlaybackBar.accessoryIconTintColor
+    }
+
     @objc private func libraryPressed() {
         if activeMediaKind == .empty {
             librarySidebar.reloadRoots()
@@ -10701,6 +11153,7 @@ extension PlayerViewController {
             imageControlsContainer,
             imageFolderCarousel,
             imageStudioMetaBar,
+            leftImageInfoSheet,
             rightSettingsSheet,
             compatibilityBanner,
             queueDropZone,
@@ -10733,6 +11186,7 @@ extension PlayerViewController {
             imageControlsContainer,
             imageFolderCarousel,
             imageStudioMetaBar,
+            leftImageInfoSheet,
             rightSettingsSheet,
             librarySidebar,
             libraryBrowse,
@@ -11025,6 +11479,342 @@ extension PlayerViewController {
         playNextInQueue()
     }
 
+    /// ← / → while viewing **ImageMedia**: previous / next sibling in the folder filmstrip order.
+    /// Hold-to-scrub adapts quality: fast = cached/low, slow = sharper sooner.
+    func commandStepImageSibling(forward: Bool) {
+        guard activeMediaKind == .image, playbackLibraryOverlay == .closed else { return }
+        guard let current = currentMediaURL else { return }
+        let urls = imageFolderSiblings.map(\.url)
+        guard let next = FolderPlaybackNeighbors.adjacentURL(in: urls, around: current, forward: forward) else {
+            return
+        }
+        scrubToImageSibling(next, from: current, forward: forward)
+    }
+
+    private enum ImageSiblingScrubPace {
+        case slow   // single / deliberate steps → full quality ASAP
+        case medium // paced taps → quick then fit
+        case fast   // spam / key-repeat → soft preview only until parked
+
+        var settleDelay: TimeInterval {
+            switch self {
+            case .slow: return 0
+            case .medium: return 0.14
+            case .fast: return 0.28
+            }
+        }
+
+        var upgradeDelay: TimeInterval {
+            switch self {
+            case .slow: return 0
+            case .medium: return 0.10
+            case .fast: return 0.32
+            }
+        }
+
+        var filmstripScrollMotion: ImageFolderCarouselView.ScrollMotion {
+            switch self {
+            case .slow, .medium: return .deliberate
+            case .fast: return .none
+            }
+        }
+
+        /// Soft recenter after medium/fast parks; slow already eased on the step.
+        var settleFilmstrip: Bool {
+            self != .slow
+        }
+
+        /// Decode tier used once the scrub settles.
+        var settleDecode: ImageSiblingSettleDecode {
+            switch self {
+            case .slow: return .fit
+            case .medium: return .quickThenFit
+            case .fast: return .scrubThenFit
+            }
+        }
+    }
+
+    private enum ImageSiblingSettleDecode {
+        case fit
+        case quickThenFit
+        case scrubThenFit
+    }
+
+    /// Ultra-light sibling step: paint best available placeholder now; decode after pace-based settle.
+    private func scrubToImageSibling(_ next: URL, from previous: URL, forward: Bool) {
+        let now = CFAbsoluteTimeGetCurrent()
+        let interval = imageSiblingScrubLastStepAt > 0 ? (now - imageSiblingScrubLastStepAt) : 1
+        imageSiblingScrubLastStepAt = now
+
+        let startingBurst = imageSiblingScrubSettleWork == nil && !imageSiblingScrubBurstActive
+        if startingBurst {
+            imageSiblingScrubStepCount = 0
+            if !suppressPlaybackHistoryAppend {
+                playbackHistory.append(previous)
+            }
+        }
+        imageSiblingScrubStepCount += 1
+
+        // Any rapid re-step latches burst mode so settle/decode can’t sneak in between taps.
+        if interval < 0.28 || imageSiblingScrubStepCount >= 2 {
+            imageSiblingScrubBurstActive = true
+        }
+
+        let pace: ImageSiblingScrubPace
+        if imageSiblingScrubBurstActive || interval < 0.12 || imageSiblingScrubStepCount >= 2 {
+            pace = .fast
+        } else if interval < 0.28 {
+            pace = .medium
+        } else {
+            pace = .slow
+        }
+
+        currentMediaURL = next
+        lastLoadRequestURL = next.path
+        lastLoadRequestAt = now
+        imageLoadGeneration += 1
+        imageSiblingScrubUpgradeWork?.cancel()
+        imageSiblingScrubUpgradeWork = nil
+
+        imageFolderCarousel.selectSibling(next, scrollMotion: pace.filmstripScrollMotion)
+        paintSiblingScrubPlaceholder(for: next, pace: pace)
+
+        // Only touch chrome on slow — burst keeps previous title/meta until settle.
+        if pace == .slow {
+            refreshImageStudioMetaBar()
+            syncPlayingWindowTitle()
+        }
+
+        // Preload only the next 1–2 ahead during spam — avoid flooding ImageIO.
+        if pace == .fast {
+            if imageSiblingScrubStepCount % 2 == 1 {
+                preloadSiblingScrubPreviews(around: next, forwardBias: forward, radius: 2, aheadOnly: true)
+            }
+        } else {
+            preloadSiblingScrubPreviews(around: next, forwardBias: forward, radius: 2, aheadOnly: false)
+        }
+
+        imageSiblingScrubSettleWork?.cancel()
+        let settleURL = next
+        let settlePace = pace
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.imageSiblingScrubSettleWork = nil
+            self.imageSiblingScrubStepCount = 0
+            self.imageSiblingScrubBurstActive = false
+            guard self.currentMediaURL?.standardizedFileURL == settleURL.standardizedFileURL else { return }
+            self.settleImageSiblingScrub(at: settleURL, pace: settlePace)
+        }
+        imageSiblingScrubSettleWork = work
+        if pace == .slow {
+            DispatchQueue.main.async(execute: work)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + pace.settleDelay, execute: work)
+        }
+    }
+
+    private func paintSiblingScrubPlaceholder(for url: URL, pace: ImageSiblingScrubPace) {
+        // First fast step still clears crop/zoom; later spam steps only swap pixels.
+        let lightweight = pace == .fast && imageSiblingScrubStepCount > 1
+        let key = url.path
+        if let cached = imageSiblingPreviewCache[key] {
+            lastImageSize = cached.pixelSize
+            imageSurfaceView.setScrubPlaceholder(
+                cached.image,
+                naturalSize: cached.pixelSize,
+                faded: pace == .slow,
+                notifyChrome: pace == .slow,
+                lightweight: lightweight
+            )
+            return
+        }
+
+        // Filmstrip thumb + cached aspect only. Never ImageIO on the fast path.
+        let natural = siblingPixelSize(for: url, allowImageIO: false) ?? lastImageSize
+        if let natural, let thumb = imageFolderCarousel.thumbnailImage(for: url) {
+            lastImageSize = natural
+            imageSurfaceView.setScrubPlaceholder(
+                thumb,
+                naturalSize: natural,
+                faded: pace == .slow,
+                notifyChrome: pace == .slow,
+                lightweight: lightweight
+            )
+            return
+        }
+    }
+
+    private func siblingPixelSize(for url: URL, allowImageIO: Bool) -> CGSize? {
+        let key = url.path
+        if let cached = imageSiblingPixelSizeCache[key] { return cached }
+        if let fromPreview = imageSiblingPreviewCache[key]?.pixelSize {
+            imageSiblingPixelSizeCache[key] = fromPreview
+            return fromPreview
+        }
+        guard allowImageIO, let read = ImageDisplayLoader.pixelSize(at: url) else { return nil }
+        imageSiblingPixelSizeCache[key] = read
+        return read
+    }
+
+    private func settleImageSiblingScrub(at url: URL, pace: ImageSiblingScrubPace) {
+        RecentlyViewedStore.shared.record(url: url, kind: .image)
+        imageSelectionSession.setSourceToken(url.path)
+        refreshImageStudioMetaBar()
+        syncPlayingWindowTitle()
+
+        if pace.settleFilmstrip {
+            imageFolderCarousel.settleScrollToSelection()
+        }
+
+        imageLoadGeneration += 1
+        let generation = imageLoadGeneration
+
+        switch pace.settleDecode {
+        case .fit:
+            refreshImageInfoSidebar()
+            decodeSiblingImage(url, generation: generation, tier: .fit, thenUpgrade: false, upgradeDelay: 0)
+            preloadSiblingScrubPreviews(around: url, forwardBias: nil, radius: 2, aheadOnly: false)
+        case .quickThenFit:
+            refreshImageInfoSidebar()
+            decodeSiblingImage(
+                url,
+                generation: generation,
+                tier: .quick,
+                thenUpgrade: true,
+                upgradeDelay: pace.upgradeDelay
+            )
+        case .scrubThenFit:
+            decodeSiblingImage(
+                url,
+                generation: generation,
+                tier: .scrub,
+                thenUpgrade: true,
+                upgradeDelay: pace.upgradeDelay,
+                refreshInfoAfterPaint: true
+            )
+        }
+    }
+
+    private enum ImageSiblingDecodeTier {
+        case scrub
+        case quick
+        case fit
+    }
+
+    private func decodeSiblingImage(
+        _ url: URL,
+        generation: Int,
+        tier: ImageSiblingDecodeTier,
+        thenUpgrade: Bool,
+        upgradeDelay: TimeInterval,
+        refreshInfoAfterPaint: Bool = false
+    ) {
+        // Scrub/quick share a serial queue with preload so spam can’t stampede ImageIO.
+        let queue: DispatchQueue = tier == .fit
+            ? DispatchQueue.global(qos: .userInitiated)
+            : imageSiblingPreloadQueue
+        queue.async { [weak self] in
+            let loaded: (image: NSImage, pixelSize: CGSize)?
+            switch tier {
+            case .scrub:
+                loaded = ImageDisplayLoader.loadScrubPreview(at: url)
+            case .quick:
+                loaded = ImageDisplayLoader.loadQuickPreview(at: url)
+            case .fit:
+                loaded = ImageDisplayLoader.loadDisplayImage(at: url)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard generation == self.imageLoadGeneration else { return }
+                guard self.currentMediaURL?.standardizedFileURL == url.standardizedFileURL else { return }
+                guard let loaded else { return }
+                self.cacheSiblingScrubPreview(loaded, for: url)
+                self.applyDecodedImage(loaded, for: url, replacingPixelsOnly: true)
+                if refreshInfoAfterPaint {
+                    self.refreshImageInfoSidebar()
+                }
+                self.preloadSiblingScrubPreviews(around: url, forwardBias: nil, radius: 2, aheadOnly: false)
+
+                guard thenUpgrade else { return }
+                self.imageSiblingScrubUpgradeWork?.cancel()
+                let upgrade = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    guard generation == self.imageLoadGeneration else { return }
+                    guard self.currentMediaURL?.standardizedFileURL == url.standardizedFileURL else { return }
+                    self.decodeSiblingImage(
+                        url,
+                        generation: generation,
+                        tier: .fit,
+                        thenUpgrade: false,
+                        upgradeDelay: 0
+                    )
+                }
+                self.imageSiblingScrubUpgradeWork = upgrade
+                DispatchQueue.main.asyncAfter(deadline: .now() + upgradeDelay, execute: upgrade)
+            }
+        }
+    }
+
+    private func cacheSiblingScrubPreview(
+        _ loaded: (image: NSImage, pixelSize: CGSize),
+        for url: URL
+    ) {
+        imageSiblingPreviewCache[url.path] = loaded
+        imageSiblingPixelSizeCache[url.path] = loaded.pixelSize
+        // Soft bound so long folders don’t retain every full decode.
+        if imageSiblingPreviewCache.count > 80 {
+            let excess = imageSiblingPreviewCache.keys.prefix(imageSiblingPreviewCache.count - 48)
+            for key in excess {
+                imageSiblingPreviewCache.removeValue(forKey: key)
+                imageSiblingPixelSizeCache.removeValue(forKey: key)
+            }
+        }
+    }
+
+    /// Warm neighbors so the next ←/→ can paint an aspect-correct frame immediately.
+    private func preloadSiblingScrubPreviews(
+        around url: URL,
+        forwardBias: Bool?,
+        radius: Int,
+        aheadOnly: Bool
+    ) {
+        let urls = imageFolderSiblings.map(\.url)
+        guard let index = urls.firstIndex(where: { $0.standardizedFileURL == url.standardizedFileURL }) else {
+            return
+        }
+        var targets: [URL] = []
+        let primaryForward = forwardBias ?? true
+        for offset in 1...max(radius, 1) {
+            let primaryIndex = primaryForward ? index + offset : index - offset
+            if urls.indices.contains(primaryIndex) {
+                targets.append(urls[primaryIndex])
+            }
+            if !aheadOnly {
+                let secondaryIndex = primaryForward ? index - offset : index + offset
+                if urls.indices.contains(secondaryIndex) {
+                    targets.append(urls[secondaryIndex])
+                }
+            }
+        }
+        for target in targets {
+            let key = target.path
+            if imageSiblingPreviewCache[key] != nil { continue }
+            if imageSiblingPreloadInFlight.contains(key) { continue }
+            imageSiblingPreloadInFlight.insert(key)
+            imageSiblingPreloadQueue.async { [weak self] in
+                let loaded = ImageDisplayLoader.loadScrubPreview(at: target)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.imageSiblingPreloadInFlight.remove(key)
+                    guard let loaded else { return }
+                    if self.imageSiblingPreviewCache[key] == nil {
+                        self.cacheSiblingScrubPreview(loaded, for: target)
+                    }
+                }
+            }
+        }
+    }
+
     func commandStepPlaybackSpeed(by delta: Int) {
         guard activeMediaKind == .video else { return }
         stepPlaybackSpeed(by: delta)
@@ -11279,9 +12069,17 @@ extension PlayerViewController {
                     commandSeek(bySeconds: -Self.standardSeekSeconds)
                     return true
                 }
+                if activeMediaKind == .image {
+                    commandStepImageSibling(forward: false)
+                    return true
+                }
             case 124:
                 if activeMediaKind == .video {
                     commandSeek(bySeconds: Self.standardSeekSeconds)
+                    return true
+                }
+                if activeMediaKind == .image {
+                    commandStepImageSibling(forward: true)
                     return true
                 }
             case 126:
@@ -11360,6 +12158,9 @@ final class ImageSurfaceView: NSView {
     var onSelectionClick: ((CGPoint, Bool, Bool) -> Void)?
     /// Click Select box in source pixels.
     var onSelectionBox: ((CGRect, Bool) -> Void)?
+    /// Develop tool sample (WB eyedropper / vignette center) in source pixels.
+    var onDevelopSample: ((CGPoint) -> Void)?
+    var developSampleEnabled = false
 
     private let imageView = NSImageView()
     private let cropOverlay = ImageCropOverlayView()
@@ -11563,6 +12364,85 @@ final class ImageSurfaceView: NSView {
         onCropChanged?()
     }
 
+    /// Swap decoded pixels after a quick preview without resetting zoom / crop / selection.
+    func replaceBaseImage(_ image: NSImage, naturalSize: CGSize) {
+        baseImage = image
+        naturalPixelSize = naturalSize
+        rebuildSourceCIImages(from: image)
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        window?.invalidateCursorRects(for: self)
+        onZoomScaleChanged?()
+    }
+
+    /// Hold-to-scrub placeholder: paint without CI rebuild. Optional short fade for slow steps.
+    /// `lightweight: true` only swaps pixels (fast arrow spam) — no edit-state / layout thrash.
+    func setScrubPlaceholder(
+        _ image: NSImage,
+        naturalSize: CGSize,
+        faded: Bool = false,
+        notifyChrome: Bool = true,
+        lightweight: Bool = false
+    ) {
+        if lightweight {
+            let aspectChanged =
+                abs(naturalPixelSize.width - naturalSize.width) > 0.5
+                || abs(naturalPixelSize.height - naturalSize.height) > 0.5
+            baseImage = image
+            naturalPixelSize = naturalSize
+            baseCIImage = nil
+            previewCIImage = nil
+            cachedSourceToken = nil
+            if imageView.layer != nil {
+                imageView.layer?.removeAnimation(forKey: "scrubFade")
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            imageView.image = image
+            CATransaction.commit()
+            if aspectChanged {
+                needsLayout = true
+            }
+            return
+        }
+
+        baseImage = image
+        naturalPixelSize = naturalSize
+        baseCIImage = nil
+        previewCIImage = nil
+        cachedSourceToken = nil
+        rotationQuarterTurns = 0
+        flipHorizontal = false
+        flipVertical = false
+        appliedCropNormalized = nil
+        appliedStraightenRadians = 0
+        draftStraightenRadians = 0
+        if isCropMode { exitCropMode(apply: false) }
+        zoomScale = 1.0
+        panOffset = .zero
+        selectionMask = nil
+        selectionDisplayMode = .none
+        syncMarchingAntsAnimation()
+        if faded, imageView.layer != nil {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.05
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            imageView.layer?.add(transition, forKey: "scrubFade")
+        } else if imageView.layer != nil {
+            imageView.layer?.removeAnimation(forKey: "scrubFade")
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageView.image = image
+        CATransaction.commit()
+        needsLayout = true
+        if notifyChrome {
+            onZoomScaleChanged?()
+            onCropChanged?()
+        }
+    }
+
     func clearImage() {
         baseImage = nil
         baseCIImage = nil
@@ -11694,6 +12574,13 @@ final class ImageSurfaceView: NSView {
             onDoubleClick?()
             return
         }
+        if developSampleEnabled, !selectionBrushEnabled, !selectionClickEnabled {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if let pixel = selectionPixelPoint(fromViewPoint: viewPoint) {
+                onDevelopSample?(pixel)
+                return
+            }
+        }
         if selectionBrushEnabled, selectionMask != nil {
             let viewPoint = convert(event.locationInWindow, from: nil)
             brushCursorViewPoint = viewPoint
@@ -11727,6 +12614,13 @@ final class ImageSurfaceView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if developSampleEnabled, !selectionBrushEnabled, !selectionClickEnabled {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if let pixel = selectionPixelPoint(fromViewPoint: viewPoint) {
+                onDevelopSample?(pixel)
+                return
+            }
+        }
         if isBrushing {
             let viewPoint = convert(event.locationInWindow, from: nil)
             brushCursorViewPoint = viewPoint
@@ -11958,6 +12852,32 @@ final class ImageSurfaceView: NSView {
 
     /// Base CIImage in source pixel space for selection providers.
     var selectionSourceCIImage: CIImage? { baseCIImage }
+
+    /// Average linear RGB in a 3×3 neighborhood around a source-pixel point.
+    func sampleLinearRGB(at pixel: CGPoint) -> (r: Double, g: Double, b: Double)? {
+        guard let baseCIImage else { return nil }
+        let extent = baseCIImage.extent
+        let x = min(max(pixel.x - 1.5, extent.minX), max(extent.minX, extent.maxX - 3))
+        let y = min(max(pixel.y - 1.5, extent.minY), max(extent.minY, extent.maxY - 3))
+        let rect = CGRect(x: x, y: y, width: 3, height: 3)
+        var bitmap = [Float](repeating: 0, count: 4 * 9)
+        ciContext.render(
+            baseCIImage,
+            toBitmap: &bitmap,
+            rowBytes: 3 * MemoryLayout<Float>.size * 4,
+            bounds: rect,
+            format: .RGBAf,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        var r = 0.0, g = 0.0, b = 0.0
+        for i in 0..<9 {
+            let o = i * 4
+            r += Double(bitmap[o])
+            g += Double(bitmap[o + 1])
+            b += Double(bitmap[o + 2])
+        }
+        return (r / 9, g / 9, b / 9)
+    }
 
     func setSelectionBrushEnabled(_ enabled: Bool) {
         selectionBrushEnabled = enabled

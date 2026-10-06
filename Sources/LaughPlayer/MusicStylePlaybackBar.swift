@@ -28,7 +28,12 @@ enum MusicStylePlaybackBar {
     static let minBarWidthCompact: CGFloat = 280
     /// Medium corner radius for the floating playback bar.
     static let barCornerRadius: CGFloat = 12
-    static let accessoryButtonHeight: CGFloat = 28
+    /// Shared hit target for library / transport / mute / subtitle chrome.
+    static let controlSize: CGFloat = 28
+    static let controlIconPointSize: CGFloat = 13
+    /// Play/pause stays in the same hit box; glyph is slightly larger for primacy.
+    static let playPauseIconPointSize: CGFloat = 18
+    static let accessoryButtonHeight: CGFloat = controlSize
     static let barBottomInsetLow: CGFloat = 24
     static let barBottomInsetHigh: CGFloat = 100
     static let barBottomInsetRampStart: CGFloat = 720
@@ -75,8 +80,8 @@ enum MusicStylePlaybackBar {
         layer.shadowPath = rounded
     }
 
-    static func iconButton(symbolName: String, accessibilityLabel: String, pointSize: CGFloat = 16) -> NSButton {
-        let button = NSButton()
+    static func iconButton(symbolName: String, accessibilityLabel: String, pointSize: CGFloat = 16) -> ChromeHoverButton {
+        let button = ChromeHoverButton()
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.title = ""
@@ -87,6 +92,7 @@ enum MusicStylePlaybackBar {
             button.image?.isTemplate = true
         }
         button.setContentHuggingPriority(.required, for: .horizontal)
+        button.idleTintColor = accessoryIconTintColor
         return button
     }
 
@@ -96,8 +102,8 @@ enum MusicStylePlaybackBar {
         button.title = ""
         button.alphaValue = 1
         button.toolTip = "Toggle subtitles"
-        button.contentTintColor = accessoryIconTintColor
-        pinButtonSize(button, width: 26, height: accessoryButtonHeight)
+        button.idleTintColor = accessoryIconTintColor
+        pinButtonSize(button, width: controlSize, height: controlSize)
     }
 
     /// Same grey as other playback-bar accessory symbols (library, etc.).
@@ -111,7 +117,7 @@ enum MusicStylePlaybackBar {
         ])
     }
 
-    static func playPauseButton(pointSize: CGFloat = 22) -> NSButton {
+    static func playPauseButton(pointSize: CGFloat = 22) -> ChromeHoverButton {
         let button = iconButton(symbolName: "play.fill", accessibilityLabel: "Play", pointSize: pointSize)
         button.setButtonType(.momentaryPushIn)
         return button

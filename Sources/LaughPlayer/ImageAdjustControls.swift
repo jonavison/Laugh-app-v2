@@ -10,9 +10,11 @@ final class ImageAdjustControls: NSObject {
     let shadowsSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let whitesSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let blacksSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let smartContrastSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     let exposureValueLabel = NSTextField(labelWithString: "0.00")
     let brightnessValueLabel = NSTextField(labelWithString: "0.00")
     let contrastValueLabel = NSTextField(labelWithString: "1.00")
+    let smartContrastValueLabel = NSTextField(labelWithString: "0.00")
     let highlightsValueLabel = NSTextField(labelWithString: "1.00")
     let shadowsValueLabel = NSTextField(labelWithString: "0.00")
     let whitesValueLabel = NSTextField(labelWithString: "0.00")
@@ -24,6 +26,7 @@ final class ImageAdjustControls: NSObject {
     let hueSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let temperatureSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let tintSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let whiteBalanceEyedropperButton = NSButton(title: "", target: nil, action: nil)
     let colorBalanceSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let splitHighlightSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let splitShadowSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
@@ -96,34 +99,78 @@ final class ImageAdjustControls: NSObject {
     let bwContrastValueLabel = NSTextField(labelWithString: "+0.15")
     let bwWarmthValueLabel = NSTextField(labelWithString: "0.00")
 
-    // Details / Denoise
+    // Details / Noise Reduction
     let sharpnessSlider = NSSlider(value: 0, minValue: 0, maxValue: 2, target: nil, action: nil)
+    let sharpenRadiusSlider = NSSlider(value: 0.4, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let sharpenDetailSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
     let definitionSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let structureSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let denoiseSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let denoiseColorSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let denoiseDetailSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
     let sharpnessValueLabel = NSTextField(labelWithString: "0.00")
+    let sharpenRadiusValueLabel = NSTextField(labelWithString: "0.40")
+    let sharpenDetailValueLabel = NSTextField(labelWithString: "0.50")
     let definitionValueLabel = NSTextField(labelWithString: "0.00")
     let structureValueLabel = NSTextField(labelWithString: "0.00")
     let denoiseValueLabel = NSTextField(labelWithString: "0.00")
+    let denoiseColorValueLabel = NSTextField(labelWithString: "0.00")
+    let denoiseDetailValueLabel = NSTextField(labelWithString: "0.50")
 
-    // Vignette / Dodge & Burn
+    // Curves / HSL
+    let curveChannelPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let curveEditor = ImageToneCurveEditorView()
+    let hslChannelPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let hslHueSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let hslSatSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let hslLumaSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let hslHueValueLabel = NSTextField(labelWithString: "0.00")
+    let hslSatValueLabel = NSTextField(labelWithString: "0.00")
+    let hslLumaValueLabel = NSTextField(labelWithString: "0.00")
+
+    // Vignette / Dodge & Burn / Optics
     let vignetteSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     let vignetteMidpointSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let vignetteCenterXSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let vignetteCenterYSlider = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
     let vignetteValueLabel = NSTextField(labelWithString: "0.00")
     let vignetteMidpointValueLabel = NSTextField(labelWithString: "0.50")
+    let vignetteCenterXValueLabel = NSTextField(labelWithString: "0.50")
+    let vignetteCenterYValueLabel = NSTextField(labelWithString: "0.50")
     let dodgeBurnSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let dodgeBurnRangeSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     let dodgeBurnSoftnessSlider = NSSlider(value: 0.45, minValue: 0, maxValue: 1, target: nil, action: nil)
     let dodgeBurnValueLabel = NSTextField(labelWithString: "0.00")
     let dodgeBurnRangeValueLabel = NSTextField(labelWithString: "0.00")
     let dodgeBurnSoftnessValueLabel = NSTextField(labelWithString: "0.45")
+    let distortionSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
+    let chromaticAberrationSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let defringePurpleSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let defringeGreenSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let distortionValueLabel = NSTextField(labelWithString: "0.00")
+    let chromaticAberrationValueLabel = NSTextField(labelWithString: "0.00")
+    let defringePurpleValueLabel = NSTextField(labelWithString: "0.00")
+    let defringeGreenValueLabel = NSTextField(labelWithString: "0.00")
+
+    /// Fired when the Color WB eyedropper is toggled on.
+    var onWhiteBalanceEyedropperToggle: ((Bool) -> Void)?
+    private(set) var isWhiteBalanceEyedropperActive = false
+
+    private var curveLuma = ImageAdjustParameters.identityCurve
+    private var curveRed = ImageAdjustParameters.identityCurve
+    private var curveGreen = ImageAdjustParameters.identityCurve
+    private var curveBlue = ImageAdjustParameters.identityCurve
+    private var hslHue = Array(repeating: 0.0, count: ImageAdjustParameters.hslChannelCount)
+    private var hslSat = Array(repeating: 0.0, count: ImageAdjustParameters.hslChannelCount)
+    private var hslLuma = Array(repeating: 0.0, count: ImageAdjustParameters.hslChannelCount)
 
     private weak var session: ImageAdjustSession?
     private var isPullingFromSession = false
 
     private var allSliders: [NSSlider] {
         [
-            exposureSlider, brightnessSlider, contrastSlider, highlightsSlider, shadowsSlider,
+            exposureSlider, brightnessSlider, contrastSlider, smartContrastSlider,
+            highlightsSlider, shadowsSlider,
             whitesSlider, blacksSlider,
             saturationSlider, vibranceSlider, hueSlider, temperatureSlider, tintSlider,
             colorBalanceSlider, splitHighlightSlider, splitShadowSlider, splitAmountSlider,
@@ -136,18 +183,23 @@ final class ImageAdjustControls: NSObject {
             sunraysSlider, sunraysLengthSlider, sunraysWarmthSlider,
             landscapeSlider, landscapeFoliageSlider, landscapeSkySlider,
             blackAndWhiteSlider, bwContrastSlider, bwWarmthSlider,
-            sharpnessSlider, definitionSlider, structureSlider, denoiseSlider,
-            vignetteSlider, vignetteMidpointSlider,
-            dodgeBurnSlider, dodgeBurnRangeSlider, dodgeBurnSoftnessSlider
+            sharpnessSlider, sharpenRadiusSlider, sharpenDetailSlider,
+            definitionSlider, structureSlider,
+            denoiseSlider, denoiseColorSlider, denoiseDetailSlider,
+            hslHueSlider, hslSatSlider, hslLumaSlider,
+            vignetteSlider, vignetteMidpointSlider, vignetteCenterXSlider, vignetteCenterYSlider,
+            dodgeBurnSlider, dodgeBurnRangeSlider, dodgeBurnSoftnessSlider,
+            distortionSlider, chromaticAberrationSlider, defringePurpleSlider, defringeGreenSlider
         ]
     }
 
     private var allValueLabels: [NSTextField] {
         [
-            exposureValueLabel, brightnessValueLabel, contrastValueLabel, highlightsValueLabel, shadowsValueLabel,
+            exposureValueLabel, brightnessValueLabel, contrastValueLabel, smartContrastValueLabel,
+            highlightsValueLabel, shadowsValueLabel,
             whitesValueLabel, blacksValueLabel,
             saturationValueLabel, vibranceValueLabel, hueValueLabel, temperatureValueLabel, tintValueLabel,
-            colorBalanceValueLabel, splitHighlightValueLabel, splitShadowValueLabel,             splitAmountValueLabel,
+            colorBalanceValueLabel, splitHighlightValueLabel, splitShadowValueLabel, splitAmountValueLabel,
             dramaticValueLabel,
             moodValueLabel,
             matteValueLabel,
@@ -177,12 +229,21 @@ final class ImageAdjustControls: NSObject {
             blackAndWhiteValueLabel,
             bwContrastValueLabel,
             bwWarmthValueLabel,
-            sharpnessValueLabel, definitionValueLabel, structureValueLabel, denoiseValueLabel,
+            sharpnessValueLabel, sharpenRadiusValueLabel, sharpenDetailValueLabel,
+            definitionValueLabel, structureValueLabel,
+            denoiseValueLabel, denoiseColorValueLabel, denoiseDetailValueLabel,
+            hslHueValueLabel, hslSatValueLabel, hslLumaValueLabel,
             vignetteValueLabel,
             vignetteMidpointValueLabel,
+            vignetteCenterXValueLabel,
+            vignetteCenterYValueLabel,
             dodgeBurnValueLabel,
             dodgeBurnRangeValueLabel,
-            dodgeBurnSoftnessValueLabel
+            dodgeBurnSoftnessValueLabel,
+            distortionValueLabel,
+            chromaticAberrationValueLabel,
+            defringePurpleValueLabel,
+            defringeGreenValueLabel
         ]
     }
 
@@ -191,6 +252,7 @@ final class ImageAdjustControls: NSObject {
             exposure: exposureSlider.doubleValue,
             brightness: brightnessSlider.doubleValue,
             contrast: contrastSlider.doubleValue,
+            smartContrast: smartContrastSlider.doubleValue,
             highlights: highlightsSlider.doubleValue,
             shadows: shadowsSlider.doubleValue,
             whites: whitesSlider.doubleValue,
@@ -204,6 +266,13 @@ final class ImageAdjustControls: NSObject {
             splitHighlight: splitHighlightSlider.doubleValue,
             splitShadow: splitShadowSlider.doubleValue,
             splitAmount: splitAmountSlider.doubleValue,
+            curveLuma: curveLuma,
+            curveRed: curveRed,
+            curveGreen: curveGreen,
+            curveBlue: curveBlue,
+            hslHue: hslHue,
+            hslSat: hslSat,
+            hslLuma: hslLuma,
             dramatic: dramaticSlider.doubleValue,
             mood: moodSlider.doubleValue,
             matte: matteSlider.doubleValue,
@@ -234,14 +303,24 @@ final class ImageAdjustControls: NSObject {
             bwContrast: bwContrastSlider.doubleValue,
             bwWarmth: bwWarmthSlider.doubleValue,
             sharpness: sharpnessSlider.doubleValue,
+            sharpenRadius: sharpenRadiusSlider.doubleValue,
+            sharpenDetail: sharpenDetailSlider.doubleValue,
             definition: definitionSlider.doubleValue,
             structure: structureSlider.doubleValue,
             denoise: denoiseSlider.doubleValue,
+            denoiseColor: denoiseColorSlider.doubleValue,
+            denoiseDetail: denoiseDetailSlider.doubleValue,
             vignette: vignetteSlider.doubleValue,
             vignetteMidpoint: vignetteMidpointSlider.doubleValue,
+            vignetteCenterX: vignetteCenterXSlider.doubleValue,
+            vignetteCenterY: vignetteCenterYSlider.doubleValue,
             dodgeBurn: dodgeBurnSlider.doubleValue,
             dodgeBurnRange: dodgeBurnRangeSlider.doubleValue,
-            dodgeBurnSoftness: dodgeBurnSoftnessSlider.doubleValue
+            dodgeBurnSoftness: dodgeBurnSoftnessSlider.doubleValue,
+            distortion: distortionSlider.doubleValue,
+            chromaticAberration: chromaticAberrationSlider.doubleValue,
+            defringePurple: defringePurpleSlider.doubleValue,
+            defringeGreen: defringeGreenSlider.doubleValue
         )
     }
 
@@ -250,11 +329,17 @@ final class ImageAdjustControls: NSObject {
         session.onParametersCommitted = { [weak self] in
             self?.pullFromSession()
         }
+        // Capture construction defaults (= identity) before any session pull overwrites them.
+        installParameterResetDefaults()
+        configureCurveAndHSLChrome()
+        configureWhiteBalanceEyedropper()
+        installSemanticTrackChrome()
         for slider in allSliders {
             slider.isContinuous = true
             slider.controlSize = .small
             slider.target = self
-            slider.action = #selector(sliderChanged)
+            slider.action = #selector(sliderChanged(_:))
+            slider.toolTip = "Double-click the knob to reset"
         }
         for label in allValueLabels {
             label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
@@ -263,6 +348,116 @@ final class ImageAdjustControls: NSObject {
             label.setContentHuggingPriority(.required, for: .horizontal)
         }
         pullFromSession()
+    }
+
+    func setWhiteBalanceEyedropperActive(_ active: Bool) {
+        isWhiteBalanceEyedropperActive = active
+        refreshEyedropperChrome()
+    }
+
+    func applyWhiteBalanceSample(temperature: Double, tint: Double) {
+        temperatureSlider.doubleValue = max(-1, min(1, temperature))
+        tintSlider.doubleValue = max(-1, min(1, tint))
+        isWhiteBalanceEyedropperActive = false
+        refreshEyedropperChrome()
+        refreshValueLabels()
+        session?.apply(parametersFromSliders, quality: .full, clearBypasses: false)
+        onWhiteBalanceEyedropperToggle?(false)
+    }
+
+    func setVignetteCenter(x: Double, y: Double) {
+        vignetteCenterXSlider.doubleValue = max(0, min(1, x))
+        vignetteCenterYSlider.doubleValue = max(0, min(1, y))
+        refreshValueLabels()
+        session?.replaceParameters(parametersFromSliders)
+    }
+
+    private func configureCurveAndHSLChrome() {
+        curveChannelPopUp.removeAllItems()
+        curveChannelPopUp.addItems(withTitles: ["Luma", "Red", "Green", "Blue"])
+        curveChannelPopUp.target = self
+        curveChannelPopUp.action = #selector(curveChannelChanged)
+        curveEditor.onCurveChange = { [weak self] points in
+            guard let self else { return }
+            switch self.curveChannelPopUp.indexOfSelectedItem {
+            case 1: self.curveRed = points
+            case 2: self.curveGreen = points
+            case 3: self.curveBlue = points
+            default: self.curveLuma = points
+            }
+            self.session?.replaceParameters(self.parametersFromSliders)
+        }
+
+        hslChannelPopUp.removeAllItems()
+        hslChannelPopUp.addItems(withTitles: ["Reds", "Oranges", "Yellows", "Greens", "Aquas", "Blues", "Purples", "Magentas"])
+        hslChannelPopUp.target = self
+        hslChannelPopUp.action = #selector(hslChannelChanged)
+    }
+
+    private func configureWhiteBalanceEyedropper() {
+        whiteBalanceEyedropperButton.bezelStyle = .accessoryBarAction
+        whiteBalanceEyedropperButton.isBordered = false
+        whiteBalanceEyedropperButton.setButtonType(.toggle)
+        whiteBalanceEyedropperButton.toolTip = "White Balance eyedropper"
+        whiteBalanceEyedropperButton.target = self
+        whiteBalanceEyedropperButton.action = #selector(whiteBalanceEyedropperPressed)
+        if let image = NSImage(systemSymbolName: "eyedropper.halffull", accessibilityDescription: "White Balance eyedropper") {
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            whiteBalanceEyedropperButton.image = image.withSymbolConfiguration(config)
+            whiteBalanceEyedropperButton.image?.isTemplate = true
+        }
+        whiteBalanceEyedropperButton.contentTintColor = .secondaryLabelColor
+        NSLayoutConstraint.activate([
+            whiteBalanceEyedropperButton.widthAnchor.constraint(equalToConstant: 28),
+            whiteBalanceEyedropperButton.heightAnchor.constraint(equalToConstant: 28)
+        ])
+    }
+
+    private func installSemanticTrackChrome() {
+        saturationSlider.applySemanticTrack(.saturation)
+        vibranceSlider.applySemanticTrack(.vibrance)
+        hueSlider.applySemanticTrack(.hue)
+        temperatureSlider.applySemanticTrack(.temperature)
+        tintSlider.applySemanticTrack(.tint)
+        colorBalanceSlider.applySemanticTrack(.colorBalance)
+        splitHighlightSlider.applySemanticTrack(.splitHighlight)
+        splitShadowSlider.applySemanticTrack(.splitShadow)
+        hslHueSlider.applySemanticTrack(.hue)
+        hslSatSlider.applySemanticTrack(.saturation)
+        blackAndWhiteSlider.applySemanticTrack(.blackAndWhiteAmount)
+        bwWarmthSlider.applySemanticTrack(.blackAndWhiteWarmth)
+    }
+
+    @objc private func curveChannelChanged() {
+        switch curveChannelPopUp.indexOfSelectedItem {
+        case 1: curveEditor.setCurve(curveRed)
+        case 2: curveEditor.setCurve(curveGreen)
+        case 3: curveEditor.setCurve(curveBlue)
+        default: curveEditor.setCurve(curveLuma)
+        }
+    }
+
+    @objc private func hslChannelChanged() {
+        let idx = max(0, min(ImageAdjustParameters.hslChannelCount - 1, hslChannelPopUp.indexOfSelectedItem))
+        isPullingFromSession = true
+        hslHueSlider.doubleValue = hslHue[idx]
+        hslSatSlider.doubleValue = hslSat[idx]
+        hslLumaSlider.doubleValue = hslLuma[idx]
+        isPullingFromSession = false
+        refreshValueLabels()
+    }
+
+    @objc private func whiteBalanceEyedropperPressed() {
+        isWhiteBalanceEyedropperActive.toggle()
+        refreshEyedropperChrome()
+        onWhiteBalanceEyedropperToggle?(isWhiteBalanceEyedropperActive)
+    }
+
+    private func refreshEyedropperChrome() {
+        whiteBalanceEyedropperButton.state = isWhiteBalanceEyedropperActive ? .on : .off
+        whiteBalanceEyedropperButton.contentTintColor = isWhiteBalanceEyedropperActive
+            ? LaughTheme.interactiveAccent
+            : .secondaryLabelColor
     }
 
     /// Sync widgets from the session after presets / reset / external apply.
@@ -274,16 +469,100 @@ final class ImageAdjustControls: NSObject {
         refreshValueLabels()
     }
 
-    @objc private func sliderChanged() {
+    @objc private func sliderChanged(_ sender: Any?) {
         guard !isPullingFromSession else { return }
+        // Keep HSL arrays in sync with the active channel sliders.
+        let hslIdx = max(0, min(ImageAdjustParameters.hslChannelCount - 1, hslChannelPopUp.indexOfSelectedItem))
+        hslHue[hslIdx] = hslHueSlider.doubleValue
+        hslSat[hslIdx] = hslSatSlider.doubleValue
+        hslLuma[hslIdx] = hslLumaSlider.doubleValue
         refreshValueLabels()
-        session?.replaceParameters(parametersFromSliders)
+        // Double-click reset commits full quality; drag stays on the preview→settle path.
+        if let event = NSApp.currentEvent, event.clickCount >= 2 {
+            session?.apply(parametersFromSliders, quality: .full, clearBypasses: false)
+        } else {
+            session?.replaceParameters(parametersFromSliders)
+        }
+    }
+
+    /// Identity values for double-click-on-knob reset (Lightroom-style).
+    private func installParameterResetDefaults() {
+        let identity = ImageAdjustParameters.identity
+        exposureSlider.parameterResetValue = identity.exposure
+        brightnessSlider.parameterResetValue = identity.brightness
+        contrastSlider.parameterResetValue = identity.contrast
+        smartContrastSlider.parameterResetValue = identity.smartContrast
+        highlightsSlider.parameterResetValue = identity.highlights
+        shadowsSlider.parameterResetValue = identity.shadows
+        whitesSlider.parameterResetValue = identity.whites
+        blacksSlider.parameterResetValue = identity.blacks
+        saturationSlider.parameterResetValue = identity.saturation
+        vibranceSlider.parameterResetValue = identity.vibrance
+        hueSlider.parameterResetValue = identity.hue
+        temperatureSlider.parameterResetValue = identity.temperature
+        tintSlider.parameterResetValue = identity.tint
+        colorBalanceSlider.parameterResetValue = identity.colorBalance
+        splitHighlightSlider.parameterResetValue = identity.splitHighlight
+        splitShadowSlider.parameterResetValue = identity.splitShadow
+        splitAmountSlider.parameterResetValue = identity.splitAmount
+        dramaticSlider.parameterResetValue = identity.dramatic
+        moodSlider.parameterResetValue = identity.mood
+        matteSlider.parameterResetValue = identity.matte
+        glowSlider.parameterResetValue = identity.glow
+        glowRadiusSlider.parameterResetValue = identity.glowRadius
+        blurSlider.parameterResetValue = identity.blur
+        filmGrainSlider.parameterResetValue = identity.filmGrain
+        filmGrainSizeSlider.parameterResetValue = identity.filmGrainSize
+        mysticalSlider.parameterResetValue = identity.mystical
+        mysticalHazeSlider.parameterResetValue = identity.mysticalHaze
+        mysticalHueSlider.parameterResetValue = identity.mysticalHue
+        toningAmountSlider.parameterResetValue = identity.toningAmount
+        toningHighlightsSlider.parameterResetValue = identity.toningHighlights
+        toningShadowsSlider.parameterResetValue = identity.toningShadows
+        highKeySlider.parameterResetValue = identity.highKey
+        highKeySoftnessSlider.parameterResetValue = identity.highKeySoftness
+        supercontrastSlider.parameterResetValue = identity.supercontrast
+        supercontrastMidtonesSlider.parameterResetValue = identity.supercontrastMidtones
+        colorHarmonySlider.parameterResetValue = identity.colorHarmony
+        colorHarmonyBalanceSlider.parameterResetValue = identity.colorHarmonyBalance
+        sunraysSlider.parameterResetValue = identity.sunrays
+        sunraysLengthSlider.parameterResetValue = identity.sunraysLength
+        sunraysWarmthSlider.parameterResetValue = identity.sunraysWarmth
+        landscapeSlider.parameterResetValue = identity.landscape
+        landscapeFoliageSlider.parameterResetValue = identity.landscapeFoliage
+        landscapeSkySlider.parameterResetValue = identity.landscapeSky
+        blackAndWhiteSlider.parameterResetValue = identity.blackAndWhite
+        bwContrastSlider.parameterResetValue = identity.bwContrast
+        bwWarmthSlider.parameterResetValue = identity.bwWarmth
+        sharpnessSlider.parameterResetValue = identity.sharpness
+        sharpenRadiusSlider.parameterResetValue = identity.sharpenRadius
+        sharpenDetailSlider.parameterResetValue = identity.sharpenDetail
+        definitionSlider.parameterResetValue = identity.definition
+        structureSlider.parameterResetValue = identity.structure
+        denoiseSlider.parameterResetValue = identity.denoise
+        denoiseColorSlider.parameterResetValue = identity.denoiseColor
+        denoiseDetailSlider.parameterResetValue = identity.denoiseDetail
+        hslHueSlider.parameterResetValue = 0
+        hslSatSlider.parameterResetValue = 0
+        hslLumaSlider.parameterResetValue = 0
+        vignetteSlider.parameterResetValue = identity.vignette
+        vignetteMidpointSlider.parameterResetValue = identity.vignetteMidpoint
+        vignetteCenterXSlider.parameterResetValue = identity.vignetteCenterX
+        vignetteCenterYSlider.parameterResetValue = identity.vignetteCenterY
+        dodgeBurnSlider.parameterResetValue = identity.dodgeBurn
+        dodgeBurnRangeSlider.parameterResetValue = identity.dodgeBurnRange
+        dodgeBurnSoftnessSlider.parameterResetValue = identity.dodgeBurnSoftness
+        distortionSlider.parameterResetValue = identity.distortion
+        chromaticAberrationSlider.parameterResetValue = identity.chromaticAberration
+        defringePurpleSlider.parameterResetValue = identity.defringePurple
+        defringeGreenSlider.parameterResetValue = identity.defringeGreen
     }
 
     private func writeSliders(from parameters: ImageAdjustParameters) {
         exposureSlider.doubleValue = parameters.exposure
         brightnessSlider.doubleValue = parameters.brightness
         contrastSlider.doubleValue = parameters.contrast
+        smartContrastSlider.doubleValue = parameters.smartContrast
         highlightsSlider.doubleValue = parameters.highlights
         shadowsSlider.doubleValue = parameters.shadows
         whitesSlider.doubleValue = parameters.whites
@@ -297,6 +576,13 @@ final class ImageAdjustControls: NSObject {
         splitHighlightSlider.doubleValue = parameters.splitHighlight
         splitShadowSlider.doubleValue = parameters.splitShadow
         splitAmountSlider.doubleValue = parameters.splitAmount
+        curveLuma = parameters.curveLuma
+        curveRed = parameters.curveRed
+        curveGreen = parameters.curveGreen
+        curveBlue = parameters.curveBlue
+        hslHue = parameters.hslHue
+        hslSat = parameters.hslSat
+        hslLuma = parameters.hslLuma
         dramaticSlider.doubleValue = parameters.dramatic
         moodSlider.doubleValue = parameters.mood
         matteSlider.doubleValue = parameters.matte
@@ -327,20 +613,33 @@ final class ImageAdjustControls: NSObject {
         bwContrastSlider.doubleValue = parameters.bwContrast
         bwWarmthSlider.doubleValue = parameters.bwWarmth
         sharpnessSlider.doubleValue = parameters.sharpness
+        sharpenRadiusSlider.doubleValue = parameters.sharpenRadius
+        sharpenDetailSlider.doubleValue = parameters.sharpenDetail
         definitionSlider.doubleValue = parameters.definition
         structureSlider.doubleValue = parameters.structure
         denoiseSlider.doubleValue = parameters.denoise
+        denoiseColorSlider.doubleValue = parameters.denoiseColor
+        denoiseDetailSlider.doubleValue = parameters.denoiseDetail
         vignetteSlider.doubleValue = parameters.vignette
         vignetteMidpointSlider.doubleValue = parameters.vignetteMidpoint
+        vignetteCenterXSlider.doubleValue = parameters.vignetteCenterX
+        vignetteCenterYSlider.doubleValue = parameters.vignetteCenterY
         dodgeBurnSlider.doubleValue = parameters.dodgeBurn
         dodgeBurnRangeSlider.doubleValue = parameters.dodgeBurnRange
         dodgeBurnSoftnessSlider.doubleValue = parameters.dodgeBurnSoftness
+        distortionSlider.doubleValue = parameters.distortion
+        chromaticAberrationSlider.doubleValue = parameters.chromaticAberration
+        defringePurpleSlider.doubleValue = parameters.defringePurple
+        defringeGreenSlider.doubleValue = parameters.defringeGreen
+        curveChannelChanged()
+        hslChannelChanged()
     }
 
     private func refreshValueLabels() {
         exposureValueLabel.stringValue = String(format: "%+.2f", exposureSlider.doubleValue)
         brightnessValueLabel.stringValue = String(format: "%+.2f", brightnessSlider.doubleValue)
         contrastValueLabel.stringValue = String(format: "%.2f", contrastSlider.doubleValue)
+        smartContrastValueLabel.stringValue = String(format: "%.2f", smartContrastSlider.doubleValue)
         highlightsValueLabel.stringValue = String(format: "%.2f", highlightsSlider.doubleValue)
         shadowsValueLabel.stringValue = String(format: "%+.2f", shadowsSlider.doubleValue)
         whitesValueLabel.stringValue = String(format: "%+.2f", whitesSlider.doubleValue)
@@ -384,13 +683,26 @@ final class ImageAdjustControls: NSObject {
         bwContrastValueLabel.stringValue = String(format: "%+.2f", bwContrastSlider.doubleValue)
         bwWarmthValueLabel.stringValue = String(format: "%+.2f", bwWarmthSlider.doubleValue)
         sharpnessValueLabel.stringValue = String(format: "%.2f", sharpnessSlider.doubleValue)
+        sharpenRadiusValueLabel.stringValue = String(format: "%.2f", sharpenRadiusSlider.doubleValue)
+        sharpenDetailValueLabel.stringValue = String(format: "%.2f", sharpenDetailSlider.doubleValue)
         definitionValueLabel.stringValue = String(format: "%+.2f", definitionSlider.doubleValue)
         structureValueLabel.stringValue = String(format: "%+.2f", structureSlider.doubleValue)
         denoiseValueLabel.stringValue = String(format: "%.2f", denoiseSlider.doubleValue)
+        denoiseColorValueLabel.stringValue = String(format: "%.2f", denoiseColorSlider.doubleValue)
+        denoiseDetailValueLabel.stringValue = String(format: "%.2f", denoiseDetailSlider.doubleValue)
+        hslHueValueLabel.stringValue = String(format: "%+.2f", hslHueSlider.doubleValue)
+        hslSatValueLabel.stringValue = String(format: "%+.2f", hslSatSlider.doubleValue)
+        hslLumaValueLabel.stringValue = String(format: "%+.2f", hslLumaSlider.doubleValue)
         vignetteValueLabel.stringValue = String(format: "%.2f", vignetteSlider.doubleValue)
         vignetteMidpointValueLabel.stringValue = String(format: "%.2f", vignetteMidpointSlider.doubleValue)
+        vignetteCenterXValueLabel.stringValue = String(format: "%.2f", vignetteCenterXSlider.doubleValue)
+        vignetteCenterYValueLabel.stringValue = String(format: "%.2f", vignetteCenterYSlider.doubleValue)
         dodgeBurnValueLabel.stringValue = String(format: "%+.2f", dodgeBurnSlider.doubleValue)
         dodgeBurnRangeValueLabel.stringValue = String(format: "%+.2f", dodgeBurnRangeSlider.doubleValue)
         dodgeBurnSoftnessValueLabel.stringValue = String(format: "%.2f", dodgeBurnSoftnessSlider.doubleValue)
+        distortionValueLabel.stringValue = String(format: "%+.2f", distortionSlider.doubleValue)
+        chromaticAberrationValueLabel.stringValue = String(format: "%.2f", chromaticAberrationSlider.doubleValue)
+        defringePurpleValueLabel.stringValue = String(format: "%.2f", defringePurpleSlider.doubleValue)
+        defringeGreenValueLabel.stringValue = String(format: "%.2f", defringeGreenSlider.doubleValue)
     }
 }

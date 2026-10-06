@@ -41,7 +41,7 @@ Cheap Core Image filters or preset recipes. Same slider/card patterns we already
 | W1-06 | High Key | Effects / Presets | S | done | Mood preset `highKey` |
 | W1-07 | SuperContrast | Effects / Presets | S | done | Mood preset `superContrast` |
 | W1-08 | Film stocks (expand) | Presets | S | done | Film tab: Portra / Fuji / Noir |
-| W1-09 | Denoise | Denoise | S | done | `CINoiseReduction` before sharpen |
+| W1-09 | Denoise | Denoise | S | done | Pro Noise Reduction: Luma / Color / Detail (section id `denoise`) |
 | W1-10 | Split toning | Color | M | done | Split hi/shadow + amount via `CIColorMatrix` |
 | W1-11 | Structure (stronger clarity) | Details | S | done | Wider-radius `CIUnsharpMask` vs Definition |
 
@@ -55,12 +55,12 @@ Needs richer UI or multi-control graphs; still display-only CI.
 
 | ID | Tool | Edits section | Ease | Status | CI / approach |
 |----|------|---------------|------|--------|----------------|
-| W2-01 | Curves | Tone | M | todo | `CIToneCurve` + RGB/luma curve editor view |
-| W2-02 | HSL per channel | HSL | M | todo | 6–8 color wheels; `CIColorCube` or channel masks |
-| W2-03 | White Balance eyedropper | Color / WB | M | todo | Click image → sample neutral → solve temp/tint |
-| W2-04 | Vignette center point | Effects | M | todo | Drag center on image + existing vignette |
-| W2-05 | Sharpening (amount/radius/detail) | Detail | M | todo | Expand beyond single sharpness slider |
-| W2-06 | Smart contrast | Light | M | todo | Auto from histogram + user strength |
+| W2-01 | Curves | Curves | M | done | `CIToneCurve` + RGB/luma curve editor view |
+| W2-02 | HSL per channel | HSL | M | done | 8 channels × Hue / Sat / Luma; selective masks |
+| W2-03 | White Balance eyedropper | Color / WB | M | done | Click image → sample neutral → solve temp/tint |
+| W2-04 | Vignette center point | Vignette | M | done | Drag center on image + Center X/Y sliders |
+| W2-05 | Sharpening (amount/radius/detail) | Details | M | done | Amount / Radius / Detail + Definition / Structure |
+| W2-06 | Smart contrast | Develop | M | done | Midtone S-curve strength under Contrast |
 
 ---
 
@@ -71,7 +71,7 @@ New interaction models, RAW pipeline, or ML.
 | ID | Tool | Edits section | Ease | Status | Why later |
 |----|------|---------------|------|--------|-----------|
 | W3-01 | RAW/Develop ingest | Develop | L | later | Needs RAW decode path (e.g. Circum / LibRaw), not just JPEG/HEIC |
-| W3-02 | Lens corrections / Optics | Optics | L | later | Distortion + CA need lens profiles or manual mesh |
+| W3-02 | Lens corrections / Optics | Optics | L | partial | Manual Distortion / CA / Defringe shipped; EXIF lens profiles later |
 | W3-03 | Crop + horizon straighten | Crop | L | partial | Toolbar crop mode: Free / Original / 1:1 / 4:5 / 16:9; display-only + Export. Straighten / AI still later |
 | W3-04 | Crop AI compositions | Crop | L | later | Depends on W3-03 + vision heuristics/ML |
 | W3-05 | Dodge & Burn | Retouch | L | partial | v1 = luminosity-range Amount/Range/Softness (no brush yet); painted D&B later |

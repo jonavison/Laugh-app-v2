@@ -38,13 +38,15 @@ enum LibraryBrowseGalleryScale: String, CaseIterable {
     case small
     case medium
     case large
+    case xlarge
 
-    /// Slider stop index 0...2
+    /// Slider stop index 0...3
     var sliderValue: Double {
         switch self {
         case .small: return 0
         case .medium: return 1
         case .large: return 2
+        case .xlarge: return 3
         }
     }
 
@@ -53,7 +55,8 @@ enum LibraryBrowseGalleryScale: String, CaseIterable {
         switch stepped {
         case 0: return .small
         case 1: return .medium
-        default: return .large
+        case 2: return .large
+        default: return .xlarge
         }
     }
 }
@@ -135,15 +138,28 @@ struct LibraryBrowseTileMetrics: Equatable {
                 )
             case .large:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 280, height: 158),
-                    maxItemSize: NSSize(width: 320, height: 180),
+                    minItemSize: NSSize(width: 300, height: 169),
+                    maxItemSize: NSSize(width: 360, height: 203),
                     interitemSpacing: 6,
                     lineSpacing: 6,
-                    thumbHeight: 180,
-                    folderIconPointSize: 48,
-                    thumbnailMaxSide: 480,
+                    thumbHeight: 203,
+                    folderIconPointSize: 52,
+                    thumbnailMaxSide: 560,
                     showsTitle: false,
                     contentInset: 12,
+                    contentTopInset: 24
+                )
+            case .xlarge:
+                return LibraryBrowseTileMetrics(
+                    minItemSize: NSSize(width: 400, height: 225),
+                    maxItemSize: NSSize(width: 480, height: 270),
+                    interitemSpacing: 8,
+                    lineSpacing: 8,
+                    thumbHeight: 270,
+                    folderIconPointSize: 56,
+                    thumbnailMaxSide: 720,
+                    showsTitle: false,
+                    contentInset: 14,
                     contentTopInset: 24
                 )
             }

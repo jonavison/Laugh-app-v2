@@ -16,11 +16,11 @@ final class ImageStudioMetaBarView: NSView {
 
     private let leadingStack = NSStackView()
     private let trailingStack = NSStackView()
-    private let favoriteButton = NSButton(title: "", target: nil, action: nil)
-    private let starButtons: [NSButton]
+    private let favoriteButton = ChromeHoverButton()
+    private let starButtons: [ChromeHoverButton]
     private let nameLabel = NSTextField(labelWithString: "")
-    private let fitPercentButton = NSButton(title: "Fit", target: nil, action: nil)
-    private let carouselToggleButton = NSButton(title: "", target: nil, action: nil)
+    private let fitPercentButton = ChromeHoverButton()
+    private let carouselToggleButton = ChromeHoverButton()
     private let beforeAfterControl = BeforeAfterSegmentControl()
 
     private var currentRating = 0
@@ -31,10 +31,10 @@ final class ImageStudioMetaBarView: NSView {
     private static let zoomPercents = [25, 50, 100, 200, 300, 600, 1200, 2400]
 
     override init(frame frameRect: NSRect) {
-        starButtons = (1...5).map { _ in NSButton(title: "", target: nil, action: nil) }
+        starButtons = (1...5).map { _ in ChromeHoverButton() }
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        applyStudioChromeBackground()
 
         configureChrome()
         configureLayout()
@@ -44,9 +44,20 @@ final class ImageStudioMetaBarView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyStudioChromeBackground()
+        favoriteButton.refreshHoverChrome()
+        starButtons.forEach { $0.refreshHoverChrome() }
+        fitPercentButton.refreshHoverChrome()
+        carouselToggleButton.refreshHoverChrome()
+        beforeAfterControl.refreshHoverChrome()
+    }
+
+    /// Opaque studio-floor fill so the photo never shows through favorite / rating / name chrome.
     func applyStudioChromeBackground() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.backgroundColor = LaughTheme.imageStudioFloorColor(appearance: effectiveAppearance).cgColor
         needsDisplay = true
     }
 
@@ -67,6 +78,7 @@ final class ImageStudioMetaBarView: NSView {
         currentZoomPercent = max(1, zoomPercent)
         fitPercentButton.title = isFitZoom ? "Fit ▾" : "\(currentZoomPercent)% ▾"
         fitPercentButton.toolTip = "Zoom"
+        styleTextButton(fitPercentButton)
         applyCarouselVisible(carouselVisible)
         beforeAfterControl.setShowingBefore(showingBefore)
     }
@@ -149,7 +161,7 @@ final class ImageStudioMetaBarView: NSView {
     private func applyFavorite(_ favorite: Bool) {
         let symbol = favorite ? "heart.fill" : "heart"
         styleIconButton(favoriteButton, symbol: symbol, label: favorite ? "Remove favorite" : "Add favorite", pointSize: 15)
-        favoriteButton.contentTintColor = favorite ? .systemPink : .secondaryLabelColor
+        favoriteButton.idleTintColor = favorite ? .systemPink : .secondaryLabelColor
     }
 
     private func applyRating(_ rating: Int) {
@@ -162,7 +174,7 @@ final class ImageStudioMetaBarView: NSView {
                 label: "Rate \(index + 1)",
                 pointSize: 14
             )
-            button.contentTintColor = filled ? .systemYellow : .tertiaryLabelColor
+            button.idleTintColor = filled ? .systemYellow : .tertiaryLabelColor
         }
     }
 
@@ -178,7 +190,7 @@ final class ImageStudioMetaBarView: NSView {
         carouselToggleButton.toolTip = visible ? "Hide carousel" : "Show carousel"
         carouselToggleButton.imagePosition = .imageOnly
         carouselToggleButton.image = Self.carouselToggleImage(carouselVisible: visible)
-        carouselToggleButton.contentTintColor = .secondaryLabelColor
+        carouselToggleButton.idleTintColor = .secondaryLabelColor
         carouselToggleButton.translatesAutoresizingMaskIntoConstraints = false
         let id = ObjectIdentifier(carouselToggleButton)
         if !sizedButtons.contains(id) {
@@ -244,7 +256,7 @@ final class ImageStudioMetaBarView: NSView {
         return image
     }
 
-    private func styleIconButton(_ button: NSButton, symbol: String, label: String, pointSize: CGFloat = 15) {
+    private func styleIconButton(_ button: ChromeHoverButton, symbol: String, label: String, pointSize: CGFloat = 15) {
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.title = ""
@@ -255,7 +267,7 @@ final class ImageStudioMetaBarView: NSView {
             button.image = image.withSymbolConfiguration(config)
             button.image?.isTemplate = true
         }
-        button.contentTintColor = .secondaryLabelColor
+        button.idleTintColor = .secondaryLabelColor
         button.translatesAutoresizingMaskIntoConstraints = false
         let id = ObjectIdentifier(button)
         if !sizedButtons.contains(id) {
@@ -267,13 +279,14 @@ final class ImageStudioMetaBarView: NSView {
         }
     }
 
-    private func styleTextButton(_ button: NSButton) {
+    private func styleTextButton(_ button: ChromeHoverButton) {
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.font = .systemFont(ofSize: 13, weight: .semibold)
-        button.contentTintColor = .secondaryLabelColor
+        button.idleTintColor = .secondaryLabelColor
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.horizontalPadding = 8
     }
 
     private func makeZoomMenu() -> NSMenu {
@@ -336,8 +349,8 @@ final class ImageStudioMetaBarView: NSView {
 private final class BeforeAfterSegmentControl: NSView {
     var onSelect: ((Bool) -> Void)?
 
-    private let beforeButton = NSButton(title: "Before", target: nil, action: nil)
-    private let afterButton = NSButton(title: "After", target: nil, action: nil)
+    private let beforeButton = ChromeHoverButton()
+    private let afterButton = ChromeHoverButton()
     private let divider = NSTextField(labelWithString: "/")
     private var showingBefore = false
 
@@ -364,7 +377,7 @@ private final class BeforeAfterSegmentControl: NSView {
         let stack = NSStackView(views: [beforeButton, divider, afterButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 4
+        stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
@@ -388,11 +401,17 @@ private final class BeforeAfterSegmentControl: NSView {
         applySelectionChrome()
     }
 
-    private func styleSegmentButton(_ button: NSButton) {
+    func refreshHoverChrome() {
+        beforeButton.refreshHoverChrome()
+        afterButton.refreshHoverChrome()
+    }
+
+    private func styleSegmentButton(_ button: ChromeHoverButton) {
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.horizontalPadding = 6
     }
 
     private func applySelectionChrome() {
@@ -400,10 +419,12 @@ private final class BeforeAfterSegmentControl: NSView {
         styleTitle(afterButton, selected: !showingBefore)
     }
 
-    private func styleTitle(_ button: NSButton, selected: Bool) {
+    private func styleTitle(_ button: ChromeHoverButton, selected: Bool) {
         let weight: NSFont.Weight = selected ? .semibold : .regular
         let color: NSColor = selected ? .secondaryLabelColor : .tertiaryLabelColor
-        let title = button.title
+        let title = button === beforeButton ? "Before" : "After"
+        // Keep plain title for accessibility / hit testing copy.
+        button.title = title
         let attributed = NSAttributedString(
             string: title,
             attributes: [
@@ -412,7 +433,7 @@ private final class BeforeAfterSegmentControl: NSView {
             ]
         )
         button.attributedTitle = attributed
-        button.contentTintColor = color
+        button.idleTintColor = color
     }
 
     @objc private func beforePressed() {

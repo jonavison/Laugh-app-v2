@@ -1,7 +1,7 @@
 import AppKit
 
 /// Small “SUB” control beside the library button; slash when subtitles are off.
-final class PlaybackSubtitleToggleButton: NSButton {
+final class PlaybackSubtitleToggleButton: ChromeHoverButton {
     var subtitlesActive = false {
         didSet {
             guard oldValue != subtitlesActive else { return }
@@ -29,7 +29,8 @@ final class PlaybackSubtitleToggleButton: NSButton {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 26, height: MusicStylePlaybackBar.accessoryButtonHeight)
+        let side = MusicStylePlaybackBar.controlSize
+        return NSSize(width: side, height: side)
     }
 
     override var isEnabled: Bool {

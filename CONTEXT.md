@@ -45,17 +45,21 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## ImageFolderCarousel
 
-`ImageFolderCarousel` is the bottom filmstrip shown during **ImageMedia** when the open file’s folder contains at least two images. It lists sibling images in that folder (sorted like **LibraryBrowseSort**). Clicking a thumbnail opens that image in the center surface.
+`ImageFolderCarousel` is the bottom filmstrip shown during **ImageMedia** when the open file’s folder contains at least two images. It lists sibling images in that folder (sorted like **LibraryBrowseSort**). Clicking a thumbnail opens that image in the center surface. **←** / **→** step previous / next sibling in that same order (no wrap-around).
 
 ## ImageStudioMetaBar
 
 `ImageStudioMetaBar` sits above the filmstrip during **ImageMedia**: favorite + 5-star rating (persisted in `ImageLibraryMetaStore`), centered file name, and trailing Fit % / hide-show carousel / Before-After adjust compare.
 
+## ImageInfo
+
+`ImageInfo` is the left docked metadata column for **ImageMedia**. It shows file attributes plus ImageIO EXIF/TIFF/GPS fields (File / Image / Camera / GPS sections; empty groups omitted). Toggle it from the image playback bar **Info** control (`info.circle`, immediately right of Library). Opening **Edits** also opens Info; closing Edits leaves Info as-is. Data comes from `ImageFileMetadata` (ImageIO properties + filesystem attributes); it does not rewrite the source file.
+
 ## ImageAdjustSettings
 
 `ImageAdjustSettings` is the **Edits** tab in the right **edit sidebar** for **ImageMedia**: display-only develop controls (Core Image graph on `ImageAdjustParameters`) that do not rewrite the file on disk. Tools are listed under outline groups (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**). Each **ImageDevelopTool** is a row that expands into controls when available; unfinished tools stay visible but grayed (“Coming soon”). Interactive drags render a capped **preview** proxy; after settle the surface re-renders at full resolution. The sibling **Presets** tab (Looks / Mood / Film / Saved) applies named looks over the same parameter model. When the current adjusts (or display crop/rotation) are not identity, an **ImageStudioCommitFooter** at the bottom of the sidebar offers **Reset All**, **ImageExport**, and **ImageUserPreset** save. Zoom/rotate/crop stay on the floating image bar; Before/After on **ImageStudioMetaBar** compares identity vs current adjusts via **ImageAdjustSession** presentation.
 
-Opening **ImageMedia** hides the left **MediaLibraryPanel** / folders and docks a full-height right edit column beside a content column of photo + meta bar + **ImageFolderCarousel** (carousel does not extend under the sidebar). Opening Library during **ImageMedia** mirrors video: full folder management fills the window and the current photo moves to the bottom-right mini preview until the panel is closed or expanded.
+Opening **ImageMedia** hides the left **MediaLibraryPanel** / folders and docks full-height **ImageInfo** (left) + edit (right) columns beside a content column of photo + meta bar + **ImageFolderCarousel** (carousel does not extend under either sidebar). Opening Library during **ImageMedia** mirrors video: full folder management fills the window and the current photo moves to the bottom-right mini preview until the panel is closed or expanded.
 
 Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`. Policy: ADR `0004-image-studio-develop-display-only.md`. Selection stack: ADR `0005-smart-selection-protocol.md`.
 
@@ -137,7 +141,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## LibraryBrowseGalleryScale
 
-`LibraryBrowseGalleryScale` is the discrete tile size for **Gallery** only: small, medium, or large. It is adjusted with a stepped slider and does not apply to Grid or List.
+`LibraryBrowseGalleryScale` is the discrete tile size for **Gallery** only: small, medium, large, or xlarge. It is adjusted with a stepped slider and does not apply to Grid or List.
 
 ## LibraryBrowseSearch
 

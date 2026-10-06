@@ -31,4 +31,14 @@ enum FolderPlaybackNeighbors {
         let next = index + 1 < files.count ? files[index + 1] : nil
         return Result(previous: previous, next: next)
     }
+
+    /// Step one item in an already-ordered sibling list (e.g. image filmstrip). No wrap-around.
+    static func adjacentURL(in ordered: [URL], around url: URL, forward: Bool) -> URL? {
+        let files = ordered.map { $0.standardizedFileURL }
+        let current = url.standardizedFileURL
+        guard let index = files.firstIndex(of: current) else { return nil }
+        let nextIndex = forward ? index + 1 : index - 1
+        guard files.indices.contains(nextIndex) else { return nil }
+        return ordered[nextIndex]
+    }
 }

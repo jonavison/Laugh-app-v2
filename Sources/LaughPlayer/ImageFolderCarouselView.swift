@@ -12,7 +12,7 @@ final class ImageFolderCarouselView: NSView {
     private let rightFadeView = FadeEdgeView(edge: .trailing)
     private var urls: [URL] = []
     private var selectedURL: URL?
-    private var thumbnailButtons: [URL: NSButton] = [:]
+    private var thumbnailButtons: [URL: FilmstripThumbButton] = [:]
     private var loadGeneration = 0
     private var clipObserver: NSObjectProtocol?
 
@@ -21,16 +21,17 @@ final class ImageFolderCarouselView: NSView {
     /// Wide enough that an edge thumb clearly dissolves into the studio floor.
     private static let fadeWidth: CGFloat = 96
 
+    /// Opaque studio-floor fill so the photo never shows through the filmstrip.
     func applyStudioChromeBackground() {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.backgroundColor = LaughTheme.imageStudioFloorColor(appearance: effectiveAppearance).cgColor
         needsDisplay = true
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        applyStudioChromeBackground()
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasHorizontalScroller = false
@@ -98,9 +99,15 @@ final class ImageFolderCarouselView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyStudioChromeBackground()
+        leftFadeView.needsDisplay = true
+        rightFadeView.needsDisplay = true
+    }
+
     override func layout() {
         super.layout()
-        layer?.backgroundColor = NSColor.clear.cgColor
         updateFadeVisibility()
     }
 
@@ -111,11 +118,7 @@ final class ImageFolderCarouselView: NSView {
 
         // Same folder strip: only restyle selection — avoid full rebuild / thumb flicker.
         if newURLs == previousURLs, !thumbnailButtons.isEmpty {
-            for (url, button) in thumbnailButtons {
-                applySelectionChrome(button, selected: isSelected(url), animated: true)
-            }
-            scrollSelectedIntoViewIfNeeded()
-            updateFadeVisibility()
+            selectSibling(selectedURL, animatedScroll: false)
             return
         }
 
@@ -155,6 +158,72 @@ final class ImageFolderCarouselView: NSView {
         rightFadeView.needsDisplay = true
     }
 
+    /// Filmstrip scroll motion — never use during hold/spam steps.
+    enum ScrollMotion {
+        case none
+        /// Single deliberate ←/→.
+        case deliberate
+        /// Soft recenter after a fast scrub parks.
+        case settle
+
+        var animates: Bool { self != .none }
+
+        var duration: TimeInterval {
+            switch self {
+            case .none: return 0
+            case .deliberate: return 0.15
+            case .settle: return 0.18
+            }
+        }
+
+        var timing: CAMediaTimingFunction {
+            switch self {
+            case .none, .deliberate:
+                return CAMediaTimingFunction(controlPoints: 0.22, 0.61, 0.36, 1)
+            case .settle:
+                return CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1)
+            }
+        }
+    }
+
+    /// Already-decoded filmstrip bitmap for instant surface placeholders while ImageIO loads.
+    func thumbnailImage(for url: URL) -> NSImage? {
+        thumbnailButtons[url.standardizedFileURL]?.image
+    }
+
+    /// Selection-only update (no rebuild). Fast scrub uses `.none`; slow taps use `.deliberate`.
+    func selectSibling(_ selected: URL?, scrollMotion: ScrollMotion) {
+        let previous = selectedURL
+        let next = selected?.standardizedFileURL
+        guard previous != next else {
+            if scrollMotion.animates {
+                centerSelectedThumbnailIfPossible(motion: scrollMotion)
+            }
+            return
+        }
+        selectedURL = next
+        if let previous, let button = thumbnailButtons[previous] {
+            applySelectionChrome(button, selected: false, animated: scrollMotion == .deliberate)
+        }
+        if let next, let button = thumbnailButtons[next] {
+            applySelectionChrome(button, selected: true, animated: scrollMotion == .deliberate)
+        }
+        centerSelectedThumbnailIfPossible(
+            motion: scrollMotion,
+            allowLayoutPass: scrollMotion.animates
+        )
+    }
+
+    /// Convenience for call sites that only care about animated vs snap.
+    func selectSibling(_ selected: URL?, animatedScroll: Bool) {
+        selectSibling(selected, scrollMotion: animatedScroll ? .deliberate : .none)
+    }
+
+    /// Ease the selected thumb to center after a scrub burst parks (no selection change).
+    func settleScrollToSelection() {
+        centerSelectedThumbnailIfPossible(motion: .settle, allowLayoutPass: true)
+    }
+
     private func rebuildButtons() {
         stack.arrangedSubviews.forEach {
             stack.removeArrangedSubview($0)
@@ -163,16 +232,11 @@ final class ImageFolderCarouselView: NSView {
         thumbnailButtons.removeAll()
 
         for url in urls {
-            let button = NSButton(title: "", target: self, action: #selector(thumbPressed(_:)))
-            button.bezelStyle = .regularSquare
-            button.isBordered = false
-            button.imagePosition = .imageOnly
-            button.imageScaling = .scaleProportionallyUpOrDown
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 7
-            button.layer?.masksToBounds = true
-            // Muted plate so transparent PNGs read correctly through the shared crop-fill path.
-            button.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+            let button = FilmstripThumbButton(
+                title: "",
+                target: self,
+                action: #selector(thumbPressed(_:))
+            )
             button.toolTip = url.lastPathComponent
             button.identifier = NSUserInterfaceItemIdentifier(url.path)
             button.translatesAutoresizingMaskIntoConstraints = false
@@ -195,20 +259,20 @@ final class ImageFolderCarouselView: NSView {
         return url.standardizedFileURL == selectedURL
     }
 
-    private func applySelectionChrome(_ button: NSButton, selected: Bool, animated: Bool = false) {
+    private func applySelectionChrome(_ button: FilmstripThumbButton, selected: Bool, animated: Bool = false) {
         button.wantsLayer = true
         guard let layer = button.layer else { return }
 
+        // Selection is border-only — never scale the thumb (that reads as “bigger”).
         let borderWidth: CGFloat = selected ? 2.5 : 1
         let borderColor = (selected
             ? LaughTheme.interactiveAccent
             : NSColor.separatorColor.withAlphaComponent(0.55)).cgColor
-        let scale: CGFloat = selected ? 1.045 : 1.0
 
         let apply: () -> Void = {
             layer.borderWidth = borderWidth
             layer.borderColor = borderColor
-            layer.transform = CATransform3DMakeScale(scale, scale, 1)
+            layer.transform = CATransform3DIdentity
         }
 
         guard animated else {
@@ -220,7 +284,7 @@ final class ImageFolderCarouselView: NSView {
         }
 
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.28)
+        CATransaction.setAnimationDuration(0.12)
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
         apply()
         CATransaction.commit()
@@ -270,13 +334,19 @@ final class ImageFolderCarouselView: NSView {
 
     /// Keep the selected thumb in the horizontal middle of the filmstrip when the strip
     /// is long enough; near the start/end, clamp so we don't scroll past the edges.
-    private func centerSelectedThumbnailIfPossible(animated: Bool) {
+    /// Fast scrub skips `layoutSubtreeIfNeeded` — frames are already stable after the initial strip build.
+    private func centerSelectedThumbnailIfPossible(
+        motion: ScrollMotion,
+        allowLayoutPass: Bool = true
+    ) {
         guard let selectedURL,
               let button = thumbnailButtons[selectedURL],
               let documentView = scrollView.documentView else { return }
 
-        layoutSubtreeIfNeeded()
-        stack.layoutSubtreeIfNeeded()
+        if allowLayoutPass {
+            layoutSubtreeIfNeeded()
+            stack.layoutSubtreeIfNeeded()
+        }
 
         let clipView = scrollView.contentView
         let clipBounds = clipView.bounds
@@ -285,28 +355,31 @@ final class ImageFolderCarouselView: NSView {
         let thumbInDocument = button.convert(button.bounds, to: documentView)
         let desiredOriginX = thumbInDocument.midX - (clipBounds.width / 2)
 
-        let docWidth = max(documentView.frame.width, stack.fittingSize.width, clipBounds.width)
+        let docWidth = max(documentView.frame.width, clipBounds.width)
         let maxOriginX = max(0, docWidth - clipBounds.width)
         let clampedOriginX = min(max(0, desiredOriginX), maxOriginX)
 
         if abs(clampedOriginX - clipBounds.origin.x) < 0.5 {
-            updateFadeVisibility()
             return
         }
 
         let target = NSPoint(x: clampedOriginX, y: clipBounds.origin.y)
-        if animated {
-            // Longer ease curve reads smoother when stepping through photos.
+        if motion.animates {
+            // Cancel an in-flight animator so settle doesn’t fight a prior deliberate ease.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            clipView.layer?.removeAllAnimations()
+            CATransaction.commit()
+
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.38
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.61, 0.36, 1)
+                context.duration = motion.duration
+                context.timingFunction = motion.timing
                 context.allowsImplicitAnimation = true
                 clipView.animator().setBoundsOrigin(target)
                 self.scrollView.reflectScrolledClipView(clipView)
             }, completionHandler: { [weak self] in
                 guard let self else { return }
                 self.scrollView.reflectScrolledClipView(clipView)
-                self.updateFadeVisibility()
             })
         } else {
             CATransaction.begin()
@@ -314,14 +387,91 @@ final class ImageFolderCarouselView: NSView {
             clipView.setBoundsOrigin(target)
             scrollView.reflectScrolledClipView(clipView)
             CATransaction.commit()
-            updateFadeVisibility()
         }
+    }
+
+    private func centerSelectedThumbnailIfPossible(animated: Bool, allowLayoutPass: Bool = true) {
+        centerSelectedThumbnailIfPossible(
+            motion: animated ? .deliberate : .none,
+            allowLayoutPass: allowLayoutPass
+        )
     }
 
     @objc private func thumbPressed(_ sender: NSButton) {
         guard let path = sender.identifier?.rawValue else { return }
         let url = URL(fileURLWithPath: path)
         onSelect?(url)
+    }
+}
+
+/// Filmstrip cell with a brighten-on-hover wash (photo content, not chrome blue).
+private final class FilmstripThumbButton: NSButton {
+    private let hoverWash = CALayer()
+    private var tracking: NSTrackingArea?
+
+    init(title: String, target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        self.title = title
+        self.target = target
+        self.action = action
+        bezelStyle = .regularSquare
+        isBordered = false
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyUpOrDown
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.masksToBounds = true
+        // Muted plate so transparent PNGs read correctly through the shared crop-fill path.
+        layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+
+        hoverWash.name = "filmstripHoverWash"
+        hoverWash.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        hoverWash.opacity = 0
+        hoverWash.zPosition = 10
+        layer?.addSublayer(hoverWash)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        hoverWash.frame = bounds
+        hoverWash.cornerRadius = layer?.cornerRadius ?? 7
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking {
+            removeTrackingArea(tracking)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        tracking = area
+        addTrackingArea(area)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        setHoverBright(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        setHoverBright(false)
+    }
+
+    private func setHoverBright(_ on: Bool) {
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.12)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+        hoverWash.opacity = on ? 1 : 0
+        CATransaction.commit()
     }
 }
 

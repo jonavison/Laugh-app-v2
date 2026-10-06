@@ -967,6 +967,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let gridCollectionLayout = NSCollectionViewGridLayout()
     private var searchDebounceWork: DispatchWorkItem?
     private var suppressBrowseListSelection = false
+    private var gridClipObserver: NSObjectProtocol?
+    private var gridHoverResumeWork: DispatchWorkItem?
     private var appliedTileMetrics: LibraryBrowseTileMetrics?
     private var suppressGalleryScaleChange = false
     private var previewSelectionIndices: IndexSet?
@@ -1202,8 +1204,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         updateLayoutControl()
 
         galleryScaleSlider.minValue = 0
-        galleryScaleSlider.maxValue = 2
-        galleryScaleSlider.numberOfTickMarks = 3
+        galleryScaleSlider.maxValue = 3
+        galleryScaleSlider.numberOfTickMarks = 4
         galleryScaleSlider.allowsTickMarkValuesOnly = true
         galleryScaleSlider.isContinuous = false
         galleryScaleSlider.controlSize = .small
@@ -1212,7 +1214,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         galleryScaleSlider.target = self
         galleryScaleSlider.action = #selector(galleryScaleChanged)
         galleryScaleSlider.isHidden = true
-        galleryScaleSlider.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        galleryScaleSlider.widthAnchor.constraint(equalToConstant: 88).isActive = true
         updateGalleryScaleControl()
 
         layoutControlsStack.orientation = .horizontal
@@ -1264,6 +1266,14 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         gridScroll.drawsBackground = false
         gridScroll.borderType = .noBorder
         gridScroll.translatesAutoresizingMaskIntoConstraints = false
+        gridScroll.contentView.postsBoundsChangedNotifications = true
+        gridClipObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: gridScroll.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.noteGridScrollActivity()
+        }
 
         configureBrowseListTable()
 
@@ -1721,6 +1731,53 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             bottom: max(metrics.contentInset, 18),
             right: 0
         )
+    }
+
+    deinit {
+        if let gridClipObserver {
+            NotificationCenter.default.removeObserver(gridClipObserver)
+        }
+        LibraryGridHoverGate.isSuppressed = false
+    }
+
+    /// While scrolling, tiles slide under a stationary cursor and fire hover — clear rims until scroll settles.
+    private func noteGridScrollActivity() {
+        guard !gridScroll.isHidden else { return }
+        if !LibraryGridHoverGate.isSuppressed {
+            LibraryGridHoverGate.isSuppressed = true
+            clearVisibleGridHoverChrome()
+        }
+        gridHoverResumeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            LibraryGridHoverGate.isSuppressed = false
+            self?.restoreGridHoverUnderCursor()
+        }
+        gridHoverResumeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func clearVisibleGridHoverChrome() {
+        for path in collectionView.indexPathsForVisibleItems() {
+            if let folder = collectionView.item(at: path) as? LibraryFolderGridItem {
+                folder.clearHoverChrome()
+            } else if let media = collectionView.item(at: path) as? LibraryMediaGridItem {
+                media.clearHoverChrome()
+            }
+        }
+    }
+
+    private func restoreGridHoverUnderCursor() {
+        guard !gridScroll.isHidden, let window else { return }
+        let screenPoint = NSEvent.mouseLocation
+        let windowPoint = window.convertFromScreen(NSRect(origin: screenPoint, size: .zero)).origin
+        let local = collectionView.convert(windowPoint, from: nil)
+        guard collectionView.bounds.contains(local),
+              let path = collectionView.indexPathForItem(at: local) else { return }
+        if let folder = collectionView.item(at: path) as? LibraryFolderGridItem {
+            folder.applyHoverChromeUnderCursor()
+        } else if let media = collectionView.item(at: path) as? LibraryMediaGridItem {
+            media.applyHoverChromeUnderCursor()
+        }
     }
 
     private func refreshOverflowFadeFloor() {
@@ -2450,6 +2507,11 @@ private class LibraryGridItemView: NSView {
     }
 }
 
+/// Suppresses tile hover rims while the browse grid is scrolling (cursor “rides” over tiles).
+private enum LibraryGridHoverGate {
+    static var isSuppressed = false
+}
+
 /// Grid tile host that reports hover for border affordance (media + folders).
 private final class LibraryTileHoverHostView: LibraryGridItemView {
     var onHoverChange: ((Bool) -> Void)?
@@ -2471,6 +2533,7 @@ private final class LibraryTileHoverHostView: LibraryGridItemView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !LibraryGridHoverGate.isSuppressed else { return }
         onHoverChange?(true)
     }
 
@@ -3171,16 +3234,14 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
             cardView.layer?.borderColor = NSColor.separatorColor.cgColor
             return
         }
-        let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let hover = LaughTheme.libraryTileHoverBorder(appearance: view.effectiveAppearance)
         if usesIconOnlyLayout {
-            // Grid cards: strengthen the card rim on hover (media tiles do the same).
+            // Grid cards: quiet grey rim — never near-white (reads as selected while scrolling).
             view.layer?.borderWidth = 0
             view.layer?.borderColor = nil
             if isHovered {
                 cardView.layer?.borderWidth = 1.5
-                cardView.layer?.borderColor = (isDark
-                    ? NSColor.white.withAlphaComponent(0.85)
-                    : NSColor.labelColor.withAlphaComponent(0.55)).cgColor
+                cardView.layer?.borderColor = hover.cgColor
             } else {
                 cardView.layer?.borderWidth = 1
                 cardView.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -3191,9 +3252,16 @@ private final class LibraryFolderGridItem: NSCollectionViewItem, LibrarySelectab
         cardView.layer?.borderWidth = 1
         cardView.layer?.borderColor = NSColor.separatorColor.cgColor
         view.layer?.borderWidth = isHovered ? 1.5 : 0
-        view.layer?.borderColor = isHovered
-            ? NSColor.white.withAlphaComponent(0.95).cgColor
-            : nil
+        view.layer?.borderColor = isHovered ? hover.cgColor : nil
+    }
+
+    func clearHoverChrome() {
+        setHovered(false)
+    }
+
+    func applyHoverChromeUnderCursor() {
+        guard !LibraryGridHoverGate.isSuppressed else { return }
+        setHovered(true)
     }
 
     private func mutedPreviewFill() -> NSColor {
@@ -3801,15 +3869,13 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
             view.layer?.borderColor = nil
             return
         }
+        let hover = LaughTheme.libraryTileHoverBorder(appearance: view.effectiveAppearance)
         if showsTitle {
             view.layer?.borderWidth = 0
             view.layer?.borderColor = nil
-            let isDark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             if hovered {
                 cardView.layer?.borderWidth = 1.5
-                cardView.layer?.borderColor = (isDark
-                    ? NSColor.white.withAlphaComponent(0.85)
-                    : NSColor.labelColor.withAlphaComponent(0.55)).cgColor
+                cardView.layer?.borderColor = hover.cgColor
             } else {
                 cardView.layer?.borderWidth = 1
                 cardView.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -3818,11 +3884,16 @@ private final class LibraryMediaGridItem: NSCollectionViewItem, LibrarySelectabl
         }
 
         view.layer?.borderWidth = hovered ? 1.5 : 0
-        if hovered {
-            view.layer?.borderColor = NSColor.white.withAlphaComponent(0.95).cgColor
-        } else {
-            view.layer?.borderColor = nil
-        }
+        view.layer?.borderColor = hovered ? hover.cgColor : nil
+    }
+
+    func clearHoverChrome() {
+        setHovered(false)
+    }
+
+    func applyHoverChromeUnderCursor() {
+        guard !LibraryGridHoverGate.isSuppressed else { return }
+        setHovered(true)
     }
 
     override func prepareForReuse() {

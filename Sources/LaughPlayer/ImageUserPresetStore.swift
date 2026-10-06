@@ -18,7 +18,15 @@ enum ImageUserPresetStore {
 
     static func all() -> [ImageUserPreset] {
         guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
-        return (try? JSONDecoder().decode([ImageUserPreset].self, from: data)) ?? []
+        if let presets = try? JSONDecoder().decode([ImageUserPreset].self, from: data) {
+            return presets
+        }
+        // Older payloads omit Wave 2+ keys — merge onto identity and re-persist.
+        let migrated = migratedPresets(from: data)
+        if !migrated.isEmpty {
+            persist(migrated)
+        }
+        return migrated
     }
 
     /// Saves a new preset, or replaces an existing one with the same name (case-insensitive).
@@ -45,5 +53,23 @@ enum ImageUserPresetStore {
     private static func persist(_ presets: [ImageUserPreset]) {
         guard let data = try? JSONEncoder().encode(presets) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+
+    /// Forward-compatible decode for presets saved before newer `ImageAdjustParameters` fields existed.
+    private static func migratedPresets(from data: Data) -> [ImageUserPreset] {
+        guard let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return items.compactMap { item in
+            guard let idString = item["id"] as? String,
+                  let id = UUID(uuidString: idString),
+                  let name = item["name"] as? String,
+                  let paramsObj = item["parameters"]
+            else { return nil }
+            guard let paramsData = try? JSONSerialization.data(withJSONObject: paramsObj),
+                  let parameters = try? ImageAdjustParameters.decodingLenient(from: paramsData)
+            else { return nil }
+            return ImageUserPreset(id: id, name: name, parameters: parameters)
+        }
     }
 }

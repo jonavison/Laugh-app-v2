@@ -101,3 +101,18 @@ enum ImmersiveWindowChrome {
     }
 
 }
+
+/// Info / Edits panel chrome — never starts a window drag under immersive background-move.
+final class ImmersivePanelVisualEffectView: NSVisualEffectView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+/// Fill / plate views inside immersive side panels.
+final class ImmersivePanelFillView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+/// Stacks inside Info / Edits — empty gaps must not drag the window.
+final class ImmersivePanelStackView: NSStackView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}

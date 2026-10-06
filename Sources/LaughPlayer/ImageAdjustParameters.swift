@@ -5,6 +5,8 @@ import Foundation
 enum ImageAdjustSection: String, CaseIterable, Hashable {
     case develop
     case color
+    case curves
+    case hsl
     case dramatic
     case mood
     case toning
@@ -23,11 +25,14 @@ enum ImageAdjustSection: String, CaseIterable, Hashable {
     case denoise
     case vignette
     case dodgeBurn
+    case optics
 
     var title: String {
         switch self {
         case .develop: return "Develop"
         case .color: return "Color"
+        case .curves: return "Curves"
+        case .hsl: return "HSL"
         case .dramatic: return "Dramatic"
         case .mood: return "Mood"
         case .toning: return "Toning"
@@ -43,9 +48,10 @@ enum ImageAdjustSection: String, CaseIterable, Hashable {
         case .landscape: return "Landscape"
         case .blackAndWhite: return "Black & White"
         case .details: return "Details"
-        case .denoise: return "Denoise"
+        case .denoise: return "Noise Reduction"
         case .dodgeBurn: return "Dodge & Burn"
         case .vignette: return "Vignette"
+        case .optics: return "Optics"
         }
     }
 }
@@ -56,6 +62,7 @@ struct ImageAdjustParameters: Equatable, Codable {
     var exposure: Double
     var brightness: Double
     var contrast: Double
+    var smartContrast: Double
     var highlights: Double
     var shadows: Double
     var whites: Double
@@ -71,6 +78,18 @@ struct ImageAdjustParameters: Equatable, Codable {
     var splitHighlight: Double
     var splitShadow: Double
     var splitAmount: Double
+
+    // Curves — five Y values at X = 0, 0.25, 0.5, 0.75, 1 (identity diagonal)
+    var curveLuma: [Double]
+    var curveRed: [Double]
+    var curveGreen: [Double]
+    var curveBlue: [Double]
+
+    // HSL — 8 channels (R O Y G A B P M): hue / sat / luma offsets
+    var hslHue: [Double]
+    var hslSat: [Double]
+    var hslLuma: [Double]
+
     var dramatic: Double
     var mood: Double
     var matte: Double
@@ -103,21 +122,37 @@ struct ImageAdjustParameters: Equatable, Codable {
 
     // Detail
     var sharpness: Double
+    var sharpenRadius: Double
+    var sharpenDetail: Double
     var definition: Double
     var structure: Double
     var denoise: Double
+    var denoiseColor: Double
+    var denoiseDetail: Double
 
     // Effects
     var vignette: Double
     var vignetteMidpoint: Double
+    var vignetteCenterX: Double
+    var vignetteCenterY: Double
     var dodgeBurn: Double
     var dodgeBurnRange: Double
     var dodgeBurnSoftness: Double
+
+    // Optics (manual)
+    var distortion: Double
+    var chromaticAberration: Double
+    var defringePurple: Double
+    var defringeGreen: Double
+
+    static let identityCurve: [Double] = [0, 0.25, 0.5, 0.75, 1]
+    static let hslChannelCount = 8
 
     init(
         exposure: Double = 0,
         brightness: Double = 0,
         contrast: Double = 1,
+        smartContrast: Double = 0,
         highlights: Double = 1,
         shadows: Double = 0,
         whites: Double = 0,
@@ -131,6 +166,13 @@ struct ImageAdjustParameters: Equatable, Codable {
         splitHighlight: Double = 0,
         splitShadow: Double = 0,
         splitAmount: Double = 0,
+        curveLuma: [Double] = ImageAdjustParameters.identityCurve,
+        curveRed: [Double] = ImageAdjustParameters.identityCurve,
+        curveGreen: [Double] = ImageAdjustParameters.identityCurve,
+        curveBlue: [Double] = ImageAdjustParameters.identityCurve,
+        hslHue: [Double] = Array(repeating: 0, count: ImageAdjustParameters.hslChannelCount),
+        hslSat: [Double] = Array(repeating: 0, count: ImageAdjustParameters.hslChannelCount),
+        hslLuma: [Double] = Array(repeating: 0, count: ImageAdjustParameters.hslChannelCount),
         dramatic: Double = 0,
         mood: Double = 0,
         matte: Double = 0,
@@ -161,18 +203,29 @@ struct ImageAdjustParameters: Equatable, Codable {
         bwContrast: Double = 0.15,
         bwWarmth: Double = 0,
         sharpness: Double = 0,
+        sharpenRadius: Double = 0.4,
+        sharpenDetail: Double = 0.5,
         definition: Double = 0,
         structure: Double = 0,
         denoise: Double = 0,
+        denoiseColor: Double = 0,
+        denoiseDetail: Double = 0.5,
         vignette: Double = 0,
         vignetteMidpoint: Double = 0.5,
+        vignetteCenterX: Double = 0.5,
+        vignetteCenterY: Double = 0.5,
         dodgeBurn: Double = 0,
         dodgeBurnRange: Double = 0,
-        dodgeBurnSoftness: Double = 0.45
+        dodgeBurnSoftness: Double = 0.45,
+        distortion: Double = 0,
+        chromaticAberration: Double = 0,
+        defringePurple: Double = 0,
+        defringeGreen: Double = 0
     ) {
         self.exposure = exposure
         self.brightness = brightness
         self.contrast = contrast
+        self.smartContrast = smartContrast
         self.highlights = highlights
         self.shadows = shadows
         self.whites = whites
@@ -186,6 +239,13 @@ struct ImageAdjustParameters: Equatable, Codable {
         self.splitHighlight = splitHighlight
         self.splitShadow = splitShadow
         self.splitAmount = splitAmount
+        self.curveLuma = Self.normalizedCurve(curveLuma)
+        self.curveRed = Self.normalizedCurve(curveRed)
+        self.curveGreen = Self.normalizedCurve(curveGreen)
+        self.curveBlue = Self.normalizedCurve(curveBlue)
+        self.hslHue = Self.normalizedHSL(hslHue)
+        self.hslSat = Self.normalizedHSL(hslSat)
+        self.hslLuma = Self.normalizedHSL(hslLuma)
         self.dramatic = dramatic
         self.mood = mood
         self.matte = matte
@@ -216,17 +276,59 @@ struct ImageAdjustParameters: Equatable, Codable {
         self.bwContrast = bwContrast
         self.bwWarmth = bwWarmth
         self.sharpness = sharpness
+        self.sharpenRadius = sharpenRadius
+        self.sharpenDetail = sharpenDetail
         self.definition = definition
         self.structure = structure
         self.denoise = denoise
+        self.denoiseColor = denoiseColor
+        self.denoiseDetail = denoiseDetail
         self.vignette = vignette
         self.vignetteMidpoint = vignetteMidpoint
+        self.vignetteCenterX = vignetteCenterX
+        self.vignetteCenterY = vignetteCenterY
         self.dodgeBurn = dodgeBurn
         self.dodgeBurnRange = dodgeBurnRange
         self.dodgeBurnSoftness = dodgeBurnSoftness
+        self.distortion = distortion
+        self.chromaticAberration = chromaticAberration
+        self.defringePurple = defringePurple
+        self.defringeGreen = defringeGreen
+    }
+
+    private static func normalizedCurve(_ values: [Double]) -> [Double] {
+        var out = values
+        while out.count < 5 { out.append(identityCurve[out.count]) }
+        if out.count > 5 { out = Array(out.prefix(5)) }
+        out[0] = max(0, min(1, out[0]))
+        out[4] = max(0, min(1, out[4]))
+        for i in 1..<4 { out[i] = max(0, min(1, out[i])) }
+        return out
+    }
+
+    private static func normalizedHSL(_ values: [Double]) -> [Double] {
+        var out = values
+        while out.count < hslChannelCount { out.append(0) }
+        if out.count > hslChannelCount { out = Array(out.prefix(hslChannelCount)) }
+        return out.map { max(-1, min(1, $0)) }
     }
 
     static let identity = ImageAdjustParameters()
+
+    /// Decode params that may predate newer fields by filling gaps from identity.
+    static func decodingLenient(from data: Data) throws -> ImageAdjustParameters {
+        let identityData = try JSONEncoder().encode(identity)
+        guard var base = try JSONSerialization.jsonObject(with: identityData) as? [String: Any],
+              let incoming = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return try JSONDecoder().decode(ImageAdjustParameters.self, from: data)
+        }
+        for (key, value) in incoming {
+            base[key] = value
+        }
+        let merged = try JSONSerialization.data(withJSONObject: base)
+        return try JSONDecoder().decode(ImageAdjustParameters.self, from: merged)
+    }
 
     var isIdentity: Bool {
         ImageAdjustSection.allCases.allSatisfy { !isEdited($0) }
@@ -240,6 +342,7 @@ struct ImageAdjustParameters: Equatable, Codable {
             return !near(exposure, id.exposure)
                 || !near(brightness, id.brightness)
                 || !near(contrast, id.contrast)
+                || !near(smartContrast, id.smartContrast)
                 || !near(highlights, id.highlights)
                 || !near(shadows, id.shadows)
                 || !near(whites, id.whites)
@@ -254,6 +357,15 @@ struct ImageAdjustParameters: Equatable, Codable {
                 || !near(splitHighlight, id.splitHighlight)
                 || !near(splitShadow, id.splitShadow)
                 || !near(splitAmount, id.splitAmount)
+        case .curves:
+            return !nearCurve(curveLuma, id.curveLuma)
+                || !nearCurve(curveRed, id.curveRed)
+                || !nearCurve(curveGreen, id.curveGreen)
+                || !nearCurve(curveBlue, id.curveBlue)
+        case .hsl:
+            return !nearHSL(hslHue, id.hslHue)
+                || !nearHSL(hslSat, id.hslSat)
+                || !nearHSL(hslLuma, id.hslLuma)
         case .dramatic:
             return !near(dramatic, id.dramatic)
         case .mood:
@@ -296,16 +408,28 @@ struct ImageAdjustParameters: Equatable, Codable {
                 || !near(bwWarmth, id.bwWarmth)
         case .details:
             return !near(sharpness, id.sharpness)
+                || !near(sharpenRadius, id.sharpenRadius)
+                || !near(sharpenDetail, id.sharpenDetail)
                 || !near(definition, id.definition)
                 || !near(structure, id.structure)
         case .denoise:
             return !near(denoise, id.denoise)
+                || !near(denoiseColor, id.denoiseColor)
+                || !near(denoiseDetail, id.denoiseDetail)
         case .vignette:
-            return !near(vignette, id.vignette) || !near(vignetteMidpoint, id.vignetteMidpoint)
+            return !near(vignette, id.vignette)
+                || !near(vignetteMidpoint, id.vignetteMidpoint)
+                || !near(vignetteCenterX, id.vignetteCenterX)
+                || !near(vignetteCenterY, id.vignetteCenterY)
         case .dodgeBurn:
             return !near(dodgeBurn, id.dodgeBurn)
                 || !near(dodgeBurnRange, id.dodgeBurnRange)
                 || !near(dodgeBurnSoftness, id.dodgeBurnSoftness)
+        case .optics:
+            return !near(distortion, id.distortion)
+                || !near(chromaticAberration, id.chromaticAberration)
+                || !near(defringePurple, id.defringePurple)
+                || !near(defringeGreen, id.defringeGreen)
         }
     }
 
@@ -318,6 +442,7 @@ struct ImageAdjustParameters: Equatable, Codable {
             next.exposure = id.exposure
             next.brightness = id.brightness
             next.contrast = id.contrast
+            next.smartContrast = id.smartContrast
             next.highlights = id.highlights
             next.shadows = id.shadows
             next.whites = id.whites
@@ -332,6 +457,15 @@ struct ImageAdjustParameters: Equatable, Codable {
             next.splitHighlight = id.splitHighlight
             next.splitShadow = id.splitShadow
             next.splitAmount = id.splitAmount
+        case .curves:
+            next.curveLuma = id.curveLuma
+            next.curveRed = id.curveRed
+            next.curveGreen = id.curveGreen
+            next.curveBlue = id.curveBlue
+        case .hsl:
+            next.hslHue = id.hslHue
+            next.hslSat = id.hslSat
+            next.hslLuma = id.hslLuma
         case .dramatic:
             next.dramatic = id.dramatic
         case .mood:
@@ -377,17 +511,28 @@ struct ImageAdjustParameters: Equatable, Codable {
             next.bwWarmth = id.bwWarmth
         case .details:
             next.sharpness = id.sharpness
+            next.sharpenRadius = id.sharpenRadius
+            next.sharpenDetail = id.sharpenDetail
             next.definition = id.definition
             next.structure = id.structure
         case .denoise:
             next.denoise = id.denoise
+            next.denoiseColor = id.denoiseColor
+            next.denoiseDetail = id.denoiseDetail
         case .vignette:
             next.vignette = id.vignette
             next.vignetteMidpoint = id.vignetteMidpoint
+            next.vignetteCenterX = id.vignetteCenterX
+            next.vignetteCenterY = id.vignetteCenterY
         case .dodgeBurn:
             next.dodgeBurn = id.dodgeBurn
             next.dodgeBurnRange = id.dodgeBurnRange
             next.dodgeBurnSoftness = id.dodgeBurnSoftness
+        case .optics:
+            next.distortion = id.distortion
+            next.chromaticAberration = id.chromaticAberration
+            next.defringePurple = id.defringePurple
+            next.defringeGreen = id.defringeGreen
         }
         return next
     }
@@ -404,6 +549,14 @@ struct ImageAdjustParameters: Equatable, Codable {
 
     private func near(_ a: Double, _ b: Double) -> Bool {
         abs(a - b) < 0.001
+    }
+
+    private func nearCurve(_ a: [Double], _ b: [Double]) -> Bool {
+        zip(Self.normalizedCurve(a), Self.normalizedCurve(b)).allSatisfy { near($0, $1) }
+    }
+
+    private func nearHSL(_ a: [Double], _ b: [Double]) -> Bool {
+        zip(Self.normalizedHSL(a), Self.normalizedHSL(b)).allSatisfy { near($0, $1) }
     }
 
     /// Apply the develop chain. Returns `nil` when identity (caller keeps original).
@@ -449,6 +602,18 @@ struct ImageAdjustParameters: Equatable, Codable {
             if let out = filter.outputImage { current = out }
         }
 
+        if smartContrast > 0.001 {
+            current = applySmartContrast(to: current, amount: smartContrast)
+        }
+
+        if isCurveEdited(curveLuma) || isCurveEdited(curveRed) || isCurveEdited(curveGreen) || isCurveEdited(curveBlue) {
+            current = applyToneCurves(to: current)
+        }
+
+        if isHSLEdited {
+            current = applyHSL(to: current)
+        }
+
         if blackAndWhite > 0.001 {
             current = applyBlackAndWhiteLook(
                 to: current,
@@ -472,8 +637,14 @@ struct ImageAdjustParameters: Equatable, Codable {
 
         if abs(temperature) >= 0.001 || abs(tint) >= 0.001,
            let filter = CIFilter(name: "CITemperatureAndTint") {
+            // Sliders are creative / Lightroom-style: +temp warms, +tint magentas.
+            // CITemperatureAndTint vectors are illuminant-style (higher K = cooler;
+            // +Y tint = greener), so invert when driving targetNeutral.
             let neutral = CIVector(x: 6500, y: 0)
-            let target = CIVector(x: 6500 + CGFloat(temperature) * 2500, y: CGFloat(tint) * 100)
+            let target = CIVector(
+                x: 6500 - CGFloat(temperature) * 4200,
+                y: CGFloat(-tint) * 160
+            )
             filter.setValue(current, forKey: kCIInputImageKey)
             filter.setValue(neutral, forKey: "inputNeutral")
             filter.setValue(target, forKey: "inputTargetNeutral")
@@ -531,11 +702,8 @@ struct ImageAdjustParameters: Equatable, Codable {
             current = applyLandscape(to: current, amount: landscape, foliage: landscapeFoliage, sky: landscapeSky)
         }
 
-        if denoise > 0.001, let filter = CIFilter(name: "CINoiseReduction") {
-            filter.setValue(current, forKey: kCIInputImageKey)
-            filter.setValue(NSNumber(value: denoise * 0.08), forKey: "inputNoiseLevel")
-            filter.setValue(NSNumber(value: 0.35 + denoise * 0.4), forKey: "inputSharpness")
-            if let out = filter.outputImage { current = out }
+        if denoise > 0.001 || denoiseColor > 0.001 {
+            current = applyNoiseReduction(to: current)
         }
 
         if abs(structure) >= 0.001, let filter = CIFilter(name: "CIUnsharpMask") {
@@ -552,10 +720,13 @@ struct ImageAdjustParameters: Equatable, Codable {
             if let out = filter.outputImage { current = out }
         }
 
-        if sharpness > 0.001, let filter = CIFilter(name: "CISharpenLuminance") {
-            filter.setValue(current, forKey: kCIInputImageKey)
-            filter.setValue(NSNumber(value: sharpness * 0.85), forKey: kCIInputSharpnessKey)
-            if let out = filter.outputImage { current = out }
+        if sharpness > 0.001 {
+            current = applySharpening(to: current)
+        }
+
+        if abs(distortion) >= 0.001 || chromaticAberration > 0.001
+            || defringePurple > 0.001 || defringeGreen > 0.001 {
+            current = applyOptics(to: current)
         }
 
         if abs(dodgeBurn) > 0.001 {
@@ -575,13 +746,8 @@ struct ImageAdjustParameters: Equatable, Codable {
             current = applySunrays(to: current, amount: sunrays, length: sunraysLength, warmth: sunraysWarmth)
         }
 
-        if vignette > 0.001, let filter = CIFilter(name: "CIVignette") {
-            let mid = max(0, min(1, vignetteMidpoint))
-            filter.setValue(current, forKey: kCIInputImageKey)
-            filter.setValue(NSNumber(value: vignette * 1.35), forKey: kCIInputIntensityKey)
-            // Higher midpoint keeps a larger clear center (darkening hugs the edges).
-            filter.setValue(NSNumber(value: 0.55 + mid * 1.55 + vignette * 0.25), forKey: kCIInputRadiusKey)
-            if let out = filter.outputImage { current = out }
+        if vignette > 0.001 {
+            current = applyVignette(to: current)
         }
 
         if blur > 0.001 {
@@ -1269,6 +1435,365 @@ struct ImageAdjustParameters: Equatable, Codable {
         matrix.setValue(CIVector(x: 0, y: 0, z: 1 + sh * amount, w: 0), forKey: "inputBVector")
         matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
         return matrix.outputImage ?? image
+    }
+
+    // MARK: - Pro Wave 2 / Optics helpers
+
+    private func isCurveEdited(_ curve: [Double]) -> Bool {
+        !nearCurve(curve, Self.identityCurve)
+    }
+
+    private var isHSLEdited: Bool {
+        !nearHSL(hslHue, Array(repeating: 0, count: Self.hslChannelCount))
+            || !nearHSL(hslSat, Array(repeating: 0, count: Self.hslChannelCount))
+            || !nearHSL(hslLuma, Array(repeating: 0, count: Self.hslChannelCount))
+    }
+
+    private func applySmartContrast(to image: CIImage, amount: Double) -> CIImage {
+        let s = max(0, min(1, amount))
+        guard s > 0.001, let filter = CIFilter(name: "CIToneCurve") else { return image }
+        // Midtone S-curve — stronger lift in mids without clipping ends hard.
+        let pull = CGFloat(s * 0.14)
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint0")
+        filter.setValue(CIVector(x: 0.25, y: 0.25 - pull * 0.55), forKey: "inputPoint1")
+        filter.setValue(CIVector(x: 0.5, y: 0.5), forKey: "inputPoint2")
+        filter.setValue(CIVector(x: 0.75, y: 0.75 + pull * 0.55), forKey: "inputPoint3")
+        filter.setValue(CIVector(x: 1, y: 1), forKey: "inputPoint4")
+        return filter.outputImage ?? image
+    }
+
+    private func applyToneCurves(to image: CIImage) -> CIImage {
+        var current = image
+        if isCurveEdited(curveLuma), let filter = CIFilter(name: "CIToneCurve") {
+            applyCurvePoints(curveLuma, to: filter, image: current)
+            if let out = filter.outputImage { current = out }
+        }
+        // Per-channel via color matrix mixes after RGB curves approximated with tone curve on separated channels.
+        if isCurveEdited(curveRed) || isCurveEdited(curveGreen) || isCurveEdited(curveBlue) {
+            current = applyRGBCurves(to: current)
+        }
+        return current
+    }
+
+    private func applyCurvePoints(_ curve: [Double], to filter: CIFilter, image: CIImage) {
+        let c = Self.normalizedCurve(curve)
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(x: 0, y: CGFloat(c[0])), forKey: "inputPoint0")
+        filter.setValue(CIVector(x: 0.25, y: CGFloat(c[1])), forKey: "inputPoint1")
+        filter.setValue(CIVector(x: 0.5, y: CGFloat(c[2])), forKey: "inputPoint2")
+        filter.setValue(CIVector(x: 0.75, y: CGFloat(c[3])), forKey: "inputPoint3")
+        filter.setValue(CIVector(x: 1, y: CGFloat(c[4])), forKey: "inputPoint4")
+    }
+
+    private func applyRGBCurves(to image: CIImage) -> CIImage {
+        let extent = image.extent
+        func curvedChannel(_ curve: [Double], sourceWeights: (CGFloat, CGFloat, CGFloat)) -> CIImage? {
+            // Lift the source channel into grayscale so CIToneCurve remaps that channel's values.
+            guard let toGray = CIFilter(name: "CIColorMatrix") else { return nil }
+            let (wr, wg, wb) = sourceWeights
+            toGray.setValue(image, forKey: kCIInputImageKey)
+            toGray.setValue(CIVector(x: wr, y: wg, z: wb, w: 0), forKey: "inputRVector")
+            toGray.setValue(CIVector(x: wr, y: wg, z: wb, w: 0), forKey: "inputGVector")
+            toGray.setValue(CIVector(x: wr, y: wg, z: wb, w: 0), forKey: "inputBVector")
+            toGray.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+            guard var gray = toGray.outputImage else { return nil }
+            if isCurveEdited(curve), let tone = CIFilter(name: "CIToneCurve") {
+                applyCurvePoints(curve, to: tone, image: gray)
+                gray = tone.outputImage ?? gray
+            }
+            return gray.cropped(to: extent)
+        }
+
+        func keepChannel(_ gray: CIImage, channel: OpticsChannel) -> CIImage? {
+            guard let matrix = CIFilter(name: "CIColorMatrix") else { return nil }
+            matrix.setValue(gray, forKey: kCIInputImageKey)
+            switch channel {
+            case .red:
+                matrix.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
+            case .green:
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
+                matrix.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputGVector")
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
+            case .blue:
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
+                matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
+                matrix.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputBVector")
+            }
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+            return matrix.outputImage?.cropped(to: extent)
+        }
+
+        guard let rGray = curvedChannel(curveRed, sourceWeights: (1, 0, 0)),
+              let gGray = curvedChannel(curveGreen, sourceWeights: (0, 1, 0)),
+              let bGray = curvedChannel(curveBlue, sourceWeights: (0, 0, 1)),
+              let r = keepChannel(rGray, channel: .red),
+              let g = keepChannel(gGray, channel: .green),
+              let b = keepChannel(bGray, channel: .blue),
+              let add1 = CIFilter(name: "CIAdditionCompositing"),
+              let add2 = CIFilter(name: "CIAdditionCompositing")
+        else { return image }
+
+        add1.setValue(r, forKey: kCIInputImageKey)
+        add1.setValue(g, forKey: kCIInputBackgroundImageKey)
+        guard let rg = add1.outputImage else { return image }
+        add2.setValue(rg, forKey: kCIInputImageKey)
+        add2.setValue(b, forKey: kCIInputBackgroundImageKey)
+        return add2.outputImage?.cropped(to: extent) ?? image
+    }
+
+    private func applyHSL(to image: CIImage) -> CIImage {
+        guard isHSLEdited else { return image }
+        let dimension = 16
+        let count = dimension * dimension * dimension
+        var cube = [Float](repeating: 0, count: count * 4)
+        // Channel centers in degrees: R O Y G A B P M
+        let centers: [Double] = [0, 30, 60, 120, 180, 240, 275, 315]
+        let halfWidth = 28.0
+
+        for b in 0..<dimension {
+            for g in 0..<dimension {
+                for r in 0..<dimension {
+                    let rf = Double(r) / Double(dimension - 1)
+                    let gf = Double(g) / Double(dimension - 1)
+                    let bf = Double(b) / Double(dimension - 1)
+                    var (h, s, l) = rgbToHSL(rf, gf, bf)
+
+                    for i in 0..<Self.hslChannelCount {
+                        let hueEdit = hslHue[i]
+                        let satEdit = hslSat[i]
+                        let lumaEdit = hslLuma[i]
+                        if abs(hueEdit) < 0.001, abs(satEdit) < 0.001, abs(lumaEdit) < 0.001 {
+                            continue
+                        }
+                        let weight = hueWeight(h, center: centers[i], halfWidth: halfWidth)
+                        guard weight > 0.001 else { continue }
+                        h = (h + hueEdit * 40 * weight + 360).truncatingRemainder(dividingBy: 360)
+                        s = max(0, min(1, s + satEdit * 0.55 * weight))
+                        l = max(0, min(1, l + lumaEdit * 0.22 * weight))
+                    }
+
+                    let (or, og, ob) = hslToRGB(h, s, l)
+                    let idx = (b * dimension * dimension + g * dimension + r) * 4
+                    cube[idx] = Float(or)
+                    cube[idx + 1] = Float(og)
+                    cube[idx + 2] = Float(ob)
+                    cube[idx + 3] = 1
+                }
+            }
+        }
+
+        guard let filter = CIFilter(name: "CIColorCube") else { return image }
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(dimension, forKey: "inputCubeDimension")
+        let data = cube.withUnsafeBufferPointer { Data(buffer: $0) }
+        filter.setValue(data, forKey: "inputCubeData")
+        return filter.outputImage?.cropped(to: image.extent) ?? image
+    }
+
+    private func hueWeight(_ hue: Double, center: Double, halfWidth: Double) -> Double {
+        var d = abs(hue - center)
+        if d > 180 { d = 360 - d }
+        if d >= halfWidth { return 0 }
+        let t = 1 - d / halfWidth
+        return t * t * (3 - 2 * t)
+    }
+
+    private func rgbToHSL(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+        let maxC = max(r, max(g, b))
+        let minC = min(r, min(g, b))
+        let l = (maxC + minC) / 2
+        let delta = maxC - minC
+        guard delta > 1e-6 else { return (0, 0, l) }
+        let s = l > 0.5 ? delta / (2 - maxC - minC) : delta / (maxC + minC)
+        var h: Double
+        if maxC == r {
+            h = (g - b) / delta + (g < b ? 6 : 0)
+        } else if maxC == g {
+            h = (b - r) / delta + 2
+        } else {
+            h = (r - g) / delta + 4
+        }
+        h *= 60
+        return (h, s, l)
+    }
+
+    private func hslToRGB(_ h: Double, _ s: Double, _ l: Double) -> (Double, Double, Double) {
+        guard s > 1e-6 else { return (l, l, l) }
+        func hue2rgb(_ p: Double, _ q: Double, _ tIn: Double) -> Double {
+            var t = tIn
+            if t < 0 { t += 1 }
+            if t > 1 { t -= 1 }
+            if t < 1 / 6 { return p + (q - p) * 6 * t }
+            if t < 1 / 2 { return q }
+            if t < 2 / 3 { return p + (q - p) * (2 / 3 - t) * 6 }
+            return p
+        }
+        let q = l < 0.5 ? l * (1 + s) : l + s - l * s
+        let p = 2 * l - q
+        let hk = h / 360
+        return (hue2rgb(p, q, hk + 1 / 3), hue2rgb(p, q, hk), hue2rgb(p, q, hk - 1 / 3))
+    }
+
+    private func applySharpening(to image: CIImage) -> CIImage {
+        let amount = max(0, sharpness)
+        let radius = 0.4 + max(0, min(1, sharpenRadius)) * 3.6
+        let detail = max(0, min(1, sharpenDetail))
+        guard let unsharp = CIFilter(name: "CIUnsharpMask") else { return image }
+        unsharp.setValue(image, forKey: kCIInputImageKey)
+        unsharp.setValue(NSNumber(value: radius), forKey: kCIInputRadiusKey)
+        unsharp.setValue(NSNumber(value: amount * (0.35 + detail * 0.55)), forKey: kCIInputIntensityKey)
+        guard let sharp = unsharp.outputImage else { return image }
+        // Low detail → blend toward edge-only (mix original back into flats).
+        let edgeBias = 1 - detail
+        guard edgeBias > 0.05, let mix = CIFilter(name: "CIDissolveTransition") else { return sharp }
+        mix.setValue(sharp, forKey: kCIInputImageKey)
+        mix.setValue(image, forKey: kCIInputTargetImageKey)
+        mix.setValue(NSNumber(value: edgeBias * 0.45), forKey: kCIInputTimeKey)
+        return mix.outputImage?.cropped(to: image.extent) ?? sharp
+    }
+
+    private func applyNoiseReduction(to image: CIImage) -> CIImage {
+        var current = image
+        let luma = max(0, min(1, denoise))
+        let color = max(0, min(1, denoiseColor))
+        let detailKeep = max(0, min(1, denoiseDetail))
+        if luma > 0.001, let filter = CIFilter(name: "CINoiseReduction") {
+            filter.setValue(current, forKey: kCIInputImageKey)
+            filter.setValue(NSNumber(value: luma * 0.08 * (1.15 - detailKeep * 0.45)), forKey: "inputNoiseLevel")
+            filter.setValue(NSNumber(value: 0.25 + detailKeep * 0.55), forKey: "inputSharpness")
+            if let out = filter.outputImage { current = out }
+        }
+        if color > 0.001, let blur = CIFilter(name: "CIGaussianBlur") {
+            // Soft chroma smooth: blur then mix luma back from original.
+            blur.setValue(current, forKey: kCIInputImageKey)
+            blur.setValue(NSNumber(value: 0.6 + color * 2.2), forKey: kCIInputRadiusKey)
+            if let soft = blur.outputImage?.cropped(to: current.extent),
+               let mix = CIFilter(name: "CIDissolveTransition") {
+                mix.setValue(current, forKey: kCIInputImageKey)
+                mix.setValue(soft, forKey: kCIInputTargetImageKey)
+                mix.setValue(NSNumber(value: color * 0.55 * (1 - detailKeep * 0.35)), forKey: kCIInputTimeKey)
+                if let out = mix.outputImage?.cropped(to: current.extent) { current = out }
+            }
+        }
+        return current
+    }
+
+    private func applyVignette(to image: CIImage) -> CIImage {
+        let mid = max(0, min(1, vignetteMidpoint))
+        let cx = max(0, min(1, vignetteCenterX))
+        let cy = max(0, min(1, vignetteCenterY))
+        let extent = image.extent
+        let center = CGPoint(
+            x: extent.midX - (0.5 - cx) * extent.width,
+            y: extent.midY - (0.5 - cy) * extent.height
+        )
+        if abs(cx - 0.5) < 0.01, abs(cy - 0.5) < 0.01, let filter = CIFilter(name: "CIVignette") {
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(NSNumber(value: vignette * 1.35), forKey: kCIInputIntensityKey)
+            filter.setValue(NSNumber(value: 0.55 + mid * 1.55 + vignette * 0.25), forKey: kCIInputRadiusKey)
+            return filter.outputImage ?? image
+        }
+        if let filter = CIFilter(name: "CIVignetteEffect") {
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(CIVector(x: center.x, y: center.y), forKey: kCIInputCenterKey)
+            filter.setValue(NSNumber(value: vignette * 1.2), forKey: kCIInputIntensityKey)
+            let radius = min(extent.width, extent.height) * (0.35 + mid * 0.55)
+            filter.setValue(NSNumber(value: radius), forKey: kCIInputRadiusKey)
+            return filter.outputImage?.cropped(to: extent) ?? image
+        }
+        return image
+    }
+
+    private func applyOptics(to image: CIImage) -> CIImage {
+        var current = image
+        let extent = image.extent
+        if abs(distortion) >= 0.001, let bump = CIFilter(name: "CIBumpDistortion") {
+            let scale = CGFloat(-distortion * 0.35)
+            bump.setValue(current, forKey: kCIInputImageKey)
+            bump.setValue(CIVector(x: extent.midX, y: extent.midY), forKey: kCIInputCenterKey)
+            bump.setValue(NSNumber(value: min(extent.width, extent.height) * 0.55), forKey: kCIInputRadiusKey)
+            bump.setValue(NSNumber(value: scale), forKey: kCIInputScaleKey)
+            if let out = bump.outputImage?.cropped(to: extent) { current = out }
+        }
+        if chromaticAberration > 0.001 {
+            let shift = chromaticAberration * 1.8
+            if let r = shiftedChannel(current, dx: shift, dy: 0, keep: .red),
+               let b = shiftedChannel(current, dx: -shift, dy: 0, keep: .blue),
+               let g = shiftedChannel(current, dx: 0, dy: 0, keep: .green),
+               let add1 = CIFilter(name: "CIAdditionCompositing"),
+               let add2 = CIFilter(name: "CIAdditionCompositing") {
+                add1.setValue(r, forKey: kCIInputImageKey)
+                add1.setValue(g, forKey: kCIInputBackgroundImageKey)
+                if let rg = add1.outputImage {
+                    add2.setValue(rg, forKey: kCIInputImageKey)
+                    add2.setValue(b, forKey: kCIInputBackgroundImageKey)
+                    if let out = add2.outputImage?.cropped(to: extent) { current = out }
+                }
+            }
+        }
+        if defringePurple > 0.001 || defringeGreen > 0.001,
+           let controls = CIFilter(name: "CIColorControls") {
+            let amount = max(defringePurple, defringeGreen) * 0.35
+            controls.setValue(current, forKey: kCIInputImageKey)
+            controls.setValue(NSNumber(value: 1 - amount), forKey: kCIInputSaturationKey)
+            controls.setValue(NSNumber(value: 0), forKey: kCIInputBrightnessKey)
+            controls.setValue(NSNumber(value: 1), forKey: kCIInputContrastKey)
+            if let desat = controls.outputImage,
+               let edges = CIFilter(name: "CIEdges") {
+                edges.setValue(current, forKey: kCIInputImageKey)
+                edges.setValue(NSNumber(value: 2.5), forKey: kCIInputIntensityKey)
+                if let edgeMask = edges.outputImage,
+                   let mix = CIFilter(name: "CIBlendWithMask") {
+                    mix.setValue(desat, forKey: kCIInputImageKey)
+                    mix.setValue(current, forKey: kCIInputBackgroundImageKey)
+                    mix.setValue(edgeMask, forKey: kCIInputMaskImageKey)
+                    if let out = mix.outputImage?.cropped(to: extent) { current = out }
+                }
+            }
+        }
+        return current
+    }
+
+    private enum OpticsChannel { case red, green, blue }
+
+    private func shiftedChannel(_ image: CIImage, dx: Double, dy: Double, keep: OpticsChannel) -> CIImage? {
+        let extent = image.extent
+        var src = image
+        if abs(dx) > 0.001 || abs(dy) > 0.001 {
+            let t = CGAffineTransform(translationX: CGFloat(dx), y: CGFloat(dy))
+            src = image.transformed(by: t).cropped(to: extent)
+        }
+        guard let matrix = CIFilter(name: "CIColorMatrix") else { return nil }
+        matrix.setValue(src, forKey: kCIInputImageKey)
+        switch keep {
+        case .red:
+            matrix.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
+        case .green:
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
+            matrix.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
+        case .blue:
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
+            matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
+            matrix.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
+        }
+        matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        return matrix.outputImage?.cropped(to: extent)
+    }
+
+    /// Solve Temperature / Tint (−1…1) so a sampled near-neutral becomes grey under `CITemperatureAndTint`.
+    static func whiteBalanceOffsets(fromNeutralRGB r: Double, g: Double, b: Double) -> (temperature: Double, tint: Double) {
+        let avg = max((r + g + b) / 3.0, 1e-4)
+        // Warm cast → cool correction (negative temperature / left / blue).
+        let temperature = max(-1, min(1, (b - r) / avg * 0.95))
+        // Green cast → magenta correction (positive tint / right / magenta).
+        let tint = max(-1, min(1, (g - (r + b) * 0.5) / avg * 0.95))
+        return (temperature, tint)
     }
 }
 

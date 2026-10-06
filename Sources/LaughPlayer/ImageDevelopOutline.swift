@@ -55,9 +55,12 @@ enum ImageDevelopOutline {
             .init(id: "erase", title: "Erase", symbolName: "eraser.fill", adjustSection: nil),
             .init(id: "structureAI", title: "Structure (AI)", symbolName: "square.3.layers.3d", adjustSection: nil),
             .init(id: "color", title: "Color", symbolName: "paintpalette.fill", adjustSection: .color),
+            .init(id: "curves", title: "Curves", symbolName: "chart.xyaxis.line", adjustSection: .curves),
+            .init(id: "hsl", title: "HSL", symbolName: "circle.hexagongrid", adjustSection: .hsl),
             .init(id: "blackAndWhite", title: "Black & White", symbolName: "circle.lefthalf.filled", adjustSection: .blackAndWhite),
             .init(id: "details", title: "Details", symbolName: "wand.and.stars", adjustSection: .details),
-            .init(id: "denoise", title: "Denoise", symbolName: "waveform", adjustSection: .denoise),
+            .init(id: "denoise", title: "Noise Reduction", symbolName: "waveform", adjustSection: .denoise),
+            .init(id: "optics", title: "Optics", symbolName: "camera.metering.center.weighted", adjustSection: .optics),
             .init(id: "vignette", title: "Vignette", symbolName: "circle.dashed", adjustSection: .vignette)
         ]),
         (.landscape, [
@@ -123,6 +126,7 @@ enum ImageDevelopOutlineStyle {
 
 /// Quiet group title between tool clusters on Edits.
 final class ImageDevelopGroupHeaderView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
     private let label = NSTextField(labelWithString: "")
 
     init(title: String) {

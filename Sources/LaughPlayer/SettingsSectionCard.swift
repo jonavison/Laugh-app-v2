@@ -125,6 +125,7 @@ enum SettingsSectionStyle {
 
 /// Soft glass plate for expanded collapsible content — light base with a clear accent wash.
 final class SettingsGlassPlateView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
     private let tintOverlay = NSView()
     private let accentFillOverlay = NSView()
     private let accentOverlay = NSView()
@@ -457,8 +458,9 @@ final class SettingsCardRow {
 }
 
 final class SettingsSectionCard: NSView {
-    private let backgroundView = NSView()
-    private let contentStack = NSStackView()
+    override var mouseDownCanMoveWindow: Bool { false }
+    private let backgroundView = ImmersivePanelFillView()
+    private let contentStack = ImmersivePanelStackView()
     private var accentTint: NSColor?
     /// When true, sit inside the frosted glass plate (clear fill, no extra border).
     var usesEditsGlassFill = false {
@@ -593,7 +595,7 @@ enum SettingsSectionBuilder {
         leadingGap: CGFloat? = nil,
         configure: (SettingsSectionCard) -> Void
     ) -> (container: NSStackView, section: CollapsibleSettingsSectionView) {
-        let container = NSStackView()
+        let container = ImmersivePanelStackView()
         container.orientation = .vertical
         container.alignment = .leading
         container.spacing = SettingsSectionStyle.headerToCardSpacing
@@ -601,7 +603,7 @@ enum SettingsSectionBuilder {
 
         let gapHeight = leadingGap ?? (isFirst ? 0 : SettingsSectionStyle.sectionGap)
         if gapHeight > 0 {
-            let gap = NSView()
+            let gap = ImmersivePanelFillView()
             gap.translatesAutoresizingMaskIntoConstraints = false
             gap.heightAnchor.constraint(equalToConstant: gapHeight).isActive = true
             container.addArrangedSubview(gap)
@@ -632,6 +634,7 @@ enum SettingsSectionBuilder {
 /// Titled disclosure header wrapping a `SettingsSectionCard` of edit controls.
 /// Frosted glass wraps only the expanded content body — not the header row.
 final class CollapsibleSettingsSectionView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
     private let contentGlassPlate = SettingsGlassPlateView()
     private let headerButton = NSButton(title: "", target: nil, action: nil)
     private let headerChrome = SectionHeaderChromeView()
@@ -641,7 +644,7 @@ final class CollapsibleSettingsSectionView: NSView {
     private let bypassButton = NSButton(title: "", target: nil, action: nil)
     private let restoreButton = NSButton(title: "", target: nil, action: nil)
     private let editActionsStack = NSStackView()
-    private let bodyClip = NSView()
+    private let bodyClip = ImmersivePanelFillView()
     private let card: SettingsSectionCard
     private let symbolName: String
     private let accentIndex: Int
@@ -919,7 +922,7 @@ final class CollapsibleSettingsSectionView: NSView {
         bodyHeightConstraint = bodyClip.heightAnchor.constraint(equalToConstant: 0)
         bodyHeightConstraint.priority = .required
 
-        let column = NSStackView(views: [headerChrome, bodyClip])
+        let column = ImmersivePanelStackView(views: [headerChrome, bodyClip])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 0
@@ -1041,7 +1044,7 @@ final class CollapsibleSettingsSectionView: NSView {
 
     private func applyExpandedState(animated: Bool) {
         headerButton.setAccessibilityValue(isExpanded ? "Expanded" : "Collapsed")
-        headerButton.toolTip = isExpanded ? "Collapse \(titleLabel.stringValue)" : "Expand \(titleLabel.stringValue)"
+        headerButton.toolTip = nil
         animateChevron(expanded: isExpanded, animated: animated)
         updateChevronVisibility(animated: animated)
 
@@ -1170,6 +1173,7 @@ final class CollapsibleSettingsSectionView: NSView {
 
 /// Routes header clicks to expand, except for protected action buttons (eye / restore).
 private final class SectionHeaderChromeView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
     weak var expandButton: NSButton?
     var protectedViews: [NSView] = []
 

@@ -36,6 +36,20 @@ enum LaughTheme {
         return NSColor.labelColor.withAlphaComponent(isDark ? 0.14 : 0.08)
     }
 
+    /// Louder icon/label tint for bar chrome hover (no fill wash).
+    static func chromeHoverTint(from idle: NSColor) -> NSColor {
+        idle.blended(withFraction: 0.65, of: .labelColor) ?? .labelColor
+    }
+
+    /// Library grid/gallery tile hover rim — grey only.
+    /// Must stay visually quieter than teal selection chrome (never near-white).
+    static func libraryTileHoverBorder(
+        appearance: NSAppearance = NSApp.effectiveAppearance
+    ) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return NSColor.labelColor.withAlphaComponent(isDark ? 0.30 : 0.20)
+    }
+
     /// Brighter teal for playback seek/volume (readable over dark video).
     static var playbackAccent: NSColor { sidebarSeparatorGradientStart }
 
@@ -243,7 +257,7 @@ enum LaughTheme {
         )
     }
 
-    /// Shared hairline for the edit column leading edge and image tools bar border.
+    /// Raw separator for stroked chrome (tools bar border, etc.).
     static func imageStudioChromeBorder(
         appearance: NSAppearance = NSApp.effectiveAppearance
     ) -> NSColor {
@@ -252,6 +266,14 @@ enum LaughTheme {
             color = NSColor.separatorColor
         }
         return color
+    }
+
+    /// Opaque sidebar edge hairline for Info trailing / Edits leading.
+    /// Same grey as the library left panel’s trailing divider (`separatorColor`).
+    static func imageStudioSidebarEdgeBorder(
+        appearance: NSAppearance = NSApp.effectiveAppearance
+    ) -> NSColor {
+        imageStudioChromeBorder(appearance: appearance)
     }
 
     /// Color of the studio diagonal at a unit point in layer space (origin bottom-leading, matching `CAGradientLayer`).
@@ -308,7 +330,10 @@ enum LaughTheme {
             applyContentTintColor(color, to: slider)
             if !slider.isVertical {
                 if let flat = slider.flatBarCell {
-                    flat.filledColor = color
+                    // Preserve semantic color-axis gradients; only retint solid fills.
+                    if !flat.usesSemanticTrack {
+                        flat.filledColor = color
+                    }
                     flat.showsKnob = true
                     slider.needsDisplay = true
                 } else {

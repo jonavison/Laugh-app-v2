@@ -68,6 +68,11 @@ enum MediaKindDetector {
         "gif", "apng"
     ]
 
+    /// Camera RAW stills (NEF/CR2/ARW/DNG/…). Viewing should demosaic, not the embedded JPEG.
+    static func isCameraRAW(_ url: URL) -> Bool {
+        rawExtensions.contains(url.pathExtension.lowercased())
+    }
+
     static func kind(for url: URL) -> DroppedMediaKind {
         let ext = url.pathExtension.lowercased()
         if imageExtensions.contains(ext) { return .image }

@@ -3,6 +3,7 @@ import AppKit
 /// Pinned footer on the image studio edit sidebar when adjusts are dirty:
 /// Reset All above Save Preset / Export.
 final class ImageStudioCommitFooter: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
     let resetAllButton = CommitFooterActionButton(
         title: "Reset All",
         symbol: "arrow.counterclockwise",
