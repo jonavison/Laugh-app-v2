@@ -124,6 +124,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private let settingsScrollView = NSScrollView()
     private let settingsTopOverflowFade = ScrollOverflowFadeView()
     private let settingsBottomOverflowFade = ScrollOverflowFadeView()
+    /// Bumped to cancel an in-flight Batch enter fade on the right rail.
+    private var batchSidebarFadeGeneration = 0
     private let videoTabView = ImmersivePanelStackView()
     private let audioTabView = ImmersivePanelStackView()
     private let audioSettings = AudioSettingsControls()
@@ -204,7 +206,37 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var imageSavedPresetsHost = NSStackView()
     private let imageFolderCarousel = ImageFolderCarouselView()
     private let imageStudioMetaBar = ImageStudioMetaBarView()
+    private let imageSlideshowControls = ImageSlideshowControlsView()
     private var imageFolderSiblings: [LibraryMediaFile] = []
+    /// Immersive full-screen image presentation (studio chrome hidden). Slideshow auto-advance is optional on top.
+    private(set) var isImageSlideshowActive = false
+    private var imageSlideshowPlaying = false
+    private var imageSlideshowInterval: TimeInterval = 4
+    private var imageSlideshowTimer: Timer?
+    private var imageSlideshowEnteredFullscreen = false
+    private var imageSlideshowRestoreLeftInfo = false
+    private var imageSlideshowRestoreRightSettings = false
+    private var imageSlideshowControlsHideWork: DispatchWorkItem?
+    private var imageSlideshowPointerMonitor: Any?
+    private static let imageSlideshowIntervalDefaultsKey = "ImageSlideshowIntervalSeconds"
+
+    /// True while auto-advance is running (menu “Stop Slideshow”).
+    var isImageSlideshowPlaying: Bool { imageSlideshowPlaying }
+    /// Last **saved** develop document for the open image (store). Unsaved = live ≠ this.
+    private var developSavedBaseline: ImageDevelopEdit = .identity
+    /// Live document currently applied to the session (working copy or saved).
+    private var developLiveDocument: ImageDevelopEdit = .identity
+    /// Per-path unsaved working copies while browsing — no modal on leave (ADR 0006).
+    private var developWorkingByPath: [String: ImageDevelopEdit] = [:]
+    private var imageBatchSelection = ImageBatchSelection()
+    /// Pre-batch look per path (dry end of the Batch catalog slider).
+    private var batchDryParamsByPath: [String: ImageAdjustParameters] = [:]
+    /// Per-path blend of dry → current batch look. Default 1 (fully wet).
+    private var batchMixByPath: [String: Double] = [:]
+    /// Blocks batch stamp while loading a document into the session (avoid wiping the set).
+    private var suppressBatchLookPropagate = false
+    private var persistBatchSessionWork: DispatchWorkItem?
+    private var stampBatchLookWork: DispatchWorkItem?
     private var imageSurfaceBottomConstraint: NSLayoutConstraint?
     private var imageSurfaceLeadingConstraint: NSLayoutConstraint?
     private var imageSurfaceLeadingToInfoConstraint: NSLayoutConstraint?
@@ -504,9 +536,54 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageFolderCarousel.translatesAutoresizingMaskIntoConstraints = false
         imageFolderCarousel.isHidden = true
         imageFolderCarousel.onSelect = { [weak self] url in
-            self?.loadImage(url: url)
+            self?.handleFilmstripOpen(url)
+        }
+        imageFolderCarousel.onBatchToggle = { [weak self] url in
+            self?.handleFilmstripBatchToggle(url)
+        }
+        imageFolderCarousel.onBatchRange = { [weak self] url in
+            self?.handleFilmstripBatchRange(url)
         }
         view.addSubview(imageFolderCarousel)
+
+        leftImageInfoSheet.batchView.onClearSelection = { [weak self] in
+            self?.clearImageBatchSelection()
+        }
+        leftImageInfoSheet.onTabChange = { [weak self] tab in
+            guard let self else { return }
+            if tab == .batch {
+                self.runBatchSidebarEnterWork {
+                    self.propagateDevelopParamsToBatchIfNeeded(immediate: true)
+                }
+            } else {
+                self.endBatchSidebarContentFade()
+                self.reloadOpenImageDevelopForSingleEdit()
+            }
+        }
+        leftImageInfoSheet.batchView.onRevealItem = { [weak self] url in
+            self?.handleFilmstripOpen(url)
+        }
+        leftImageInfoSheet.batchView.onMixChange = { [weak self] url, amount in
+            self?.handleBatchMixChange(url: url, amount: amount, commit: false)
+        }
+        leftImageInfoSheet.batchView.onMixCommit = { [weak self] url, amount in
+            self?.handleBatchMixChange(url: url, amount: amount, commit: true)
+        }
+        leftImageInfoSheet.batchView.onRemoveItem = { [weak self] url in
+            self?.handleBatchRemove(url)
+        }
+        leftImageInfoSheet.editsView.onRevealItem = { [weak self] url in
+            self?.handleFilmstripOpen(url)
+        }
+        leftImageInfoSheet.editsView.onSaveAllUnsaved = { [weak self] in
+            self?.saveAllUnsavedDevelopEdits()
+        }
+        leftImageInfoSheet.editsView.onClearEdit = { [weak self] url in
+            self?.clearDevelopEdit(for: url)
+        }
+        leftImageInfoSheet.editsView.onClearAllEdits = { [weak self] in
+            self?.clearAllDevelopEditsInFolder()
+        }
 
         imageStudioMetaBar.translatesAutoresizingMaskIntoConstraints = false
         imageStudioMetaBar.isHidden = true
@@ -518,6 +595,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             self?.setImageBeforeAfter(showingBefore: showingBefore)
         }
         view.addSubview(imageStudioMetaBar)
+
+        imageSlideshowControls.isHidden = true
+        imageSlideshowControls.alphaValue = 0
+        imageSlideshowControls.onPrevious = { [weak self] in self?.stepImageSlideshow(forward: false) }
+        imageSlideshowControls.onNext = { [weak self] in self?.stepImageSlideshow(forward: true) }
+        imageSlideshowControls.onTogglePlayPause = { [weak self] in self?.toggleImageSlideshowPlayback() }
+        imageSlideshowControls.onIntervalChange = { [weak self] interval in
+            self?.setImageSlideshowInterval(interval)
+        }
+        imageSlideshowControls.onExit = { [weak self] in self?.exitImageSlideshow() }
+        imageSlideshowControls.onUserActivity = { [weak self] in
+            self?.revealImageSlideshowControls()
+        }
+        view.addSubview(imageSlideshowControls)
 
         leftEdgeHotZoneAffordance.translatesAutoresizingMaskIntoConstraints = false
         leftEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: false)
@@ -591,8 +682,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 self.updateImageZoomPercentLabel()
             }
             self.updateImageStudioCommitFooter()
+            self.refreshFilmstripDevelopMarks(syncEditsCatalog: false)
         }
         imageAdjustControls.bind(to: imageAdjustSession)
+        let controlsPullOnCommit = imageAdjustSession.onParametersCommitted
+        imageAdjustSession.onParametersCommitted = { [weak self] in
+            controlsPullOnCommit?()
+            self?.propagateDevelopParamsToBatchIfNeeded(immediate: true)
+        }
         imageAdjustControls.onWhiteBalanceEyedropperToggle = { [weak self] active in
             guard let self else { return }
             if active {
@@ -606,14 +703,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         imageAdjustSession.onChange = { [weak self] quality in
             guard let self else { return }
-            self.imageSurfaceView.setAdjustParameters(
-                self.imageAdjustSession.presentationParameters,
-                quality: quality
-            )
+            self.applyOpenImageAdjustPresentation(quality: quality)
+            // Preview the open still; coalesce the N-image stamp after settle.
+            if quality == .full {
+                self.propagateDevelopParamsToBatchIfNeeded(immediate: false)
+            }
         }
         imageAdjustSession.onChromeChange = { [weak self] in
             self?.refreshImageSectionEditChrome()
             self?.updateImageStudioCommitFooter()
+            self?.refreshEditsCatalogUI()
         }
         imageSelectionSession.onChange = { [weak self] quality in
             guard let self else { return }
@@ -728,6 +827,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         settingsScrollClipHost.addSubview(settingsBottomOverflowFade, positioned: .above, relativeTo: settingsScrollView)
 
         imageStudioCommitFooter.isHidden = true
+        imageStudioCommitFooter.saveDevelopButton.target = self
+        imageStudioCommitFooter.saveDevelopButton.action = #selector(imageStudioSaveDevelopPressed)
+        imageStudioCommitFooter.discardDevelopButton.target = self
+        imageStudioCommitFooter.discardDevelopButton.action = #selector(imageStudioDiscardDevelopPressed)
         imageStudioCommitFooter.resetAllButton.target = self
         imageStudioCommitFooter.resetAllButton.action = #selector(imageStudioResetAllPressed)
         imageStudioCommitFooter.exportButton.target = self
@@ -930,6 +1033,22 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageBarBottomConstraint!,
             imageBarHeightConstraint!,
             imageBarWidthConstraint!,
+
+            imageSlideshowControls.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            imageSlideshowControls.bottomAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.bottomAnchor,
+                constant: -28
+            ),
+            imageSlideshowControls.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            imageSlideshowControls.widthAnchor.constraint(greaterThanOrEqualToConstant: 360),
+            imageSlideshowControls.leadingAnchor.constraint(
+                greaterThanOrEqualTo: view.leadingAnchor,
+                constant: 24
+            ),
+            imageSlideshowControls.trailingAnchor.constraint(
+                lessThanOrEqualTo: view.trailingAnchor,
+                constant: -24
+            ),
 
             imageToolsBarFillView.leadingAnchor.constraint(equalTo: imageControlsContainer.leadingAnchor),
             imageToolsBarFillView.trailingAnchor.constraint(equalTo: imageControlsContainer.trailingAnchor),
@@ -1234,7 +1353,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         pendingVideoLoadWorkItem?.cancel()
         pendingVideoLoadWorkItem = nil
         let run = { [weak self] in
-            self?.performLoadVideo(
+            guard let self else { return }
+            self.stashDevelopWorkingForCurrentIfNeeded()
+            self.performLoadVideo(
                 url: url,
                 replaceCurrent: replaceCurrent,
                 startAt: startAt,
@@ -2316,6 +2437,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             print("[DEBUG-playback] skipped duplicate image load path=\(url.path)")
             return
         }
+
+        let standardized = url.standardizedFileURL
+        let leavingOtherImage = activeMediaKind == .image
+            && currentMediaURL != nil
+            && currentMediaURL?.standardizedFileURL != standardized
+        if leavingOtherImage {
+            stashDevelopWorkingForCurrentIfNeeded()
+        }
+
         lastLoadRequestURL = url.path
         lastLoadRequestAt = now
         print("[DEBUG-playback] Loading image: \(url.path)")
@@ -2338,6 +2468,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateVideoInfoLabels()
         cancelImageCropMode()
         imageSelectionSession.setSourceToken(url.path)
+        applyDevelopDocument(for: url)
 
         // Already browsing photos in studio: swap the image without forcing the edit column open.
         let stayingInImageStudio = activeMediaKind == .image
@@ -2346,13 +2477,16 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         RecentlyViewedStore.shared.record(url: url, kind: .image)
         refreshImageFolderCarousel(for: url)
 
+        restorePersistedBatchSessionIfNeeded()
+
         // Instant placeholder from the filmstrip thumb (already decoded) while ImageIO runs.
         let placeholderSize = ImageDisplayLoader.pixelSize(at: url) ?? lastImageSize
         if let thumb = imageFolderCarousel.thumbnailImage(for: url),
            let natural = placeholderSize, natural.width > 0, natural.height > 0 {
             lastImageSize = natural
             imageSurfaceView.setImage(thumb, naturalSize: natural)
-            imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+            restoreDevelopGeometryFromBaseline()
+            applyOpenImageAdjustPresentation()
         }
 
         if stayingInImageStudio {
@@ -2420,11 +2554,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageSurfaceView.replaceBaseImage(loaded.image, naturalSize: loaded.pixelSize)
         } else {
             imageSurfaceView.setImage(loaded.image, naturalSize: loaded.pixelSize)
+            restoreDevelopGeometryFromBaseline()
         }
-        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        applyOpenImageAdjustPresentation()
         refreshSubjectSelectChrome()
         updateImageZoomPercentLabel()
         refreshImageStudioMetaBar()
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks(syncEditsCatalog: false)
     }
 
     private func refreshImageFolderCarousel(for url: URL) {
@@ -2436,13 +2573,133 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             imageFolderSiblings = MediaLibraryScanner.imageFiles(in: folder, sort: sort)
         }
         imageFolderCarousel.setImages(imageFolderSiblings, selected: url)
+        refreshFilmstripDevelopMarks(syncEditsCatalog: false)
     }
 
     private func clearImageFolderCarousel() {
         imageFolderSiblings = []
         imageFolderSiblingsDirectory = nil
+        imageBatchSelection.clear()
         imageFolderCarousel.clear()
         updateImageStudioLayoutInsets()
+        refreshBatchCatalogUI()
+    }
+
+    private func handleFilmstripOpen(_ url: URL) {
+        // Plain click opens/views a still without ending the batch — Clear (or empty selection) dismisses it.
+        loadImage(url: url)
+        syncFilmstripBatchChrome()
+        if imageBatchSelection.isActive {
+            return
+        }
+        refreshBatchCatalogUI()
+    }
+
+    private func handleFilmstripBatchToggle(_ url: URL) {
+        let siblings = imageFolderSiblings.map(\.url)
+        let wasEmpty = imageBatchSelection.isEmpty
+        imageBatchSelection.toggle(url, siblings: siblings)
+        // First ⌘-click on another still: include the open image so batch becomes active (2+).
+        if wasEmpty, imageBatchSelection.count == 1, let current = currentMediaURL,
+           current.standardizedFileURL != url.standardizedFileURL {
+            imageBatchSelection.toggle(current, siblings: siblings)
+        }
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI(preferBatchTab: true)
+    }
+
+    private func handleFilmstripBatchRange(_ url: URL) {
+        let siblings = imageFolderSiblings.map(\.url)
+        if imageBatchSelection.rangeAnchor == nil, let current = currentMediaURL {
+            // Start range from the open still.
+            imageBatchSelection.clear()
+            imageBatchSelection.toggle(current, siblings: siblings)
+        }
+        imageBatchSelection.selectRange(to: url, siblings: siblings)
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI(preferBatchTab: true)
+    }
+
+    private func clearImageBatchSelection() {
+        imageBatchSelection.clear()
+        batchDryParamsByPath.removeAll()
+        batchMixByPath.removeAll()
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI()
+        leftImageInfoSheet.selectTab(.info)
+        reloadOpenImageDevelopForSingleEdit()
+        persistActiveBatchSession(immediate: true)
+    }
+
+    private func handleBatchRemove(_ url: URL) {
+        let path = normalizedDevelopPath(url)
+        imageBatchSelection.remove(url)
+        batchDryParamsByPath.removeValue(forKey: path)
+        batchMixByPath.removeValue(forKey: path)
+        if !imageBatchSelection.isActive {
+            clearImageBatchSelection()
+            return
+        }
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI(preferBatchTab: true)
+        persistActiveBatchSession(immediate: true)
+    }
+
+    private func syncFilmstripBatchChrome() {
+        imageFolderCarousel.setBatchSelection(imageBatchSelection.orderedURLs)
+    }
+
+    private func refreshBatchCatalogUI(preferBatchTab: Bool = false) {
+        var thumbs: [URL: NSImage] = [:]
+        for url in imageBatchSelection.orderedURLs {
+            if let image = imageFolderCarousel.thumbnailImage(for: url) {
+                thumbs[url.standardizedFileURL] = image
+            }
+        }
+        captureBatchDryBasesIfNeeded()
+        leftImageInfoSheet.batchView.configure(
+            urls: imageBatchSelection.orderedURLs,
+            thumbnails: thumbs,
+            mixByPath: batchMixByPath
+        )
+        refreshEditsCatalogUI()
+        // ⌘ / ⇧ filmstrip gestures always land on Batch (even at 1 selected — empty state guides 2+).
+        if preferBatchTab {
+            showLeftImageInfoSheet()
+            leftImageInfoSheet.selectTab(.batch)
+            runBatchSidebarEnterWork {
+                self.propagateDevelopParamsToBatchIfNeeded(immediate: true)
+            }
+        } else if !imageBatchSelection.isActive, leftImageInfoSheet.selectedTab == .batch {
+            endBatchSidebarContentFade()
+            leftImageInfoSheet.selectTab(.info)
+            reloadOpenImageDevelopForSingleEdit()
+        }
+    }
+
+    private func refreshEditsCatalogUI() {
+        var items: [ImageEditsCatalogView.Item] = []
+        let batchPaths = imageBatchSelection.isActive ? imageBatchSelection.pathSet : []
+        for file in imageFolderSiblings {
+            let path = file.url.standardizedFileURL.path
+            if batchPaths.contains(path) { continue }
+            let isUnsaved: Bool
+            if file.url.standardizedFileURL == currentMediaURL?.standardizedFileURL {
+                isUnsaved = hasUnsavedDevelopChanges || developWorkingByPath[path] != nil
+            } else {
+                isUnsaved = developWorkingByPath[path] != nil
+            }
+            let isSaved = ImageDevelopEditStore.hasEdit(forPath: path)
+            guard isUnsaved || isSaved else { continue }
+            items.append(.init(url: file.url, isUnsaved: isUnsaved, isSaved: isSaved))
+        }
+        var thumbs: [URL: NSImage] = [:]
+        for item in items {
+            if let image = imageFolderCarousel.thumbnailImage(for: item.url) {
+                thumbs[item.url.standardizedFileURL] = image
+            }
+        }
+        leftImageInfoSheet.editsView.configure(items: items, thumbnails: thumbs)
     }
 
     func debugInfo(window: NSWindow?) -> String {
@@ -2677,6 +2934,23 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             appendPlaybackQueueItems(playbackQueueItems(for: files))
         case .remove:
             handleLibraryBrowseBatchRemove(entries)
+        case .editAsBatch:
+            beginLibraryImageBatchEdit(entries)
+        }
+    }
+
+    private func beginLibraryImageBatchEdit(_ entries: [LibraryBrowseEntry]) {
+        let images = flattenBrowseEntriesToMedia(entries).filter { $0.kind == .image }
+        guard images.count >= 2, let first = images.first else { return }
+        loadImage(url: first.url)
+        imageBatchSelection.replace(
+            with: images.map(\.url),
+            preferredOrder: imageFolderSiblings.map(\.url)
+        )
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI(preferBatchTab: true)
+        if rightSettingsSheet.isHidden {
+            showSettingsSheet()
         }
     }
 
@@ -3098,7 +3372,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
     }
 
-    func showEmptySurface() {
+    @discardableResult
+    func showEmptySurface(force: Bool = false) -> Bool {
+        if isImageSlideshowActive {
+            exitImageSlideshow(restoreStudio: false)
+        }
+        if !force {
+            stashDevelopWorkingForCurrentIfNeeded()
+        }
         persistPlaybackResumePosition(force: true)
         activeMediaKind = .empty
         playbackLibraryOverlay = .closed
@@ -3133,6 +3414,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageSurfaceView.clearImage()
         clearImageFolderCarousel()
         cancelImageCropMode()
+        imageAdjustSession.resetAll()
+        developSavedBaseline = .identity
+        developLiveDocument = .identity
         lastImageSize = nil
         lastVideoCodecFourCC = nil
         lastVideoSize = nil
@@ -3165,6 +3449,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         applyWindowAspectFromSettings()
         installEdgeHotZoneClickMonitorIfNeeded()
         syncEdgeHotZoneAffordances()
+        return true
     }
 
     private func showVideoChrome() {
@@ -3262,8 +3547,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func updateImageStudioLayoutInsets() {
         let isImage = activeMediaKind == .image
-        let showMetaBar = isImage && !imageStudioMetaBar.isHidden
-        let showCarousel = isImage && !imageFolderCarousel.isHidden && imageFolderSiblings.count >= 2 && !imageCarouselUserHidden
+        let showMetaBar = isImage && !isImageSlideshowActive && !imageStudioMetaBar.isHidden
+        let showCarousel = isImage
+            && !isImageSlideshowActive
+            && !imageFolderCarousel.isHidden
+            && imageFolderSiblings.count >= 2
+            && !imageCarouselUserHidden
 
         var leading: CGFloat = 0
         var trailing: CGFloat = 0
@@ -3271,6 +3560,28 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         var bottom: CGFloat = 0
 
         if isImage {
+            if isImageSlideshowActive {
+                // Edge-to-edge still over a black floor — no studio chrome insets.
+                leading = 0
+                top = 0
+                bottom = 0
+                trailing = 0
+                imageCarouselTrailingToSidebarConstraint?.isActive = false
+                imageMetaBarTrailingToSidebarConstraint?.isActive = false
+                imageSurfaceTrailingToSidebarConstraint?.isActive = false
+                imageSurfaceLeadingToInfoConstraint?.isActive = false
+                imageCarouselLeadingToInfoConstraint?.isActive = false
+                imageMetaBarLeadingToInfoConstraint?.isActive = false
+                imageSurfaceLeadingConstraint?.isActive = true
+                imageCarouselLeadingConstraint?.isActive = true
+                imageMetaBarLeadingConstraint?.isActive = true
+                imageCarouselTrailingConstraint?.isActive = true
+                imageMetaBarTrailingConstraint?.isActive = true
+                imageSurfaceTrailingConstraint?.isActive = true
+                imageSurfaceLeadingConstraint?.constant = 0
+                imageSurfaceTrailingConstraint?.constant = 0
+                imageCarouselHeightConstraint?.constant = 0
+            } else {
             // Integrated split: photo / meta / carousel pin between left Info + right Edits
             // so opening the sidebars truly pushes the content column (not overlay sheets).
             leading = imageStudioMargin
@@ -3329,6 +3640,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 self?.imageFolderCarousel.recenterSelected(animated: false)
             }
             trailing = 0
+            }
         } else {
             imageCarouselTrailingToSidebarConstraint?.isActive = false
             imageMetaBarTrailingToSidebarConstraint?.isActive = false
@@ -3500,6 +3812,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func syncImageStudioFilmstripVisibility() {
+        if isImageSlideshowActive {
+            imageFolderCarousel.isHidden = true
+            imageStudioMetaBar.isHidden = true
+            imageCarouselHeightConstraint?.constant = 0
+            syncEdgeHotZoneStripInsets()
+            return
+        }
         let hasSiblings = imageFolderSiblings.count >= 2
         let showCarousel = activeMediaKind == .image && hasSiblings && !imageCarouselUserHidden
         imageFolderCarousel.isHidden = !showCarousel
@@ -3556,13 +3875,260 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         refreshImageStudioMetaBar()
     }
 
+    // MARK: - Image immersive / slideshow
+
+    var canToggleImageSlideshow: Bool {
+        activeMediaKind == .image && currentMediaURL != nil && playbackLibraryOverlay == .closed
+    }
+
+    /// F — immersive full-screen image (no auto-advance). Esc / F again exits.
+    func toggleImageImmersivePresentation() {
+        guard canToggleImageSlideshow else { return }
+        if isImageSlideshowActive {
+            exitImageSlideshow()
+        } else {
+            enterImageImmersive(startPlaying: false)
+        }
+    }
+
+    /// ⌥⌘S — start/stop auto-advance. Enters immersive if needed; does not exit on stop.
+    func toggleImageSlideshow() {
+        guard canToggleImageSlideshow else { return }
+        if !isImageSlideshowActive {
+            enterImageImmersive(startPlaying: true)
+            return
+        }
+        setImageSlideshowPlaying(!imageSlideshowPlaying)
+        revealImageSlideshowControls()
+    }
+
+    private func enterImageImmersive(startPlaying: Bool) {
+        guard canToggleImageSlideshow, !isImageSlideshowActive else { return }
+        let stored = UserDefaults.standard.double(forKey: Self.imageSlideshowIntervalDefaultsKey)
+        if stored == 2 || stored == 4 || stored == 8 {
+            imageSlideshowInterval = stored
+        } else {
+            imageSlideshowInterval = 4
+        }
+
+        imageSlideshowRestoreLeftInfo = !leftImageInfoSheet.isHidden
+        imageSlideshowRestoreRightSettings = !rightSettingsSheet.isHidden
+        imageSlideshowEnteredFullscreen = false
+
+        hideLeftImageInfoSheet()
+        hideSettingsSheet()
+        // Only the immersive controls bar — never the image tools / playback bar.
+        imageControlsContainer.isHidden = true
+        imageControlsContainer.alphaValue = 0
+        imageStudioCommitFooter.isHidden = true
+        isImageSlideshowActive = true
+        syncImageStudioFilmstripVisibility()
+        updateImageStudioLayoutInsets()
+
+        dragHostView.setImageStudioGradientActive(false)
+        dragHostView.layer?.backgroundColor = NSColor.black.cgColor
+        imageFit()
+
+        immersiveChromeHideWorkItem?.cancel()
+        immersiveChromeHideWorkItem = nil
+        setImmersiveChromeVisible(false, animated: false)
+        updateTitleBarChromeStrip(visible: false, animated: false)
+        removeEdgeHotZoneClickMonitor()
+        leftEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: false)
+        rightEdgeHotZoneAffordance.setVisible(false, emphasized: false, animated: false)
+
+        if let window = view.window, !window.styleMask.contains(.fullScreen) {
+            imageSlideshowEnteredFullscreen = true
+            // Don’t prepareImmersiveChromeForFullscreenToggle — that flashes the grey title plate.
+            window.toggleFullScreen(nil)
+        }
+
+        installImageSlideshowPointerMonitorIfNeeded()
+        imageSlideshowControls.isHidden = false
+        view.addSubview(imageSlideshowControls, positioned: .above, relativeTo: nil)
+        setImageSlideshowPlaying(startPlaying)
+        revealImageSlideshowControls()
+        // FS transition can re-assert title chrome; pin edge-to-edge black again.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isImageSlideshowActive else { return }
+            self.setImmersiveChromeVisible(false, animated: false)
+            self.updateTitleBarChromeStrip(visible: false, animated: false)
+        }
+    }
+
+    private func exitImageSlideshow(restoreStudio: Bool = true) {
+        guard isImageSlideshowActive else { return }
+        stopImageSlideshowTimer()
+        imageSlideshowPlaying = false
+        removeImageSlideshowPointerMonitor()
+        imageSlideshowControlsHideWork?.cancel()
+        imageSlideshowControlsHideWork = nil
+        imageSlideshowControls.isHidden = true
+        imageSlideshowControls.alphaValue = 0
+
+        let restoreLeft = imageSlideshowRestoreLeftInfo
+        let restoreRight = imageSlideshowRestoreRightSettings
+        let leaveFullscreen = imageSlideshowEnteredFullscreen
+        imageSlideshowEnteredFullscreen = false
+        isImageSlideshowActive = false
+
+        if leaveFullscreen, let window = view.window, window.styleMask.contains(.fullScreen) {
+            prepareImmersiveChromeForFullscreenToggle()
+            window.toggleFullScreen(nil)
+        }
+
+        guard restoreStudio, activeMediaKind == .image else { return }
+
+        dragHostView.setImageStudioGradientActive(true)
+        showImageChrome()
+        if restoreRight {
+            if rightSettingsSheet.isHidden {
+                showSettingsSheet()
+            }
+            if restoreLeft {
+                showLeftImageInfoSheet()
+            } else {
+                hideLeftImageInfoSheet()
+            }
+        } else {
+            hideSettingsSheet()
+            if restoreLeft {
+                showLeftImageInfoSheet()
+            } else {
+                hideLeftImageInfoSheet()
+            }
+        }
+        syncImageStudioFilmstripVisibility()
+        updateImageStudioLayoutInsets()
+        installEdgeHotZoneClickMonitorIfNeeded()
+        syncEdgeHotZoneAffordances()
+    }
+
+    private func setImageSlideshowPlaying(_ playing: Bool) {
+        imageSlideshowPlaying = playing
+        if playing {
+            restartImageSlideshowTimer()
+        } else {
+            stopImageSlideshowTimer()
+        }
+        refreshImageSlideshowControls()
+    }
+
+    private func toggleImageSlideshowPlayback() {
+        guard isImageSlideshowActive else { return }
+        setImageSlideshowPlaying(!imageSlideshowPlaying)
+        revealImageSlideshowControls()
+    }
+
+    private func setImageSlideshowInterval(_ interval: TimeInterval) {
+        guard interval == 2 || interval == 4 || interval == 8 else { return }
+        imageSlideshowInterval = interval
+        UserDefaults.standard.set(interval, forKey: Self.imageSlideshowIntervalDefaultsKey)
+        if imageSlideshowPlaying {
+            restartImageSlideshowTimer()
+        }
+        refreshImageSlideshowControls()
+    }
+
+    private func stepImageSlideshow(forward: Bool) {
+        guard isImageSlideshowActive, activeMediaKind == .image else { return }
+        guard let current = currentMediaURL else { return }
+        let urls = imageFolderSiblings.map(\.url)
+        guard let next = FolderPlaybackNeighbors.adjacentURLWrapping(
+            in: urls,
+            around: current,
+            forward: forward
+        ) else {
+            return
+        }
+        stashDevelopWorkingForCurrentIfNeeded()
+        loadImage(url: next)
+        // Caption updates quietly — ←/→ must not flash the bar; mouse move reveals it.
+        refreshImageSlideshowControls()
+        if imageSlideshowPlaying {
+            restartImageSlideshowTimer()
+        }
+    }
+
+    private func restartImageSlideshowTimer() {
+        stopImageSlideshowTimer()
+        guard isImageSlideshowActive, imageSlideshowPlaying else { return }
+        guard imageFolderSiblings.count >= 2 else { return }
+        let timer = Timer(timeInterval: imageSlideshowInterval, repeats: true) { [weak self] _ in
+            self?.stepImageSlideshow(forward: true)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        imageSlideshowTimer = timer
+    }
+
+    private func stopImageSlideshowTimer() {
+        imageSlideshowTimer?.invalidate()
+        imageSlideshowTimer = nil
+    }
+
+    private func refreshImageSlideshowControls() {
+        guard let url = currentMediaURL else {
+            imageSlideshowControls.configure(playing: false, interval: imageSlideshowInterval, caption: "")
+            return
+        }
+        let urls = imageFolderSiblings.map(\.url.standardizedFileURL)
+        let current = url.standardizedFileURL
+        let index = urls.firstIndex(of: current).map { $0 + 1 } ?? 1
+        let count = max(urls.count, 1)
+        let caption = "\(url.lastPathComponent)  ·  \(index) / \(count)"
+        imageSlideshowControls.configure(
+            playing: imageSlideshowPlaying,
+            interval: imageSlideshowInterval,
+            caption: caption
+        )
+    }
+
+    private func revealImageSlideshowControls() {
+        guard isImageSlideshowActive else { return }
+        imageSlideshowControls.isHidden = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            self.imageSlideshowControls.animator().alphaValue = 1
+        }
+        scheduleImageSlideshowControlsHide()
+    }
+
+    private func scheduleImageSlideshowControlsHide() {
+        imageSlideshowControlsHideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isImageSlideshowActive else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.28
+                self.imageSlideshowControls.animator().alphaValue = 0
+            }
+        }
+        imageSlideshowControlsHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+    }
+
+    private func installImageSlideshowPointerMonitorIfNeeded() {
+        guard imageSlideshowPointerMonitor == nil else { return }
+        imageSlideshowPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            guard let self, self.isImageSlideshowActive else { return event }
+            self.revealImageSlideshowControls()
+            return event
+        }
+    }
+
+    private func removeImageSlideshowPointerMonitor() {
+        if let imageSlideshowPointerMonitor {
+            NSEvent.removeMonitor(imageSlideshowPointerMonitor)
+            self.imageSlideshowPointerMonitor = nil
+        }
+    }
+
     private func setImageBeforeAfter(showingBefore: Bool) {
         imageAdjustSession.setShowingBefore(showingBefore)
         refreshImageStudioMetaBar()
     }
 
     private func applyImageBeforeAfterPresentation() {
-        imageSurfaceView.setAdjustParameters(imageAdjustSession.presentationParameters)
+        applyOpenImageAdjustPresentation()
     }
 
     private func applyLibraryBrowseLayoutMode(dockedForImageStudio: Bool) {
@@ -3748,6 +4314,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func raisePlaybackChromeToFront() {
+        if isImageSlideshowActive {
+            view.addSubview(imageSlideshowControls, positioned: .above, relativeTo: nil)
+            return
+        }
         // Filmstrip / meta above edge strips so thumbs & favorites receive clicks first.
         view.addSubview(imageFolderCarousel, positioned: .above, relativeTo: imageSurfaceView)
         view.addSubview(imageStudioMetaBar, positioned: .above, relativeTo: imageFolderCarousel)
@@ -6566,35 +7136,525 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func updateImageStudioCommitFooter() {
-        let geometryDirty = imageSurfaceView.hasNonIdentityCrop
+        let geometryActive = imageSurfaceView.hasNonIdentityCrop
             || imageSurfaceView.rotationQuarterTurns != 0
-        let developDirty = imageAdjustSession.isDirty
+            || imageSurfaceView.flipHorizontal
+            || imageSurfaceView.flipVertical
+        let developActive = imageAdjustSession.isDirty || geometryActive
+        let unsaved = hasUnsavedDevelopChanges
+        let hasSaved = currentMediaURL.map { ImageDevelopEditStore.hasEdit(forPath: $0.path) } ?? false
         let selectionDirty = imageSelectionSession.hasSelection
         let show = activeMediaKind == .image
-            && (developDirty || geometryDirty || selectionDirty)
+            && (developActive || unsaved || hasSaved || selectionDirty)
             && playbackLibraryOverlay == .closed
             && !isImageCropMode
         imageStudioCommitFooter.isHidden = !show
-        imageStudioCommitFooter.setShowsResetAll(developDirty || selectionDirty)
-        imageStudioCommitFooterHeightConstraint?.constant = show
-            ? (developDirty || selectionDirty
-                ? ImageStudioCommitFooter.preferredHeight
-                : ImageStudioCommitFooter.preferredHeightActionsOnly)
-            : 0
+        imageStudioCommitFooter.setShowsUnsavedCommit(unsaved)
+        imageStudioCommitFooter.setShowsReset(developActive || selectionDirty)
+        let height: CGFloat
+        if !show {
+            height = 0
+        } else if unsaved && (developActive || selectionDirty) {
+            height = ImageStudioCommitFooter.preferredHeightFull
+        } else if unsaved || developActive || selectionDirty {
+            height = ImageStudioCommitFooter.preferredHeightUnsaved
+        } else {
+            height = ImageStudioCommitFooter.preferredHeightActionsOnly
+        }
+        imageStudioCommitFooterHeightConstraint?.constant = height
         if show {
             LaughTheme.applySettingsAccentChrome(in: imageStudioCommitFooter)
         }
         updateSettingsContentBottomInset()
     }
 
+    private var hasUnsavedDevelopChanges: Bool {
+        guard activeMediaKind == .image else { return false }
+        // Batch auto-stamps mixed looks; sliders stay on the shared wet recipe.
+        if isBatchEditingMode { return !imageAdjustSession.isSectionBypassEmpty }
+        if !imageAdjustSession.isSectionBypassEmpty { return true }
+        return currentDevelopSnapshot() != developSavedBaseline
+    }
+
+    private var hasAnyUnsavedDevelopWorking: Bool {
+        if hasUnsavedDevelopChanges { return true }
+        return !developWorkingByPath.isEmpty
+    }
+
+    private func currentDevelopSnapshot() -> ImageDevelopEdit {
+        ImageDevelopEdit(
+            parameters: imageAdjustSession.rawParameters,
+            rotationQuarterTurns: imageSurfaceView.rotationQuarterTurns,
+            flipHorizontal: imageSurfaceView.flipHorizontal,
+            flipVertical: imageSurfaceView.flipVertical,
+            cropNormalized: imageSurfaceView.appliedCropNormalized,
+            straightenRadians: imageSurfaceView.appliedStraightenRadians
+        )
+    }
+
+    private func normalizedDevelopPath(_ url: URL) -> String {
+        url.standardizedFileURL.path
+    }
+
+    /// Park live edits for the open still so carousel browsing never needs a modal.
+    private func stashDevelopWorkingForCurrentIfNeeded() {
+        guard activeMediaKind == .image, let url = currentMediaURL else { return }
+        if isBatchEditingMode { return }
+        let path = normalizedDevelopPath(url)
+        let snap = currentDevelopSnapshot()
+        if snap != developSavedBaseline || !imageAdjustSession.isSectionBypassEmpty {
+            developWorkingByPath[path] = snap
+        } else {
+            developWorkingByPath.removeValue(forKey: path)
+        }
+        developLiveDocument = snap
+    }
+
+    /// Load working copy or saved document into the live session. Geometry applied after pixels land.
+    /// On the Batch tab, keep the shared look on the sliders and only swap this still’s crop/rotation.
+    private func applyDevelopDocument(for url: URL) {
+        let path = normalizedDevelopPath(url)
+        let saved = ImageDevelopEditStore.edit(forPath: path) ?? .identity
+        let owned = developWorkingByPath[path] ?? saved
+        let keepBatchLook = isBatchEditingMode
+        let parameters = keepBatchLook ? imageAdjustSession.rawParameters : owned.parameters
+        developSavedBaseline = saved
+        developLiveDocument = ImageDevelopEdit(
+            parameters: parameters,
+            rotationQuarterTurns: owned.rotationQuarterTurns,
+            flipHorizontal: owned.flipHorizontal,
+            flipVertical: owned.flipVertical,
+            cropNormalized: owned.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(owned.straightenRadians)
+        )
+        suppressBatchLookPropagate = true
+        imageAdjustSession.apply(parameters, quality: .full, clearBypasses: true)
+        suppressBatchLookPropagate = false
+    }
+
+    /// Leaving Batch → Info/Edits: sliders become this still’s own document again.
+    private func reloadOpenImageDevelopForSingleEdit() {
+        guard activeMediaKind == .image, let url = currentMediaURL else { return }
+        applyDevelopDocument(for: url)
+        restoreDevelopGeometryFromBaseline()
+        applyOpenImageAdjustPresentation()
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
+    }
+
+    /// While the Batch tab is selected, right-rail develop params stamp onto every selected still.
+    private var isBatchEditingMode: Bool {
+        imageBatchSelection.isActive && leftImageInfoSheet.selectedTab == .batch
+    }
+
+    /// Fade the right-rail content out, stamp Batch looks, then fade back in.
+    private func runBatchSidebarEnterWork(_ work: @escaping () -> Void) {
+        batchSidebarFadeGeneration += 1
+        let generation = batchSidebarFadeGeneration
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.settingsScrollClipHost.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.batchSidebarFadeGeneration == generation else { return }
+            work()
+            guard self.batchSidebarFadeGeneration == generation else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                self.settingsScrollClipHost.animator().alphaValue = 1
+            }
+        })
+    }
+
+    private func endBatchSidebarContentFade() {
+        batchSidebarFadeGeneration += 1
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.settingsScrollClipHost.animator().alphaValue = 1
+        }
+    }
+
+    /// Snapshot each still’s look when it joins the batch (dry = that look, wet = current right-rail recipe).
+    private func captureBatchDryBasesIfNeeded() {
+        let urls = imageBatchSelection.orderedURLs
+        let keep = Set(urls.map(normalizedDevelopPath))
+        for url in urls {
+            let path = normalizedDevelopPath(url)
+            if batchDryParamsByPath[path] == nil {
+                batchDryParamsByPath[path] = developWorkingByPath[path]?.parameters
+                    ?? ImageDevelopEditStore.edit(forPath: path)?.parameters
+                    ?? .identity
+            }
+            if batchMixByPath[path] == nil {
+                batchMixByPath[path] = 1
+            }
+        }
+        batchDryParamsByPath = batchDryParamsByPath.filter { keep.contains($0.key) }
+        batchMixByPath = batchMixByPath.filter { keep.contains($0.key) }
+    }
+
+    /// Keep the live batch (membership + wet look + Dry/Wet) across quit, not only flattened singles.
+    private func persistActiveBatchSession(immediate: Bool = false) {
+        persistBatchSessionWork?.cancel()
+        persistBatchSessionWork = nil
+        let write = { [weak self] in
+            guard let self else { return }
+            guard self.imageBatchSelection.isActive else {
+                ImageBatchSessionStore.clear()
+                return
+            }
+            ImageBatchSessionStore.save(
+                ImageBatchSessionRecord(
+                    orderedPaths: self.imageBatchSelection.orderedURLs.map(self.normalizedDevelopPath),
+                    wetParameters: self.imageAdjustSession.rawParameters,
+                    mixByPath: self.batchMixByPath,
+                    dryByPath: self.batchDryParamsByPath
+                )
+            )
+        }
+        if immediate {
+            write()
+            return
+        }
+        let work = DispatchWorkItem(block: write)
+        persistBatchSessionWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Reopen: if this folder still holds the last batch, restore set + mix + shared look.
+    private func restorePersistedBatchSessionIfNeeded() {
+        guard !imageBatchSelection.isActive else { return }
+        guard let record = ImageBatchSessionStore.load() else { return }
+        let siblingPaths = Set(imageFolderSiblings.map { normalizedDevelopPath($0.url) })
+        let surviving = record.orderedPaths.filter { path in
+            siblingPaths.contains(path) && FileManager.default.fileExists(atPath: path)
+        }
+        guard surviving.count >= 2 else { return }
+
+        let urls = surviving.map { URL(fileURLWithPath: $0) }
+        imageBatchSelection.replace(
+            with: urls,
+            preferredOrder: imageFolderSiblings.map(\.url)
+        )
+        batchDryParamsByPath = record.dryByPath.filter { surviving.contains($0.key) }
+        batchMixByPath = record.mixByPath.filter { surviving.contains($0.key) }
+        captureBatchDryBasesIfNeeded()
+
+        suppressBatchLookPropagate = true
+        imageAdjustSession.apply(record.wetParameters, quality: .full, clearBypasses: true)
+        suppressBatchLookPropagate = false
+
+        syncFilmstripBatchChrome()
+        refreshBatchCatalogUI(preferBatchTab: true)
+        persistActiveBatchSession(immediate: true)
+    }
+
+    private func openImageAdjustPresentationParameters() -> ImageAdjustParameters {
+        if imageAdjustSession.isShowingBefore { return .identity }
+        let wet = imageAdjustSession.effectiveParameters
+        guard isBatchEditingMode, let url = currentMediaURL else { return wet }
+        let path = normalizedDevelopPath(url)
+        guard imageBatchSelection.pathSet.contains(path) else { return wet }
+        return ImageAdjustParameters.mixed(
+            from: batchDryParamsByPath[path] ?? .identity,
+            to: wet,
+            amount: batchMixByPath[path] ?? 1
+        )
+    }
+
+    private func applyOpenImageAdjustPresentation(quality: ImageAdjustRenderQuality = .full) {
+        imageSurfaceView.setAdjustParameters(openImageAdjustPresentationParameters(), quality: quality)
+    }
+
+    private func handleBatchMixChange(url: URL, amount: Double, commit: Bool) {
+        let path = normalizedDevelopPath(url)
+        guard imageBatchSelection.pathSet.contains(path) else { return }
+        batchMixByPath[path] = min(1, max(0, amount))
+        let isOpenStill = currentMediaURL?.standardizedFileURL == url.standardizedFileURL
+        if isOpenStill {
+            applyOpenImageAdjustPresentation(quality: commit ? .full : .preview)
+        }
+        guard commit else { return }
+        persistActiveBatchSession(immediate: true)
+        stampBatchLook(toPaths: [path], refreshCatalogs: false)
+        if isOpenStill {
+            applyOpenImageAdjustPresentation(quality: .full)
+        }
+    }
+
+    private func propagateDevelopParamsToBatchIfNeeded(immediate: Bool = false) {
+        guard !suppressBatchLookPropagate, isBatchEditingMode else { return }
+        captureBatchDryBasesIfNeeded()
+        let paths = imageBatchSelection.orderedURLs.map(normalizedDevelopPath)
+        guard !paths.isEmpty else { return }
+        stampBatchLookWork?.cancel()
+        stampBatchLookWork = nil
+        let run = { [weak self] in
+            guard let self else { return }
+            self.stampBatchLook(toPaths: paths, refreshCatalogs: immediate)
+            self.applyOpenImageAdjustPresentation()
+        }
+        if immediate {
+            run()
+            return
+        }
+        let work = DispatchWorkItem(block: run)
+        stampBatchLookWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: work)
+    }
+
+    /// Writes mixed batch looks into saved documents for `paths` only.
+    private func stampBatchLook(toPaths paths: [String], refreshCatalogs: Bool = true) {
+        guard !paths.isEmpty else { return }
+        let parameters = imageAdjustSession.rawParameters
+        _ = ImageBatchLookApply.apply(
+            parameters: parameters,
+            toPaths: paths,
+            dryByPath: batchDryParamsByPath,
+            mixByPath: batchMixByPath
+        )
+        for path in paths {
+            developWorkingByPath.removeValue(forKey: path)
+        }
+        if let current = currentMediaURL,
+           imageBatchSelection.pathSet.contains(normalizedDevelopPath(current)) {
+            let saved = ImageDevelopEditStore.edit(forPath: normalizedDevelopPath(current)) ?? .identity
+            developSavedBaseline = saved
+            developLiveDocument = ImageDevelopEdit(
+                parameters: parameters,
+                rotationQuarterTurns: imageSurfaceView.rotationQuarterTurns,
+                flipHorizontal: imageSurfaceView.flipHorizontal,
+                flipVertical: imageSurfaceView.flipVertical,
+                cropNormalized: imageSurfaceView.appliedCropNormalized,
+                straightenRadians: imageSurfaceView.appliedStraightenRadians
+            )
+        }
+        if refreshCatalogs {
+            refreshFilmstripDevelopMarks()
+        }
+        persistActiveBatchSession(immediate: refreshCatalogs)
+    }
+
+    private func restoreDevelopGeometryFromBaseline() {
+        let edit = developLiveDocument
+        imageSurfaceView.applyDevelopGeometry(
+            rotationQuarterTurns: edit.rotationQuarterTurns,
+            flipHorizontal: edit.flipHorizontal,
+            flipVertical: edit.flipVertical,
+            cropNormalized: edit.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(edit.straightenRadians)
+        )
+    }
+
+    @discardableResult
+    private func saveDevelopEdit(for url: URL? = nil) -> Bool {
+        guard let url = url ?? currentMediaURL else { return false }
+        let path = normalizedDevelopPath(url)
+        let edit: ImageDevelopEdit
+        if url.standardizedFileURL == currentMediaURL?.standardizedFileURL {
+            edit = currentDevelopSnapshot()
+            imageAdjustSession.apply(edit.parameters, quality: .full, clearBypasses: true)
+            developSavedBaseline = edit
+            developLiveDocument = edit
+        } else if let working = developWorkingByPath[path] {
+            edit = working
+        } else {
+            return false
+        }
+        ImageDevelopEditStore.save(edit, forPath: path)
+        developWorkingByPath.removeValue(forKey: path)
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
+        refreshEditsCatalogUI()
+        return true
+    }
+
+    private func saveAllUnsavedDevelopEdits() {
+        stashDevelopWorkingForCurrentIfNeeded()
+        let paths = Array(developWorkingByPath.keys)
+        for path in paths {
+            guard let edit = developWorkingByPath[path] else { continue }
+            ImageDevelopEditStore.save(edit, forPath: path)
+            developWorkingByPath.removeValue(forKey: path)
+            if currentMediaURL.map(normalizedDevelopPath) == path {
+                developSavedBaseline = edit
+                developLiveDocument = edit
+            }
+        }
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
+        refreshEditsCatalogUI()
+    }
+
+    private func discardDevelopToBaseline() {
+        if let url = currentMediaURL {
+            developWorkingByPath.removeValue(forKey: normalizedDevelopPath(url))
+        }
+        developLiveDocument = developSavedBaseline
+        imageAdjustSession.apply(developSavedBaseline.parameters, quality: .full, clearBypasses: true)
+        restoreDevelopGeometryFromBaseline()
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
+        refreshEditsCatalogUI()
+    }
+
+    private enum DevelopQuitChoice {
+        case saveAll
+        case discardAll
+        case cancel
+    }
+
+    /// Quit only — browsing never prompts. Returns false if cancelled.
+    func confirmQuitWithDirtyDevelopIfNeeded() -> Bool {
+        stashDevelopWorkingForCurrentIfNeeded()
+        persistActiveBatchSession(immediate: true)
+        guard hasAnyUnsavedDevelopWorking else { return true }
+        switch presentDevelopQuitAlert() {
+        case .cancel:
+            return false
+        case .saveAll:
+            saveAllUnsavedDevelopEdits()
+            return true
+        case .discardAll:
+            developWorkingByPath.removeAll()
+            if activeMediaKind == .image {
+                discardDevelopToBaseline()
+            }
+            return true
+        }
+    }
+
+    private func presentDevelopQuitAlert() -> DevelopQuitChoice {
+        let count = developWorkingByPath.count
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Save develop edits before quitting?"
+        alert.informativeText = count <= 1
+            ? "You have unsaved photo edits in Laugh. Save them, discard them, or cancel."
+            : "You have unsaved edits on \(count) photos. Save all, discard all, or cancel."
+        alert.addButton(withTitle: "Save All")
+        alert.addButton(withTitle: "Don’t Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .saveAll
+        case .alertSecondButtonReturn:
+            return .discardAll
+        default:
+            return .cancel
+        }
+    }
+
+    private func refreshFilmstripDevelopMarks(syncEditsCatalog: Bool = true) {
+        guard activeMediaKind == .image else {
+            imageFolderCarousel.setDevelopMarks([:])
+            return
+        }
+        let edited = ImageDevelopEditStore.editedPaths()
+        var marks: [URL: FilmstripDevelopMark] = [:]
+        for file in imageFolderSiblings {
+            let path = file.url.standardizedFileURL.path
+            let unsaved = developWorkingByPath[path] != nil
+                || (file.url.standardizedFileURL == currentMediaURL?.standardizedFileURL && hasUnsavedDevelopChanges)
+            if unsaved {
+                marks[file.url] = .dirty
+            } else if edited.contains(path) {
+                marks[file.url] = .saved
+            }
+        }
+        imageFolderCarousel.setDevelopMarks(marks)
+        if syncEditsCatalog {
+            refreshEditsCatalogUI()
+        }
+    }
+
+    @objc private func imageStudioSaveDevelopPressed() {
+        _ = saveDevelopEdit()
+    }
+
+    @objc private func imageStudioDiscardDevelopPressed() {
+        discardDevelopToBaseline()
+    }
+
+    private func folderDevelopCatalogURLs() -> [URL] {
+        imageFolderSiblings.compactMap { file in
+            let path = file.url.standardizedFileURL.path
+            if imageBatchSelection.isActive, imageBatchSelection.pathSet.contains(path) {
+                return nil
+            }
+            let isUnsaved: Bool
+            if file.url.standardizedFileURL == currentMediaURL?.standardizedFileURL {
+                isUnsaved = hasUnsavedDevelopChanges || developWorkingByPath[path] != nil
+            } else {
+                isUnsaved = developWorkingByPath[path] != nil
+            }
+            let isSaved = ImageDevelopEditStore.hasEdit(forPath: path)
+            return (isUnsaved || isSaved) ? file.url : nil
+        }
+    }
+
+    private func clearDevelopEdit(for url: URL) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Clear saved look?"
+        alert.informativeText = "Remove the develop look for “\(url.lastPathComponent)”. The original file is unchanged."
+        alert.addButton(withTitle: "Clear Look")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        applyClearedDevelopEdits(urls: [url])
+    }
+
+    private func clearAllDevelopEditsInFolder() {
+        let urls = folderDevelopCatalogURLs()
+        guard !urls.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Clear all looks?"
+        alert.informativeText = urls.count == 1
+            ? "Remove the develop look for “\(urls[0].lastPathComponent)”. Original files are unchanged."
+            : "Remove saved and unsaved develop looks for \(urls.count) photos in this folder. Original files are unchanged."
+        alert.addButton(withTitle: "Clear All")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        applyClearedDevelopEdits(urls: urls)
+    }
+
+    private func applyClearedDevelopEdits(urls: [URL]) {
+        let paths = urls.map(normalizedDevelopPath)
+        ImageDevelopEditStore.removeMany(forPaths: paths)
+        for path in paths {
+            developWorkingByPath.removeValue(forKey: path)
+        }
+        if let current = currentMediaURL,
+           paths.contains(normalizedDevelopPath(current)) {
+            developSavedBaseline = .identity
+            developLiveDocument = .identity
+            imageAdjustSession.resetAll()
+            imageSurfaceView.applyDevelopGeometry(
+                rotationQuarterTurns: 0,
+                flipHorizontal: false,
+                flipVertical: false,
+                cropNormalized: nil,
+                straightenRadians: 0
+            )
+            applyOpenImageAdjustPresentation()
+        }
+        updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
+        updateImageZoomPercentLabel()
+    }
+
     @objc private func imageStudioResetAllPressed() {
-        // Develop adjusts only — crop / straighten / rotate / flip are framing tools
-        // with their own Cancel; Reset All must not wipe an applied crop.
+        // Reset live develop toward identity (becomes unsaved if a saved look remains).
+        // Crop / straighten / rotate / flip stay with their own Cancel — not cleared here.
         imageAdjustSession.resetAll()
         imageSelectionSession.resetAll()
         imageSurfaceView.setSelectionPreview(mask: nil, displayMode: .none, refine: .identity, quality: .full)
         refreshSubjectSelectChrome()
         updateImageStudioCommitFooter()
+        refreshFilmstripDevelopMarks()
         updateImageZoomPercentLabel()
     }
 
@@ -9543,7 +10603,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private var isTitleBarChromeShowing: Bool {
-        titleBarChromeAlwaysVisible
+        // Immersive image presentation is edge-to-edge black — no grey title plate.
+        if isImageSlideshowActive { return false }
+        return titleBarChromeAlwaysVisible
             || immersiveChromeVisible
             || immersiveChromePinnedVisible
             || playbackLibraryOverlay != .closed
@@ -9625,6 +10687,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func noteImmersiveChromePointerActivity() {
         guard usesImmersiveChrome else { return }
+        // Image immersive has its own controls bar; never revive the grey title plate.
+        if isImageSlideshowActive {
+            restoreImmersivePlaybackCursor()
+            return
+        }
         restoreImmersivePlaybackCursor()
         immersiveChromeHideWorkItem?.cancel()
         immersiveChromeHideWorkItem = nil
@@ -9654,9 +10721,13 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func setImmersiveChromeVisible(_ visible: Bool, animated: Bool) {
         let libraryOpen = playbackLibraryOverlay != .closed
-        let shouldShowTitleBar = titleBarChromeAlwaysVisible || visible || immersiveChromePinnedVisible || libraryOpen
+        let shouldShowTitleBar: Bool = {
+            if isImageSlideshowActive { return false }
+            return titleBarChromeAlwaysVisible || visible || immersiveChromePinnedVisible || libraryOpen
+        }()
         let shouldShowPlaybackBar = usesImmersiveChrome
             && !libraryOpen
+            && !isImageSlideshowActive
             && (visible || immersiveChromePinnedVisible)
         guard shouldShowTitleBar != isTitleBarChromeShowing else {
             if shouldShowTitleBar {
@@ -9756,6 +10827,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updatePlaybackBarWidth()
         updateMiniPreviewLayout()
         resyncPlaybackSurfaceGeometry()
+        if isImageSlideshowActive {
+            // Stay edge-to-edge after FS enter/exit — no title-bar grey band.
+            setImmersiveChromeVisible(false, animated: false)
+            return
+        }
         noteImmersiveChromePointerActivity()
     }
 
@@ -9848,7 +10924,11 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     private func applyPlaybackBarVisible(_ visible: Bool, animated: Bool = false) {
         // Folder management never shows the floating transport / image tools bar.
-        let allowVisible = visible && playbackLibraryOverlay == .closed
+        var allowVisible = visible && playbackLibraryOverlay == .closed
+        // Immersive image: only ImageSlideshowControlsView — never the tools bar.
+        if activeMediaKind == .image, isImageSlideshowActive {
+            allowVisible = false
+        }
         let bar = activeMediaKind == .image ? imageControlsContainer : controlsContainer
         guard activeMediaKind == .video || activeMediaKind == .image else { return }
         // Drop any in-flight animator() alpha so a prior immersive show cannot win.
@@ -11301,6 +12381,9 @@ extension PlayerViewController {
     }
 
     func commandToggleLibraryPanel() {
+        if isImageSlideshowActive {
+            exitImageSlideshow()
+        }
         if activeMediaKind == .empty {
             librarySidebar.reloadRoots()
             libraryBrowse.reloadContent()
@@ -11319,6 +12402,10 @@ extension PlayerViewController {
     }
 
     func commandToggleSettingsInspector() {
+        if isImageSlideshowActive {
+            exitImageSlideshow()
+            return
+        }
         guard activeMediaKind != .empty, playbackLibraryOverlay == .closed else { return }
         if isSettingsPanelFullyOpen() {
             hideSettingsSheet()
@@ -11412,6 +12499,10 @@ extension PlayerViewController {
                 showEmptySurface()
             }
         case .image:
+            if isImageSlideshowActive {
+                exitImageSlideshow()
+                return
+            }
             showEmptySurface()
         case .empty:
             break
@@ -11481,13 +12572,19 @@ extension PlayerViewController {
 
     /// ← / → while viewing **ImageMedia**: previous / next sibling in the folder filmstrip order.
     /// Hold-to-scrub adapts quality: fast = cached/low, slow = sharper sooner.
+    /// In **ImageSlideshow**, steps wrap and reset the auto-advance timer.
     func commandStepImageSibling(forward: Bool) {
         guard activeMediaKind == .image, playbackLibraryOverlay == .closed else { return }
+        if isImageSlideshowActive {
+            stepImageSlideshow(forward: forward)
+            return
+        }
         guard let current = currentMediaURL else { return }
         let urls = imageFolderSiblings.map(\.url)
         guard let next = FolderPlaybackNeighbors.adjacentURL(in: urls, around: current, forward: forward) else {
             return
         }
+        stashDevelopWorkingForCurrentIfNeeded()
         scrubToImageSibling(next, from: current, forward: forward)
     }
 
@@ -11575,9 +12672,14 @@ extension PlayerViewController {
         imageLoadGeneration += 1
         imageSiblingScrubUpgradeWork?.cancel()
         imageSiblingScrubUpgradeWork = nil
+        imageSelectionSession.setSourceToken(next.path)
+        applyDevelopDocument(for: next)
 
         imageFolderCarousel.selectSibling(next, scrollMotion: pace.filmstripScrollMotion)
         paintSiblingScrubPlaceholder(for: next, pace: pace)
+        restoreDevelopGeometryFromBaseline()
+        applyOpenImageAdjustPresentation()
+        refreshFilmstripDevelopMarks()
 
         // Only touch chrome on slow — burst keeps previous title/meta until settle.
         if pace == .slow {
@@ -12013,6 +13115,12 @@ extension PlayerViewController {
             return true
         }
 
+        if flags == [.command, .option], event.charactersIgnoringModifiers == "s" {
+            guard canToggleImageSlideshow else { return false }
+            toggleImageSlideshow()
+            return true
+        }
+
         if flags == [.control, .command], event.charactersIgnoringModifiers == "a" {
             commandCycleWindowAspectPreset()
             return true
@@ -12060,6 +13168,10 @@ extension PlayerViewController {
         if flags.isEmpty {
             switch event.keyCode {
             case 49:
+                if activeMediaKind == .image, isImageSlideshowActive {
+                    toggleImageSlideshowPlayback()
+                    return true
+                }
                 if activeMediaKind == .video {
                     commandTogglePlayPause()
                     return true
@@ -12103,6 +13215,10 @@ extension PlayerViewController {
                     return true
                 }
             case 3:
+                if activeMediaKind == .image {
+                    toggleImageImmersivePresentation()
+                    return true
+                }
                 if activeMediaKind == .video {
                     commandToggleVideoFitMode()
                     return true
@@ -12342,8 +13458,7 @@ final class ImageSurfaceView: NSView {
     }
 
     func setImage(_ image: NSImage, naturalSize: CGSize) {
-        baseImage = image
-        naturalPixelSize = naturalSize
+        adoptDisplayPixels(image, naturalSize: naturalSize)
         rotationQuarterTurns = 0
         flipHorizontal = false
         flipVertical = false
@@ -12356,7 +13471,6 @@ final class ImageSurfaceView: NSView {
         selectionMask = nil
         selectionDisplayMode = .none
         syncMarchingAntsAnimation()
-        rebuildSourceCIImages(from: image)
         refreshDisplayedImage(quality: .full)
         needsLayout = true
         window?.invalidateCursorRects(for: self)
@@ -12366,13 +13480,19 @@ final class ImageSurfaceView: NSView {
 
     /// Swap decoded pixels after a quick preview without resetting zoom / crop / selection.
     func replaceBaseImage(_ image: NSImage, naturalSize: CGSize) {
-        baseImage = image
-        naturalPixelSize = naturalSize
-        rebuildSourceCIImages(from: image)
+        adoptDisplayPixels(image, naturalSize: naturalSize)
         refreshDisplayedImage(quality: .full)
         needsLayout = true
         window?.invalidateCursorRects(for: self)
         onZoomScaleChanged?()
+    }
+
+    /// `NSImageView` identity path cannot draw ImageIO YCbCr / 24-bit RGB without stripe artefacts.
+    private func adoptDisplayPixels(_ image: NSImage, naturalSize: CGSize) {
+        let display = ImageStudioCISource.displayNSImage(from: image)
+        baseImage = display
+        naturalPixelSize = naturalSize
+        rebuildSourceCIImages(from: display)
     }
 
     /// Hold-to-scrub placeholder: paint without CI rebuild. Optional short fade for slow steps.
@@ -13028,6 +14148,38 @@ final class ImageSurfaceView: NSView {
         applyOrientationChange()
     }
 
+    /// Restore saved develop geometry without replacing the base image.
+    func applyDevelopGeometry(
+        rotationQuarterTurns: Int,
+        flipHorizontal: Bool,
+        flipVertical: Bool,
+        cropNormalized: CGRect?,
+        straightenRadians: CGFloat
+    ) {
+        if isCropMode {
+            exitCropMode(apply: false)
+        }
+        self.rotationQuarterTurns = ((rotationQuarterTurns % 4) + 4) % 4
+        self.flipHorizontal = flipHorizontal
+        self.flipVertical = flipVertical
+        if let cropNormalized, !ImageCropGeometry.isIdentity(cropNormalized) {
+            appliedCropNormalized = ImageCropGeometry.sanitized(cropNormalized)
+        } else {
+            appliedCropNormalized = nil
+        }
+        let clamped = ImageCropGeometry.clampStraightenRadians(straightenRadians)
+        appliedStraightenRadians = ImageCropGeometry.isIdentityStraighten(clamped) ? 0 : clamped
+        draftStraightenRadians = appliedStraightenRadians
+        panOffset = .zero
+        rebuildAntsContour()
+        refreshDisplayedImage(quality: .full)
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        updateAntsOverlayGeometry()
+        onCropChanged?()
+        onZoomScaleChanged?()
+    }
+
     /// Shared path for rotate / flip: clears crop+straighten draft and refreshes.
     private func applyOrientationChange() {
         appliedStraightenRadians = 0
@@ -13283,7 +14435,7 @@ final class ImageSurfaceView: NSView {
             previewCIImage = nil
             return
         }
-        let full = CIImage(cgImage: cgImage)
+        let full = ImageStudioCISource.ciImage(from: cgImage)
         baseCIImage = full
         previewCIImage = Self.scaledCIImage(full, maxEdge: ImageAdjustRenderQuality.preview.maxPixelEdge)
     }
@@ -13458,7 +14610,7 @@ final class ImageSurfaceView: NSView {
     private func nsImage(from ciImage: CIImage) -> NSImage? {
         let extent = ciImage.extent.integral
         guard extent.width > 1, extent.height > 1 else { return nil }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let cgImage = ciContext.createCGImage(
             ciImage,
             from: extent,

@@ -93,4 +93,27 @@ final class FolderPlaybackNeighborsTests: XCTestCase {
         XCTAssertNil(FolderPlaybackNeighbors.adjacentURL(in: ordered, around: a, forward: false))
         XCTAssertNil(FolderPlaybackNeighbors.adjacentURL(in: ordered, around: c, forward: true))
     }
+
+    func testAdjacentURLWrappingLoopsEnds() {
+        let dir = URL(fileURLWithPath: "/Photos", isDirectory: true)
+        let a = dir.appendingPathComponent("a.jpg")
+        let b = dir.appendingPathComponent("b.jpg")
+        let c = dir.appendingPathComponent("c.jpg")
+        let ordered = [a, b, c]
+
+        XCTAssertEqual(
+            FolderPlaybackNeighbors.adjacentURLWrapping(in: ordered, around: c, forward: true),
+            a
+        )
+        XCTAssertEqual(
+            FolderPlaybackNeighbors.adjacentURLWrapping(in: ordered, around: a, forward: false),
+            c
+        )
+        XCTAssertEqual(
+            FolderPlaybackNeighbors.adjacentURLWrapping(in: ordered, around: b, forward: true),
+            c
+        )
+        XCTAssertNil(FolderPlaybackNeighbors.adjacentURLWrapping(in: [a], around: a, forward: true))
+        XCTAssertNil(FolderPlaybackNeighbors.adjacentURLWrapping(in: [], around: a, forward: true))
+    }
 }

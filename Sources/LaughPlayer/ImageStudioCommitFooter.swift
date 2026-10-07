@@ -1,14 +1,27 @@
 import AppKit
 
-/// Pinned footer on the image studio edit sidebar when adjusts are dirty:
-/// Reset All above Save Preset / Export.
+/// Pinned footer on the image studio edit sidebar (ADR 0006):
+/// Save / Discard when dirty, Reset, then Save Preset / Export.
 final class ImageStudioCommitFooter: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
-    let resetAllButton = CommitFooterActionButton(
-        title: "Reset All",
+
+    let saveDevelopButton = CommitFooterActionButton(
+        title: "Save",
+        symbol: "square.and.arrow.down",
+        emphasized: true,
+        toolTip: "Save develop edits for this photo in Laugh"
+    )
+    let discardDevelopButton = CommitFooterActionButton(
+        title: "Discard",
+        symbol: "arrow.uturn.backward",
+        emphasized: false,
+        toolTip: "Reload the last saved look (or none)"
+    )
+    let resetButton = CommitFooterActionButton(
+        title: "Reset",
         symbol: "arrow.counterclockwise",
         emphasized: false,
-        toolTip: "Clear all develop edits (crop and rotation stay)"
+        toolTip: "Reset live sliders toward identity (Save to keep cleared; does not delete a saved look)"
     )
     let exportButton = CommitFooterActionButton(
         title: "Export…",
@@ -23,17 +36,34 @@ final class ImageStudioCommitFooter: NSView {
         toolTip: "Save the current sliders as a reusable look"
     )
 
+    /// Back-compat alias used by existing PVC wiring.
+    var resetAllButton: CommitFooterActionButton { resetButton }
+
     private let hairline = NSView()
     private let column = NSStackView()
+    private let commitRow = NSStackView()
+    private let resetRow = NSStackView()
     private let actionsRow = NSStackView()
 
-    /// Preferred height when Reset All + actions are visible.
-    static let preferredHeight: CGFloat = 112
-    /// Height when only Save Preset / Export show (geometry dirty, adjusts clean).
+    static let preferredHeightFull: CGFloat = 154
+    static let preferredHeightUnsaved: CGFloat = 112
+    static let preferredHeightSavedOnly: CGFloat = 68
     static let preferredHeightActionsOnly: CGFloat = 68
+    /// Legacy name — full develop chrome.
+    static let preferredHeight: CGFloat = preferredHeightFull
 
+    func setShowsUnsavedCommit(_ show: Bool) {
+        commitRow.isHidden = !show
+    }
+
+    func setShowsReset(_ show: Bool) {
+        resetButton.isHidden = !show
+        resetRow.isHidden = !show
+    }
+
+    /// Legacy: Reset All visibility (selection / develop identity chrome).
     func setShowsResetAll(_ show: Bool) {
-        resetAllButton.isHidden = !show
+        setShowsReset(show)
     }
 
     override init(frame frameRect: NSRect) {
@@ -44,6 +74,21 @@ final class ImageStudioCommitFooter: NSView {
         hairline.wantsLayer = true
         hairline.layer?.backgroundColor = NSColor.separatorColor.cgColor
         hairline.translatesAutoresizingMaskIntoConstraints = false
+
+        commitRow.orientation = .horizontal
+        commitRow.alignment = .centerY
+        commitRow.spacing = 10
+        commitRow.distribution = .fillEqually
+        commitRow.translatesAutoresizingMaskIntoConstraints = false
+        commitRow.addArrangedSubview(saveDevelopButton)
+        commitRow.addArrangedSubview(discardDevelopButton)
+
+        resetRow.orientation = .horizontal
+        resetRow.alignment = .centerY
+        resetRow.spacing = 10
+        resetRow.distribution = .fillEqually
+        resetRow.translatesAutoresizingMaskIntoConstraints = false
+        resetRow.addArrangedSubview(resetButton)
 
         actionsRow.orientation = .horizontal
         actionsRow.alignment = .centerY
@@ -57,9 +102,11 @@ final class ImageStudioCommitFooter: NSView {
         column.alignment = .leading
         column.spacing = 10
         column.translatesAutoresizingMaskIntoConstraints = false
-        column.addArrangedSubview(resetAllButton)
+        column.addArrangedSubview(commitRow)
+        column.addArrangedSubview(resetRow)
         column.addArrangedSubview(actionsRow)
-        resetAllButton.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        commitRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        resetRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         actionsRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
 
         addSubview(hairline)
@@ -77,6 +124,8 @@ final class ImageStudioCommitFooter: NSView {
             column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
         ])
 
+        setShowsUnsavedCommit(false)
+        setShowsReset(false)
         refreshActionButtonChrome()
     }
 
@@ -92,7 +141,9 @@ final class ImageStudioCommitFooter: NSView {
 
     private func refreshActionButtonChrome() {
         let appearance = effectiveAppearance
-        resetAllButton.refreshChrome(appearance: appearance)
+        saveDevelopButton.refreshChrome(appearance: appearance)
+        discardDevelopButton.refreshChrome(appearance: appearance)
+        resetButton.refreshChrome(appearance: appearance)
         savePresetButton.refreshChrome(appearance: appearance)
         exportButton.refreshChrome(appearance: appearance)
     }
@@ -122,11 +173,16 @@ final class CommitFooterActionButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false {
+        didSet { applyFill() }
+    }
+    private var isPressed = false {
+        didSet { applyFill() }
+    }
+
     func refreshChrome(appearance: NSAppearance) {
-        let fill = emphasized
-            ? LaughTheme.chromeActiveFill(appearance: appearance)
-            : LaughTheme.chromeHoverFill(appearance: appearance)
-        layer?.backgroundColor = fill.cgColor
+        applyFill(appearance: appearance)
         iconView.contentTintColor = .labelColor
         titleLabel.textColor = .labelColor
     }
@@ -134,7 +190,69 @@ final class CommitFooterActionButton: NSButton {
     override var isEnabled: Bool {
         didSet {
             alphaValue = isEnabled ? 1 : 0.45
+            if !isEnabled {
+                isHovered = false
+                isPressed = false
+            }
         }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isPressed = true
+        super.mouseDown(with: event)
+        isPressed = false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyFill()
+    }
+
+    private func applyFill(appearance: NSAppearance? = nil) {
+        let appearance = appearance ?? effectiveAppearance
+        let fill: NSColor
+        if emphasized {
+            if isPressed || isHovered {
+                fill = LaughTheme.chromePressedFill(appearance: appearance)
+            } else {
+                fill = LaughTheme.chromeActiveFill(appearance: appearance)
+            }
+        } else if isPressed || isHovered {
+            fill = LaughTheme.chromeActiveFill(appearance: appearance)
+        } else {
+            fill = LaughTheme.chromeHoverFill(appearance: appearance)
+        }
+        layer?.backgroundColor = fill.cgColor
     }
 
     private func configure(title: String, symbol: String) {
@@ -146,6 +264,10 @@ final class CommitFooterActionButton: NSButton {
         bezelStyle = .inline
         setButtonType(.momentaryChange)
         focusRingType = .none
+        if let cell = cell as? NSButtonCell {
+            cell.highlightsBy = []
+            cell.showsStateBy = []
+        }
         self.title = ""
         image = nil
         imagePosition = .noImage
@@ -197,5 +319,6 @@ final class CommitFooterActionButton: NSButton {
             contentStack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 10),
             trailingAnchor.constraint(greaterThanOrEqualTo: contentStack.trailingAnchor, constant: 10)
         ])
+        applyFill()
     }
 }

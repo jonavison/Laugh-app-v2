@@ -173,6 +173,10 @@ final class MainWindowController: NSWindowController {
     func prepareForTermination() {
         playerViewController.prepareForTermination()
     }
+
+    func confirmQuitWithDirtyDevelopIfNeeded() -> Bool {
+        playerViewController.confirmQuitWithDirtyDevelopIfNeeded()
+    }
     func commandToggleLibrary() { playerViewController.commandToggleLibraryPanel() }
     func commandToggleInspector() { playerViewController.commandToggleSettingsInspector() }
     func commandSelectSettingsTab(_ index: Int) { playerViewController.commandSelectSettingsTab(index) }
@@ -180,6 +184,10 @@ final class MainWindowController: NSWindowController {
     func commandCycleAspect() { playerViewController.commandCycleWindowAspectPreset() }
     func commandToggleLockAspect() { playerViewController.commandToggleLockAspect() }
     func commandSwitchPlaySource() { playerViewController.commandTogglePlaybackSource() }
+    func commandToggleSlideshow() { playerViewController.toggleImageSlideshow() }
+    var canToggleImageSlideshow: Bool { playerViewController.canToggleImageSlideshow }
+    var isImageSlideshowActive: Bool { playerViewController.isImageSlideshowActive }
+    var isImageSlideshowPlaying: Bool { playerViewController.isImageSlideshowPlaying }
     func commandPreviousAudioTrack() { playerViewController.commandStepAudioTrack(forward: false) }
     func commandNextAudioTrack() { playerViewController.commandStepAudioTrack(forward: true) }
     func commandCycleEQ() { playerViewController.commandCycleEQPreset() }

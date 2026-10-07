@@ -66,6 +66,10 @@ enum KeyboardShortcutsReference {
 
     IMAGE
     ← / → — Previous / next image in folder
+    F — Immersive full-screen image (no auto-advance)
+    ⌥⌘S — Start / stop slideshow auto-advance
+    Space — Play / pause slideshow (while immersive)
+    Esc — Exit immersive / slideshow (or close image when not immersive)
     Info button (beside Library) — Toggle Info column
     ⌘+ / ⌘- — Zoom in / out
     ⌘0 — Reset zoom (fit)

@@ -39,14 +39,16 @@ enum LibraryBrowseGalleryScale: String, CaseIterable {
     case medium
     case large
     case xlarge
+    case xxlarge
 
-    /// Slider stop index 0...3
+    /// Slider stop index 0...4
     var sliderValue: Double {
         switch self {
         case .small: return 0
         case .medium: return 1
         case .large: return 2
         case .xlarge: return 3
+        case .xxlarge: return 4
         }
     }
 
@@ -56,7 +58,8 @@ enum LibraryBrowseGalleryScale: String, CaseIterable {
         case 0: return .small
         case 1: return .medium
         case 2: return .large
-        default: return .xlarge
+        case 3: return .xlarge
+        default: return .xxlarge
         }
     }
 }
@@ -112,55 +115,68 @@ struct LibraryBrowseTileMetrics: Equatable {
             switch galleryScale {
             case .small:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 176, height: 99),
-                    maxItemSize: NSSize(width: 208, height: 117),
+                    minItemSize: NSSize(width: 200, height: 112),
+                    maxItemSize: NSSize(width: 240, height: 135),
                     interitemSpacing: 4,
                     lineSpacing: 4,
-                    thumbHeight: 117,
+                    thumbHeight: 135,
                     folderIconPointSize: 40,
-                    thumbnailMaxSide: 320,
+                    thumbnailMaxSide: 360,
                     showsTitle: false,
                     contentInset: 10,
                     contentTopInset: 20
                 )
             case .medium:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 220, height: 124),
-                    maxItemSize: NSSize(width: 256, height: 144),
+                    minItemSize: NSSize(width: 268, height: 151),
+                    maxItemSize: NSSize(width: 320, height: 180),
                     interitemSpacing: 5,
                     lineSpacing: 5,
-                    thumbHeight: 144,
-                    folderIconPointSize: 44,
-                    thumbnailMaxSide: 400,
+                    thumbHeight: 180,
+                    folderIconPointSize: 46,
+                    thumbnailMaxSide: 480,
                     showsTitle: false,
                     contentInset: 10,
                     contentTopInset: 22
                 )
             case .large:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 300, height: 169),
-                    maxItemSize: NSSize(width: 360, height: 203),
+                    minItemSize: NSSize(width: 380, height: 214),
+                    maxItemSize: NSSize(width: 460, height: 259),
                     interitemSpacing: 6,
                     lineSpacing: 6,
-                    thumbHeight: 203,
-                    folderIconPointSize: 52,
-                    thumbnailMaxSide: 560,
+                    thumbHeight: 259,
+                    folderIconPointSize: 54,
+                    thumbnailMaxSide: 720,
                     showsTitle: false,
                     contentInset: 12,
                     contentTopInset: 24
                 )
             case .xlarge:
                 return LibraryBrowseTileMetrics(
-                    minItemSize: NSSize(width: 400, height: 225),
-                    maxItemSize: NSSize(width: 480, height: 270),
+                    minItemSize: NSSize(width: 520, height: 292),
+                    maxItemSize: NSSize(width: 640, height: 360),
                     interitemSpacing: 8,
                     lineSpacing: 8,
-                    thumbHeight: 270,
-                    folderIconPointSize: 56,
-                    thumbnailMaxSide: 720,
+                    thumbHeight: 360,
+                    folderIconPointSize: 60,
+                    thumbnailMaxSide: 960,
                     showsTitle: false,
                     contentInset: 14,
                     contentTopInset: 24
+                )
+            case .xxlarge:
+                return LibraryBrowseTileMetrics(
+                    minItemSize: NSSize(width: 680, height: 382),
+                    maxItemSize: NSSize(width: 880, height: 495),
+                    interitemSpacing: 10,
+                    lineSpacing: 10,
+                    thumbHeight: 495,
+                    folderIconPointSize: 68,
+                    thumbnailMaxSide: 1280,
+                    showsTitle: false,
+                    contentInset: 16,
+                    contentTopInset: 26
                 )
             }
         case .grid:

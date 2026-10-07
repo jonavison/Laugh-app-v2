@@ -73,7 +73,7 @@ require_notary_profile() {
   if [[ -z "${LAUGH_NOTARY_PROFILE:-}" ]]; then
     echo "Set LAUGH_NOTARY_PROFILE (notarytool keychain profile) or pass --skip-notarize." >&2
     echo "Example: xcrun notarytool store-credentials laugh-notary --apple-id YOU --team-id PJPQ2PYK8U --password APP-PASSWORD" >&2
-    echo "Or reuse Smile's profile: export LAUGH_NOTARY_PROFILE=smile-notary" >&2
+    echo "Then: export LAUGH_NOTARY_PROFILE=laugh-notary" >&2
     exit 1
   fi
 }

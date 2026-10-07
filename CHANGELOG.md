@@ -2,9 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
-Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is production-ready — same convention as Smile. Older `1.x` tags were an early packaging mistake, not a claim of 1.0 readiness.
+Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is production-ready. Older `1.x` tags were an early packaging mistake, not a claim of 1.0 readiness.
 
 ## [Unreleased]
+
+## [0.11.0] - 2026-10-07
+
+### Added
+- **Image batch develop** — multi-select in the filmstrip / library, Batch catalog with Dry/Wet mix, shared look stamp (ADR 0006).
+- **Image immersive / slideshow** — **F** for fullscreen image review; View → Start Slideshow (⌥⌘S) for optional auto-advance (2s/4s/8s). Controls bar on mouse move only; edge-to-edge black (no title-bar grey band).
+- Per-image develop edit store, Edits catalog, RAW decode helpers, and filmstrip priority/shimmer while thumbs load.
+
+### Fixed
+- Studio Info / Edits / Batch tab labels, hit targets, and sliding hover/selection pill.
+- Batch enter uses a soft fade on the right rail instead of a skeleton shimmer.
 
 ## [0.9.5] - 2026-09-15
 

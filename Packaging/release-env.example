@@ -7,9 +7,8 @@ export LAUGH_BUNDLE_ID="com.laughplayer.app"
 # Developer ID Application identity — exact Keychain name, or leave unset to auto-pick.
 # export LAUGH_CODESIGN_IDENTITY="Developer ID Application: Jonathan Avison (PJPQ2PYK8U)"
 
-# notarytool keychain profile (same Apple team as Smile is fine).
+# notarytool keychain profile.
 # Create once:
 #   xcrun notarytool store-credentials laugh-notary \
 #     --apple-id YOU --team-id PJPQ2PYK8U --password APP_SPECIFIC_PASSWORD
-# Or reuse Smile's profile on the same Mac:
-export LAUGH_NOTARY_PROFILE="smile-notary"
+export LAUGH_NOTARY_PROFILE="laugh-notary"

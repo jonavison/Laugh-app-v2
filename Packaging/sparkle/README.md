@@ -1,12 +1,12 @@
 # Sparkle (in-app updates)
 
-LaughPlayer uses [Sparkle 2](https://sparkle-project.org) like Smile.
+LaughPlayer uses [Sparkle 2](https://sparkle-project.org).
 
 | Item | Value |
 |------|--------|
 | Feed | `https://avison-soft.com/laugh/appcast.xml` |
 | Public key | `public-ed-key.txt` (committed) |
-| Private key | Login Keychain on the release Mac (same Avison key as Smile unless overridden) |
+| Private key | Login Keychain on the release Mac (Avison Sparkle key unless overridden) |
 
 ## One-time setup
 
@@ -14,7 +14,7 @@ LaughPlayer uses [Sparkle 2](https://sparkle-project.org) like Smile.
 ./scripts/sparkle-generate-keys.sh
 ```
 
-If a Sparkle key already exists in Keychain (e.g. from Smile), this writes that public key into `public-ed-key.txt`. Commit it.
+If a Sparkle key already exists in Keychain for Laugh, this writes that public key into `public-ed-key.txt`. Commit it.
 
 Optional private key file for CI:
 

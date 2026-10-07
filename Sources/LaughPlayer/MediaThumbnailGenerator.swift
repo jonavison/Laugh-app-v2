@@ -5,13 +5,21 @@ import Foundation
 import ImageIO
 
 /// Shared still/video thumbnails for library browse, folder collage, and image carousel.
-/// ImageIO for stills (incl. RAW embedded previews); native AV + bundled ffmpeg for video.
+/// ImageIO for stills + RAW embedded JPEGs (never CIRAW — demosaic starves the UI).
 enum MediaThumbnailGenerator {
     private static let memoryCache = NSCache<NSString, NSImage>()
-    /// V2: PNG for alpha stills + higher JPEG quality; old JPEG-only cache flattened transparency.
-    private static let diskFolderName = "LaughPlayerThumbnailsV2"
+    /// V6: ImageIO+letterbox-crop for RAW; drop V5 CIRAW-corrupt / hung thumbs.
+    private static let diskFolderName = "LaughPlayerThumbnailsV6"
     private static let legacyDiskFolderName = "LaughPlayerThumbnails"
+    private static let legacyV2DiskFolderName = "LaughPlayerThumbnailsV2"
+    private static let legacyV3DiskFolderName = "LaughPlayerThumbnailsV3"
+    private static let legacyV4DiskFolderName = "LaughPlayerThumbnailsV4"
+    private static let legacyV5DiskFolderName = "LaughPlayerThumbnailsV5"
     private static let legacyCleanupDefaultsKey = "LaughPlayerThumbnailsV1Cleared"
+    private static let legacyV2CleanupDefaultsKey = "LaughPlayerThumbnailsV2Cleared"
+    private static let legacyV3CleanupDefaultsKey = "LaughPlayerThumbnailsV3Cleared"
+    private static let legacyV4CleanupDefaultsKey = "LaughPlayerThumbnailsV4Cleared"
+    private static let legacyV5CleanupDefaultsKey = "LaughPlayerThumbnailsV5Cleared"
 
     /// Minimum decode cap so Gallery @2x (~320pt tiles) stays sharp even when asked for a small maxSide.
     private static let minimumImagePixelCap: CGFloat = 960
@@ -76,15 +84,65 @@ enum MediaThumbnailGenerator {
         }
     }
 
-    /// Launch migration: drop the V1 JPEG-only disk cache (flattened alpha / soft encodes).
+    /// Launch migration: drop legacy thumb caches that baked in grey RAW/EXIF previews.
     static func performLaunchMigrations() {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: legacyCleanupDefaultsKey) else { return }
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let legacy = base.appendingPathComponent(legacyDiskFolderName, isDirectory: true)
-        try? FileManager.default.removeItem(at: legacy)
-        defaults.set(true, forKey: legacyCleanupDefaultsKey)
+        let legacyFolders: [(key: String, folder: String)] = [
+            (legacyCleanupDefaultsKey, legacyDiskFolderName),
+            (legacyV2CleanupDefaultsKey, legacyV2DiskFolderName),
+            (legacyV3CleanupDefaultsKey, legacyV3DiskFolderName),
+            (legacyV4CleanupDefaultsKey, legacyV4DiskFolderName),
+            (legacyV5CleanupDefaultsKey, legacyV5DiskFolderName)
+        ]
+        for entry in legacyFolders where !defaults.bool(forKey: entry.key) {
+            let url = base.appendingPathComponent(entry.folder, isDirectory: true)
+            try? FileManager.default.removeItem(at: url)
+            defaults.set(true, forKey: entry.key)
+        }
+    }
+
+    /// True when a large edge band is flat *and* differs from the photo body
+    /// (truncated NEF preview / camera letterbox). Solid images are not flagged.
+    static func hasUniformEdgeBand(_ image: CGImage) -> Bool {
+        let trimmed = removingUniformEdgeBands(image)
+        return trimmed.width != image.width || trimmed.height != image.height
+    }
+
+    /// Crops flat grey/white letterbox / truncated bands. Used for camera RAW previews.
+    static func removingUniformEdgeBands(_ image: CGImage) -> CGImage {
+        let width = image.width
+        let height = image.height
+        guard width >= 8, height >= 16 else { return image }
+        let bodyY = height / 3
+        let bodyH = max(4, height / 3)
+        guard let body = bandStats(image, y: bodyY, bandHeight: bodyH) else { return image }
+
+        let row = max(2, height / 40)
+        let maxTrim = height / 3
+        var bottomTrim = 0
+        while bottomTrim + row <= maxTrim {
+            guard let edge = bandStats(image, y: bottomTrim, bandHeight: row),
+                  edge.isUniform,
+                  colorDistance(edge.mean, body.mean) > 28
+            else { break }
+            bottomTrim += row
+        }
+        var topTrim = 0
+        while topTrim + row <= maxTrim {
+            guard let edge = bandStats(image, y: height - topTrim - row, bandHeight: row),
+                  edge.isUniform,
+                  colorDistance(edge.mean, body.mean) > 28
+            else { break }
+            topTrim += row
+        }
+        guard bottomTrim > 0 || topTrim > 0 else { return image }
+        let cropH = height - bottomTrim - topTrim
+        guard cropH >= 8 else { return image }
+        // CGImage cropping uses bottom-left origin.
+        let rect = CGRect(x: 0, y: bottomTrim, width: width, height: cropH)
+        return image.cropping(to: rect) ?? image
     }
 
     /// Test seam: drop memory entries so the next load exercises disk cache.
@@ -95,6 +153,10 @@ enum MediaThumbnailGenerator {
     /// Test seam: reset the V1 cleanup flag (does not recreate files).
     static func resetLegacyCleanupFlagForTesting() {
         UserDefaults.standard.removeObject(forKey: legacyCleanupDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyV2CleanupDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyV3CleanupDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyV4CleanupDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyV5CleanupDefaultsKey)
     }
 
     static func defaultScreenScale() -> CGFloat {
@@ -142,8 +204,6 @@ enum MediaThumbnailGenerator {
             return disk
         }
 
-        // ImageIO extracts embedded JPEG previews from NEF/CR2/ARW/DNG and
-        // downsamples JPEG/HEIC without loading the full decode on a background thread.
         if let image = imageIOThumbnail(for: url, maxPixelSize: pixelCap) {
             storeDiskCache(image, cacheKey: cacheKey)
             return image
@@ -156,40 +216,98 @@ enum MediaThumbnailGenerator {
         return down
     }
 
-    /// Prefer embedded thumb when present (RAW); otherwise create a scaled decode.
+    /// ImageIO thumbnail. RAW uses embedded JPEG only (`IfAbsent`) — `Always` / CIRAW hang.
     private static func imageIOThumbnail(for url: URL, maxPixelSize: CGFloat) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               CGImageSourceGetCount(source) > 0 else {
             return nil
         }
 
-        let attempts: [[CFString: Any]] = [
-            // RAW / camera files: use embedded preview when available (fast, reliable for .nef).
-            [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                kCGImageSourceShouldCacheImmediately: true
-            ],
-            // Standard stills without a stored thumb: force a thumbnail decode.
-            [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
+        let isRAW = MediaKindDetector.isCameraRAW(url)
+        var attempts: [[CFString: Any]] = []
+        let common: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false
         ]
+        if isRAW {
+            var ifAbsent = common
+            ifAbsent[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
+            attempts = [ifAbsent]
+        } else {
+            var always = common
+            always[kCGImageSourceCreateThumbnailFromImageAlways] = true
+            attempts = [always]
+        }
 
         for options in attempts {
-            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-               cgImage.width > 1, cgImage.height > 1 {
-                return NSImage(
-                    cgImage: cgImage,
-                    size: NSSize(width: cgImage.width, height: cgImage.height)
-                )
-            }
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+                  cgImage.width > 1, cgImage.height > 1
+            else { continue }
+            // Letterbox crop is RAW-only — transparent PNG corners look like “flat bands”.
+            let cleaned = isRAW ? removingUniformEdgeBands(cgImage) : cgImage
+            return ImageStudioCISource.displayNSImage(from: cleaned)
         }
         return nil
+    }
+
+    private struct BandStats {
+        let mean: (r: Int, g: Int, b: Int)
+        let isUniform: Bool
+    }
+
+    private static func bandStats(_ image: CGImage, y: Int, bandHeight: Int) -> BandStats? {
+        let width = image.width
+        let height = image.height
+        guard bandHeight > 0, y >= 0, y + bandHeight <= height else { return nil }
+
+        var data = [UInt8](repeating: 0, count: width * bandHeight * 4)
+        guard let ctx = CGContext(
+            data: &data,
+            width: width,
+            height: bandHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(
+            image,
+            in: CGRect(x: 0, y: -CGFloat(y), width: CGFloat(width), height: CGFloat(height))
+        )
+
+        let step = max(1, width / 24)
+        var samples: [(Int, Int, Int)] = []
+        samples.reserveCapacity((width / step) * max(1, bandHeight / 4))
+        for row in stride(from: 0, to: bandHeight, by: max(1, bandHeight / 4)) {
+            for col in stride(from: 0, to: width, by: step) {
+                let i = (row * width + col) * 4
+                samples.append((Int(data[i]), Int(data[i + 1]), Int(data[i + 2])))
+            }
+        }
+        guard samples.count >= 8 else { return nil }
+
+        let meanR = samples.reduce(0) { $0 + $1.0 } / samples.count
+        let meanG = samples.reduce(0) { $0 + $1.1 } / samples.count
+        let meanB = samples.reduce(0) { $0 + $1.2 } / samples.count
+        var outlier = 0
+        for sample in samples {
+            if abs(sample.0 - meanR) > 12 || abs(sample.1 - meanG) > 12 || abs(sample.2 - meanB) > 12 {
+                outlier += 1
+            }
+        }
+        return BandStats(
+            mean: (meanR, meanG, meanB),
+            isUniform: Double(outlier) / Double(samples.count) < 0.08
+        )
+    }
+
+    private static func colorDistance(_ a: (r: Int, g: Int, b: Int), _ b: (r: Int, g: Int, b: Int)) -> Int {
+        abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b)
     }
 
     private static func videoThumbnail(for url: URL, maxSide: CGFloat, cacheKey: String) -> NSImage? {
@@ -401,7 +519,7 @@ enum MediaThumbnailGenerator {
         let height = CGFloat(cgImage.height)
         let scale = min(maxPixelSide / max(width, 1), maxPixelSide / max(height, 1), 1)
         guard scale < 0.999 else {
-            return NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+            return ImageStudioCISource.displayNSImage(from: cgImage)
         }
 
         let targetW = max(1, Int((width * scale).rounded()))

@@ -145,6 +145,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         window.orderFrontRegardless()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let windowController, !windowController.confirmQuitWithDirtyDevelopIfNeeded() {
+            return .terminateCancel
+        }
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         windowController?.prepareForTermination()
         MpvPlaybackController.terminateRunningProcesses()
@@ -287,6 +294,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         menu.addItem(menuItem(title: "Toggle Lock Aspect", action: #selector(commandToggleLockAspect), key: "K", modifiers: [.command, .shift]))
         menu.addItem(menuItem(title: "Switch Play Source", action: #selector(commandSwitchPlaySource), key: "S", modifiers: [.command, .shift]))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(menuItem(
+            title: "Start Slideshow",
+            action: #selector(commandToggleSlideshow),
+            key: "s",
+            modifiers: [.command, .option]
+        ))
         menu.addItem(menuItem(title: "Toggle Full Screen", action: #selector(toggleFullScreen), key: "f", modifiers: [.command, .control]))
         menu.addItem(menuItem(title: "Show Playback Debug Info", action: #selector(showPlaybackDebugInfo), key: "D", modifiers: [.command, .shift]))
         return menu
@@ -388,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     @objc private func commandCycleAspect() { windowController?.commandCycleAspect() }
     @objc private func commandToggleLockAspect() { windowController?.commandToggleLockAspect() }
     @objc private func commandSwitchPlaySource() { windowController?.commandSwitchPlaySource() }
+    @objc private func commandToggleSlideshow() { windowController?.commandToggleSlideshow() }
 
     // MARK: - Audio commands
 
@@ -399,6 +413,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     @objc private func toggleFullScreen() {
         windowController?.toggleFullScreen()
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(commandToggleSlideshow) else {
+            return responds(to: menuItem.action)
+        }
+        menuItem.title = windowController?.isImageSlideshowPlaying == true
+            ? "Stop Slideshow"
+            : "Start Slideshow"
+        return windowController?.canToggleImageSlideshow == true
     }
 
     @objc func openPreferences() {

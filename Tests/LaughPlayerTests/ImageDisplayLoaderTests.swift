@@ -48,6 +48,18 @@ final class ImageDisplayLoaderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(fitLong, min(quickLong, 1000), "fit should not be softer than quick")
     }
 
+    func testFitDecodeIsPremultipliedRGBA8() throws {
+        let url = try makeJPEGWithEmbeddedThumbnail()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let fit = try XCTUnwrap(ImageDisplayLoader.loadDisplayImage(at: url, maxPixelSize: 800))
+        let cg = try XCTUnwrap(fit.image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertTrue(
+            ImageStudioCISource.isMetalSafeRGBA8(cg),
+            "Identity NSImageView path must not display ImageIO YCbCr / 24-bit RGB"
+        )
+    }
+
     func testFitDecodeIgnoresEmbeddedThumbnailTrap() throws {
         let url = try makeJPEGWithEmbeddedThumbnail()
         defer { try? FileManager.default.removeItem(at: url) }

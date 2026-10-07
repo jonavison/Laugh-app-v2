@@ -1,10 +1,48 @@
 import AppKit
 import QuartzCore
 
+/// Filmstrip badge for per-image develop state (ADR 0006).
+enum FilmstripDevelopMark: Equatable {
+    case none
+    /// Saved **ImageDevelopEdit** on disk (in-app store).
+    case saved
+    /// Open image with unsaved session changes.
+    case dirty
+}
+
+/// Decode order for filmstrip thumbs: selected first, then expand outward.
+enum FilmstripThumbnailPriority {
+    static func ordered(urls: [URL], selected: URL?) -> [URL] {
+        guard !urls.isEmpty else { return [] }
+        guard let selected else { return urls }
+        let selectedKey = selected.standardizedFileURL
+        guard let center = urls.firstIndex(where: { $0.standardizedFileURL == selectedKey }) else {
+            return urls
+        }
+        var result: [URL] = []
+        result.reserveCapacity(urls.count)
+        result.append(urls[center])
+        var radius = 1
+        while result.count < urls.count {
+            let right = center + radius
+            let left = center - radius
+            if right < urls.count { result.append(urls[right]) }
+            if left >= 0 { result.append(urls[left]) }
+            radius += 1
+        }
+        return result
+    }
+}
+
 /// Bottom filmstrip of sibling images in the same folder as the open **ImageMedia**.
 /// Square-ish thumbs, tight spacing, scroll-edge gradient shadows (no scrollbar).
 final class ImageFolderCarouselView: NSView {
+    /// Plain click — open this still.
     var onSelect: ((URL) -> Void)?
+    /// ⌘-click — toggle batch membership (does not open).
+    var onBatchToggle: ((URL) -> Void)?
+    /// ⇧-click — range-select into batch (does not open).
+    var onBatchRange: ((URL) -> Void)?
 
     private let scrollView = FilmstripScrollView()
     private let stack = NSStackView()
@@ -12,7 +50,9 @@ final class ImageFolderCarouselView: NSView {
     private let rightFadeView = FadeEdgeView(edge: .trailing)
     private var urls: [URL] = []
     private var selectedURL: URL?
+    private var batchSelectedURLs: Set<URL> = []
     private var thumbnailButtons: [URL: FilmstripThumbButton] = [:]
+    private var developMarks: [URL: FilmstripDevelopMark] = [:]
     private var loadGeneration = 0
     private var clipObserver: NSObjectProtocol?
 
@@ -132,9 +172,29 @@ final class ImageFolderCarouselView: NSView {
     func clear() {
         urls = []
         selectedURL = nil
+        batchSelectedURLs = []
+        developMarks = [:]
         loadGeneration += 1
         rebuildButtons()
         updateFadeVisibility()
+    }
+
+    /// Update top-left edit icons without rebuilding thumbs.
+    func setDevelopMarks(_ marks: [URL: FilmstripDevelopMark]) {
+        var normalized: [URL: FilmstripDevelopMark] = [:]
+        for (url, mark) in marks where mark != .none {
+            normalized[url.standardizedFileURL] = mark
+        }
+        developMarks = normalized
+        for (url, button) in thumbnailButtons {
+            button.setDevelopMark(normalized[url.standardizedFileURL] ?? .none)
+        }
+    }
+
+    /// Grey ring for batch membership (open still still uses teal).
+    func setBatchSelection(_ urls: [URL]) {
+        batchSelectedURLs = Set(urls.map(\.standardizedFileURL))
+        refreshAllThumbChrome(animated: false)
     }
 
     func refreshEdgeFades() {
@@ -203,10 +263,24 @@ final class ImageFolderCarouselView: NSView {
         }
         selectedURL = next
         if let previous, let button = thumbnailButtons[previous] {
-            applySelectionChrome(button, selected: false, animated: scrollMotion == .deliberate)
+            applyThumbChrome(
+                button,
+                open: false,
+                batched: batchSelectedURLs.contains(previous),
+                animated: scrollMotion == .deliberate
+            )
         }
         if let next, let button = thumbnailButtons[next] {
-            applySelectionChrome(button, selected: true, animated: scrollMotion == .deliberate)
+            applyThumbChrome(
+                button,
+                open: true,
+                batched: batchSelectedURLs.contains(next),
+                animated: scrollMotion == .deliberate
+            )
+            // Scrub landed on a still whose RAW thumb is still queued — jump the line.
+            if button.image == nil {
+                decodeThumbnail(for: next, generation: loadGeneration, preferImmediate: true)
+            }
         }
         centerSelectedThumbnailIfPossible(
             motion: scrollMotion,
@@ -232,21 +306,27 @@ final class ImageFolderCarouselView: NSView {
         thumbnailButtons.removeAll()
 
         for url in urls {
-            let button = FilmstripThumbButton(
-                title: "",
-                target: self,
-                action: #selector(thumbPressed(_:))
-            )
+            let button = FilmstripThumbButton()
             button.toolTip = url.lastPathComponent
-            button.identifier = NSUserInterfaceItemIdentifier(url.path)
             button.translatesAutoresizingMaskIntoConstraints = false
+            button.onClick = { [weak self] flags in
+                self?.handleThumbClick(url: url, modifiers: flags)
+            }
             NSLayoutConstraint.activate([
                 button.widthAnchor.constraint(equalToConstant: Self.thumbSide),
                 button.heightAnchor.constraint(equalToConstant: Self.thumbSide)
             ])
-            applySelectionChrome(button, selected: isSelected(url), animated: false)
+            let key = url.standardizedFileURL
+            applyThumbChrome(
+                button,
+                open: isSelected(url),
+                batched: batchSelectedURLs.contains(key),
+                animated: false
+            )
+            button.setDevelopMark(developMarks[key] ?? .none)
+            button.beginLoadingShimmer()
             stack.addArrangedSubview(button)
-            thumbnailButtons[url.standardizedFileURL] = button
+            thumbnailButtons[key] = button
         }
         stack.layoutSubtreeIfNeeded()
         let width = max(stack.fittingSize.width, scrollView.contentView.bounds.width)
@@ -259,15 +339,39 @@ final class ImageFolderCarouselView: NSView {
         return url.standardizedFileURL == selectedURL
     }
 
-    private func applySelectionChrome(_ button: FilmstripThumbButton, selected: Bool, animated: Bool = false) {
+    private func refreshAllThumbChrome(animated: Bool) {
+        for (url, button) in thumbnailButtons {
+            applyThumbChrome(
+                button,
+                open: selectedURL == url,
+                batched: batchSelectedURLs.contains(url),
+                animated: animated
+            )
+        }
+    }
+
+    private func applyThumbChrome(
+        _ button: FilmstripThumbButton,
+        open: Bool,
+        batched: Bool,
+        animated: Bool = false
+    ) {
         button.wantsLayer = true
         guard let layer = button.layer else { return }
 
-        // Selection is border-only — never scale the thumb (that reads as “bigger”).
-        let borderWidth: CGFloat = selected ? 2.5 : 1
-        let borderColor = (selected
-            ? LaughTheme.interactiveAccent
-            : NSColor.separatorColor.withAlphaComponent(0.55)).cgColor
+        // Open = teal ring; batch-only = grey chrome ring; else hairline.
+        let borderWidth: CGFloat
+        let borderColor: CGColor
+        if open {
+            borderWidth = 2.5
+            borderColor = LaughTheme.interactiveAccent.cgColor
+        } else if batched {
+            borderWidth = 2
+            borderColor = LaughTheme.chromeActiveFill(appearance: effectiveAppearance).cgColor
+        } else {
+            borderWidth = 1
+            borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        }
 
         let apply: () -> Void = {
             layer.borderWidth = borderWidth
@@ -293,27 +397,86 @@ final class ImageFolderCarouselView: NSView {
     private func loadThumbnails() {
         loadGeneration += 1
         let generation = loadGeneration
-        let targets = urls
-        // Use the real display scale — hardcoding *2 goes soft on any screen above 2x.
+        let targets = FilmstripThumbnailPriority.ordered(urls: urls, selected: selectedURL)
+        guard !targets.isEmpty else { return }
         let scale = window?.backingScaleFactor
             ?? NSScreen.main?.backingScaleFactor
             ?? MediaThumbnailGenerator.defaultScreenScale()
         let pointSide = Self.thumbSide
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            for url in targets {
-                let kind = MediaKindDetector.kind(for: url)
-                let image = MediaThumbnailGenerator.squareThumbnail(
-                    for: url,
-                    kind: kind,
-                    pointSide: pointSide,
-                    screenScale: scale
-                )
-                DispatchQueue.main.async {
-                    guard let self, self.loadGeneration == generation else { return }
-                    guard let button = self.thumbnailButtons[url.standardizedFileURL] else { return }
-                    button.image = image
+        // Finish the open still before the pool races for the serial RAW decoder.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.runThumbnailDecode(
+                url: targets[0],
+                generation: generation,
+                pointSide: pointSide,
+                scale: scale
+            )
+            for url in targets.dropFirst() {
+                Self.thumbnailDecodeQueue.async {
+                    Self.thumbnailDecodeLimiter.wait()
+                    defer { Self.thumbnailDecodeLimiter.signal() }
+                    self?.runThumbnailDecode(
+                        url: url,
+                        generation: generation,
+                        pointSide: pointSide,
+                        scale: scale
+                    )
                 }
             }
+        }
+    }
+
+    /// ImageIO embedded JPEG thumbs are thread-safe — keep a modest pool.
+    private static let thumbnailDecodeQueue: DispatchQueue = {
+        DispatchQueue(label: "ch.laugh.filmstrip.thumbs", qos: .utility, attributes: .concurrent)
+    }()
+    private static let thumbnailDecodeLimiter = DispatchSemaphore(value: 4)
+
+    private func decodeThumbnail(for url: URL, generation: Int, preferImmediate: Bool) {
+        let scale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? MediaThumbnailGenerator.defaultScreenScale()
+        let pointSide = Self.thumbSide
+        let work = { [weak self] in
+            if !preferImmediate {
+                Self.thumbnailDecodeLimiter.wait()
+            }
+            defer {
+                if !preferImmediate {
+                    Self.thumbnailDecodeLimiter.signal()
+                }
+            }
+            self?.runThumbnailDecode(
+                url: url,
+                generation: generation,
+                pointSide: pointSide,
+                scale: scale
+            )
+        }
+        if preferImmediate {
+            DispatchQueue.global(qos: .userInitiated).async(execute: work)
+        } else {
+            Self.thumbnailDecodeQueue.async(execute: work)
+        }
+    }
+
+    private func runThumbnailDecode(
+        url: URL,
+        generation: Int,
+        pointSide: CGFloat,
+        scale: CGFloat
+    ) {
+        let kind = MediaKindDetector.kind(for: url)
+        let image = MediaThumbnailGenerator.squareThumbnail(
+            for: url,
+            kind: kind,
+            pointSide: pointSide,
+            screenScale: scale
+        )
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.loadGeneration == generation else { return }
+            guard let button = self.thumbnailButtons[url.standardizedFileURL] else { return }
+            button.applyThumbnail(image)
         }
     }
 
@@ -397,48 +560,180 @@ final class ImageFolderCarouselView: NSView {
         )
     }
 
-    @objc private func thumbPressed(_ sender: NSButton) {
-        guard let path = sender.identifier?.rawValue else { return }
-        let url = URL(fileURLWithPath: path)
-        onSelect?(url)
+    private func handleThumbClick(url: URL, modifiers: NSEvent.ModifierFlags) {
+        let flags = modifiers.intersection([.command, .shift])
+        if flags.contains(.command) {
+            onBatchToggle?(url)
+        } else if flags.contains(.shift) {
+            onBatchRange?(url)
+        } else {
+            onSelect?(url)
+        }
     }
 }
 
 /// Filmstrip cell with a brighten-on-hover wash (photo content, not chrome blue).
 private final class FilmstripThumbButton: NSButton {
-    private let hoverWash = CALayer()
-    private var tracking: NSTrackingArea?
+    var onClick: ((NSEvent.ModifierFlags) -> Void)?
 
-    init(title: String, target: AnyObject?, action: Selector?) {
+    private let hoverWash = CALayer()
+    private let shimmerHost = FilmstripShimmerView()
+    private let editHost = NSView()
+    private let editBadge = NSImageView()
+    private var tracking: NSTrackingArea?
+    private var developMark: FilmstripDevelopMark = .none
+    private var mouseDownModifiers: NSEvent.ModifierFlags = []
+
+    init() {
         super.init(frame: .zero)
-        self.title = title
-        self.target = target
-        self.action = action
+        title = ""
+        alternateTitle = ""
         bezelStyle = .regularSquare
         isBordered = false
         imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyUpOrDown
+        imageScaling = .scaleAxesIndependently
+        // Never let AppKit draw a truncated filename over the photo.
+        setButtonType(.momentaryChange)
         wantsLayer = true
         layer?.cornerRadius = 7
         layer?.masksToBounds = true
         // Muted plate so transparent PNGs read correctly through the shared crop-fill path.
         layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
 
+        shimmerHost.translatesAutoresizingMaskIntoConstraints = false
+        shimmerHost.isHidden = true
+        addSubview(shimmerHost)
+
         hoverWash.name = "filmstripHoverWash"
         hoverWash.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
         hoverWash.opacity = 0
         hoverWash.zPosition = 10
         layer?.addSublayer(hoverWash)
+
+        editHost.translatesAutoresizingMaskIntoConstraints = false
+        editHost.wantsLayer = true
+        editHost.layer?.cornerRadius = 9
+        editHost.layer?.masksToBounds = false
+        editHost.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.62).cgColor
+        editHost.layer?.borderWidth = 0.5
+        editHost.layer?.borderColor = NSColor.white.withAlphaComponent(0.28).cgColor
+        editHost.layer?.shadowColor = NSColor.black.cgColor
+        editHost.layer?.shadowOpacity = 0.55
+        editHost.layer?.shadowRadius = 1.6
+        editHost.layer?.shadowOffset = CGSize(width: 0, height: -0.5)
+        editHost.layer?.zPosition = 20
+        editHost.isHidden = true
+
+        editBadge.translatesAutoresizingMaskIntoConstraints = false
+        editBadge.imageScaling = .scaleProportionallyDown
+        editHost.addSubview(editBadge)
+        addSubview(editHost)
+        NSLayoutConstraint.activate([
+            shimmerHost.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shimmerHost.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shimmerHost.topAnchor.constraint(equalTo: topAnchor),
+            shimmerHost.bottomAnchor.constraint(equalTo: bottomAnchor),
+            editHost.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            editHost.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            editHost.widthAnchor.constraint(equalToConstant: 18),
+            editHost.heightAnchor.constraint(equalToConstant: 18),
+            editBadge.centerXAnchor.constraint(equalTo: editHost.centerXAnchor),
+            editBadge.centerYAnchor.constraint(equalTo: editHost.centerYAnchor),
+            editBadge.widthAnchor.constraint(equalToConstant: 12),
+            editBadge.heightAnchor.constraint(equalToConstant: 12)
+        ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func mouseDown(with event: NSEvent) {
+        mouseDownModifiers = event.modifierFlags
+        isHighlighted = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let wasHighlighted = isHighlighted
+        isHighlighted = false
+        let local = convert(event.locationInWindow, from: nil)
+        guard wasHighlighted, bounds.contains(local) else { return }
+        // Prefer mouse-down modifiers — more reliable than NSApp.currentEvent in button actions.
+        onClick?(mouseDownModifiers.union(event.modifierFlags))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        isHighlighted = bounds.contains(local)
+    }
+
+    func setDevelopMark(_ mark: FilmstripDevelopMark) {
+        developMark = mark
+        guard mark != .none else {
+            editHost.isHidden = true
+            editBadge.image = nil
+            return
+        }
+        let symbolName = mark == .dirty ? "pencil.circle" : "pencil.circle.fill"
+        let accessibility = mark == .dirty ? "Unsaved edits" : "Saved edits"
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibility) {
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+            let configured = image.withSymbolConfiguration(config) ?? image
+            configured.isTemplate = true
+            editBadge.image = configured
+        }
+        // White / accent glyph on a dark plate so the mark reads on light and dark photos.
+        editBadge.contentTintColor = mark == .dirty
+            ? NSColor.white.withAlphaComponent(0.92)
+            : LaughTheme.interactiveAccent
+        editHost.isHidden = false
+    }
+
+    func beginLoadingShimmer() {
+        guard image == nil else {
+            stopLoadingShimmer()
+            return
+        }
+        shimmerHost.isHidden = false
+        shimmerHost.startAnimating()
+    }
+
+    func applyThumbnail(_ thumbnail: NSImage?) {
+        title = ""
+        alternateTitle = ""
+        image = thumbnail
+        if thumbnail != nil {
+            stopLoadingShimmer()
+        } else {
+            beginLoadingShimmer()
+        }
+    }
+
+    private func stopLoadingShimmer() {
+        shimmerHost.stopAnimating()
+        shimmerHost.isHidden = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        shimmerHost.refreshColors()
+    }
+
     override func layout() {
         super.layout()
+        let corner = layer?.cornerRadius ?? 7
         hoverWash.frame = bounds
-        hoverWash.cornerRadius = layer?.cornerRadius ?? 7
+        hoverWash.cornerRadius = corner
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Shimmer / badge must not steal clicks from the button.
+        let hit = super.hitTest(point)
+        if hit === shimmerHost || hit === editHost || hit === editBadge {
+            return self
+        }
+        return hit
     }
 
     override func updateTrackingAreas() {
@@ -473,6 +768,58 @@ private final class FilmstripThumbButton: NSButton {
         hoverWash.opacity = on ? 1 : 0
         CATransaction.commit()
     }
+}
+
+/// Skeleton wash above the NSButton cell (sublayers get covered by AppKit drawing).
+private final class FilmstripShimmerView: NSView {
+    private let gradient = CAGradientLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.cornerRadius = 7
+        gradient.startPoint = CGPoint(x: 0, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        layer?.addSublayer(gradient)
+        refreshColors()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        gradient.frame = bounds
+        gradient.cornerRadius = layer?.cornerRadius ?? 7
+    }
+
+    func refreshColors() {
+        // High-contrast on dark studio floor — chrome fills alone read as “empty”.
+        let base = NSColor.white.withAlphaComponent(0.06)
+        let peak = NSColor.white.withAlphaComponent(0.22)
+        gradient.colors = [base.cgColor, peak.cgColor, base.cgColor]
+        gradient.locations = [-0.4, -0.2, 0.0] as [NSNumber]
+    }
+
+    func startAnimating() {
+        refreshColors()
+        guard gradient.animation(forKey: "shimmer") == nil else { return }
+        let animation = CABasicAnimation(keyPath: "locations")
+        animation.fromValue = [-0.5, -0.25, 0.0]
+        animation.toValue = [1.0, 1.25, 1.5]
+        animation.duration = 0.95
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        gradient.add(animation, forKey: "shimmer")
+    }
+
+    func stopAnimating() {
+        gradient.removeAnimation(forKey: "shimmer")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// Horizontal filmstrip: map vertical wheel / trackpad scroll onto sideways scrubbing.

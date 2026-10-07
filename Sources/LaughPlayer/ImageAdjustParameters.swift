@@ -315,6 +315,65 @@ struct ImageAdjustParameters: Equatable, Codable {
 
     static let identity = ImageAdjustParameters()
 
+    /// Blend two looks. `amount` 0 = `from` (dry), 1 = `to` (wet). Numeric fields lerp; other JSON values snap at 0.5.
+    static func mixed(from dry: ImageAdjustParameters, to wet: ImageAdjustParameters, amount: Double) -> ImageAdjustParameters {
+        let t = min(1, max(0, amount))
+        if t <= 0 { return dry }
+        if t >= 1 { return wet }
+        do {
+            let encoder = JSONEncoder()
+            let dryData = try encoder.encode(dry)
+            let wetData = try encoder.encode(wet)
+            let dryObject = try JSONSerialization.jsonObject(with: dryData)
+            let wetObject = try JSONSerialization.jsonObject(with: wetData)
+            let blended = mixedJSONValue(dryObject, wetObject, amount: t)
+            let data = try JSONSerialization.data(withJSONObject: blended)
+            return try JSONDecoder().decode(ImageAdjustParameters.self, from: data)
+        } catch {
+            return t < 0.5 ? dry : wet
+        }
+    }
+
+    private static func mixedJSONValue(_ a: Any, _ b: Any, amount t: Double) -> Any {
+        if let ad = jsonDouble(a), let bd = jsonDouble(b) {
+            return ad + (bd - ad) * t
+        }
+        if let aa = a as? [Any], let ba = b as? [Any] {
+            let count = max(aa.count, ba.count)
+            return (0..<count).map { index in
+                let av = index < aa.count ? aa[index] : ba[index]
+                let bv = index < ba.count ? ba[index] : aa[index]
+                return mixedJSONValue(av, bv, amount: t)
+            }
+        }
+        if let ad = a as? [String: Any], let bd = b as? [String: Any] {
+            var out: [String: Any] = [:]
+            for key in Set(ad.keys).union(bd.keys) {
+                if let av = ad[key], let bv = bd[key] {
+                    out[key] = mixedJSONValue(av, bv, amount: t)
+                } else if t < 0.5, let av = ad[key] {
+                    out[key] = av
+                } else if let bv = bd[key] {
+                    out[key] = bv
+                }
+            }
+            return out
+        }
+        return t < 0.5 ? a : b
+    }
+
+    private static func jsonDouble(_ value: Any) -> Double? {
+        if let n = value as? NSNumber {
+            let objCType = String(cString: n.objCType)
+            // Skip Bool. NSNumber 0/1 also bridge to Bool — check objCType first.
+            if objCType == "c" || objCType == "B" { return nil }
+            return n.doubleValue
+        }
+        if let d = value as? Double { return d }
+        if let i = value as? Int { return Double(i) }
+        return nil
+    }
+
     /// Decode params that may predate newer fields by filling gaps from identity.
     static func decodingLenient(from data: Data) throws -> ImageAdjustParameters {
         let identityData = try JSONEncoder().encode(identity)

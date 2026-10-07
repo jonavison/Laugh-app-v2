@@ -41,4 +41,17 @@ enum FolderPlaybackNeighbors {
         guard files.indices.contains(nextIndex) else { return nil }
         return ordered[nextIndex]
     }
+
+    /// Step with wrap-around (slideshow). Needs 2+ items; single-item lists return `nil`.
+    static func adjacentURLWrapping(in ordered: [URL], around url: URL, forward: Bool) -> URL? {
+        guard ordered.count >= 2 else { return nil }
+        let files = ordered.map { $0.standardizedFileURL }
+        let current = url.standardizedFileURL
+        guard let index = files.firstIndex(of: current) else { return nil }
+        let count = files.count
+        let nextIndex = forward
+            ? (index + 1) % count
+            : (index - 1 + count) % count
+        return ordered[nextIndex]
+    }
 }

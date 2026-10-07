@@ -33,6 +33,9 @@ final class ImageAdjustSession {
 
     var isDirty: Bool { !effectiveParameters.isIdentity }
 
+    /// True when no section bypass toggles are active (document dirty check).
+    var isSectionBypassEmpty: Bool { bypassedSections.isEmpty }
+
     func isSectionEdited(_ section: ImageAdjustSection) -> Bool {
         parameters.isEdited(section)
     }

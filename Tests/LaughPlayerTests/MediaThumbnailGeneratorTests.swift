@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import XCTest
 @testable import LaughPlayer
 
@@ -99,6 +100,56 @@ final class MediaThumbnailGeneratorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(max(cg.width, cg.height), 900)
     }
 
+    func testJPEGThumbnailIgnoresEmbeddedCameraPreview() throws {
+        let url = try makeJPEGWithEmbeddedThumbnail(width: 1800, height: 1200)
+        let thumb = try XCTUnwrap(
+            MediaThumbnailGenerator.thumbnail(for: url, kind: .image, maxSide: 200, screenScale: 2)
+        )
+        let cg = try XCTUnwrap(thumb.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertGreaterThan(
+            max(cg.width, cg.height),
+            800,
+            "Carousel must not crop-fill a tiny grey-padded EXIF thumb"
+        )
+        XCTAssertTrue(
+            ImageStudioCISource.isMetalSafeRGBA8(cg),
+            "Filmstrip blit must be 8-bit premul RGBA, not ImageIO YCbCr"
+        )
+    }
+
+    func testDetectsUniformLetterboxBand() throws {
+        let letterboxed = try makeLetterboxedImage(width: 160, height: 120, bandHeight: 40)
+        XCTAssertTrue(
+            MediaThumbnailGenerator.hasUniformEdgeBand(letterboxed),
+            "Nikon-style grey bottom strip must be detected"
+        )
+        let whiteBand = try makeLetterboxedImage(
+            width: 160,
+            height: 120,
+            bandHeight: 40,
+            bandRed: 0.98,
+            bandGreen: 0.98,
+            bandBlue: 0.98
+        )
+        XCTAssertTrue(
+            MediaThumbnailGenerator.hasUniformEdgeBand(whiteBand),
+            "Truncated NEF white bands must not be treated as sky"
+        )
+        let clean = try makeSolidImage(width: 160, height: 120, red: 40, green: 120, blue: 80)
+        XCTAssertFalse(MediaThumbnailGenerator.hasUniformEdgeBand(clean))
+    }
+
+    func testCropsUniformLetterboxBand() throws {
+        let letterboxed = try makeLetterboxedImage(width: 160, height: 120, bandHeight: 40)
+        let cropped = MediaThumbnailGenerator.removingUniformEdgeBands(letterboxed)
+        XCTAssertEqual(cropped.width, 160)
+        XCTAssertLessThan(
+            cropped.height,
+            letterboxed.height - 20,
+            "Grey letterbox must be cropped away, not kept (\(cropped.height) vs \(letterboxed.height))"
+        )
+    }
+
     func testLaunchMigrationRemovesLegacyV1CacheFolder() throws {
         let base = try XCTUnwrap(
             FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -150,6 +201,94 @@ final class MediaThumbnailGeneratorTests: XCTestCase {
             throw NSError(domain: "MediaThumbnailGeneratorTests", code: 3)
         }
         try png.write(to: url)
+        return url
+    }
+
+    private func makeLetterboxedImage(
+        width: Int,
+        height: Int,
+        bandHeight: Int,
+        bandRed: CGFloat = 0.55,
+        bandGreen: CGFloat = 0.55,
+        bandBlue: CGFloat = 0.55
+    ) throws -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let ctx = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        // Varied body so solid-sky photos aren't false-positive letterboxes.
+        ctx.setFillColor(red: 0.25, green: 0.55, blue: 0.35, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: bandHeight, width: width, height: height - bandHeight))
+        ctx.setFillColor(red: 0.7, green: 0.75, blue: 0.8, alpha: 1)
+        ctx.fill(
+            CGRect(
+                x: 0,
+                y: CGFloat(height) * 0.55,
+                width: CGFloat(width),
+                height: CGFloat(height) * 0.2
+            )
+        )
+        ctx.setFillColor(red: bandRed, green: bandGreen, blue: bandBlue, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: bandHeight))
+        return try XCTUnwrap(ctx.makeImage())
+    }
+
+    private func makeSolidImage(width: Int, height: Int, red: UInt8, green: UInt8, blue: UInt8) throws -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let ctx = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        ctx.setFillColor(
+            red: CGFloat(red) / 255,
+            green: CGFloat(green) / 255,
+            blue: CGFloat(blue) / 255,
+            alpha: 1
+        )
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return try XCTUnwrap(ctx.makeImage())
+    }
+
+    private func makeJPEGWithEmbeddedThumbnail(width: Int, height: Int) throws -> URL {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let ctx = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        ctx.setFillColor(red: 0.12, green: 0.55, blue: 0.42, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let url = tempDir.appendingPathComponent("embedded-\(UUID().uuidString).jpg")
+        let dest = try XCTUnwrap(
+            CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)
+        )
+        let props: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.92,
+            kCGImageDestinationEmbedThumbnail: true
+        ]
+        CGImageDestinationAddImage(dest, try XCTUnwrap(ctx.makeImage()), props as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
         return url
     }
 

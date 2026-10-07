@@ -36,6 +36,14 @@ enum LaughTheme {
         return NSColor.labelColor.withAlphaComponent(isDark ? 0.14 : 0.08)
     }
 
+    /// Louder grey when hovering already-active chrome (selected tabs, emphasized chips).
+    static func chromePressedFill(
+        appearance: NSAppearance = NSApp.effectiveAppearance
+    ) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return NSColor.labelColor.withAlphaComponent(isDark ? 0.44 : 0.28)
+    }
+
     /// Louder icon/label tint for bar chrome hover (no fill wash).
     static func chromeHoverTint(from idle: NSColor) -> NSColor {
         idle.blended(withFraction: 0.65, of: .labelColor) ?? .labelColor
@@ -365,13 +373,17 @@ enum LaughTheme {
     }
 
     private static func applySettingsButtonAccent(to button: NSButton, accent color: NSColor = accent) {
+        if button is CommitFooterActionButton || button is ChromeHoverButton {
+            return
+        }
         if isSettingsCheckbox(button) {
             button.contentTintColor = color
             applyCheckboxLabelStyle(to: button)
             return
         }
+        // Icon chrome (section eye / reset, toolbar glyphs) stays grey — not rainbow or system accent.
         if button.image != nil, button.title.isEmpty {
-            button.contentTintColor = color
+            return
         }
     }
 

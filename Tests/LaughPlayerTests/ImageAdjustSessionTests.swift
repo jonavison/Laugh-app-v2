@@ -91,4 +91,14 @@ final class ImageAdjustSessionTests: XCTestCase {
         XCTAssertEqual(qualities, [.full])
         XCTAssertEqual(committed, 1)
     }
+
+    func testSectionBypassEmptyTracksToggle() {
+        let session = ImageAdjustSession()
+        XCTAssertTrue(session.isSectionBypassEmpty)
+        session.apply(ImageAdjustParameters(exposure: 0.2))
+        session.toggleSectionBypass(.develop)
+        XCTAssertFalse(session.isSectionBypassEmpty)
+        session.apply(ImageAdjustParameters(exposure: 0.3), clearBypasses: true)
+        XCTAssertTrue(session.isSectionBypassEmpty)
+    }
 }

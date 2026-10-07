@@ -20,14 +20,6 @@ enum ImageDisplayLoader {
         min(320, recommendedMaxPixelSize())
     }
 
-    /// Shared GPU context for RAW demosaic (CIRAWFilter).
-    private static let rawCIContext: CIContext = {
-        CIContext(options: [
-            .cacheIntermediates: false,
-            .highQualityDownsample: true
-        ])
-    }()
-
     /// Metadata-only size read (no pixel decode). RAW reports sensor size, not the JPEG preview.
     static func pixelSize(at url: URL) -> CGSize? {
         if MediaKindDetector.isCameraRAW(url),
@@ -74,6 +66,7 @@ enum ImageDisplayLoader {
         tier: DecodeTier
     ) -> (image: NSImage, pixelSize: CGSize)? {
         let cap = maxPixelSize ?? recommendedMaxPixelSize()
+        let isRAW = MediaKindDetector.isCameraRAW(url)
 
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -84,9 +77,35 @@ enum ImageDisplayLoader {
             let sourceLongEdge = max(width, height)
             let targetLongEdge = min(cap, sourceLongEdge)
 
+            // Camera RAW: never call ImageIO Always / CIRAW on the hot path — both can hang
+            // for minutes on NEF. Prefer the embedded JPEG and crop letterbox bands.
+            if isRAW {
+                if let image = rawEmbeddedPreview(from: source, maxPixelSize: cap) {
+                    let long = longEdge(of: image)
+                    switch tier {
+                    case .scrub:
+                        return (image, pixelSize)
+                    case .quick where long >= min(targetLongEdge * 0.35, 320):
+                        return (image, pixelSize)
+                    case .fit where long >= min(targetLongEdge * 0.45, 640):
+                        return (image, pixelSize)
+                    case .quick, .fit:
+                        break
+                    }
+                }
+                // Last resort only for fit when the embedded preview is tiny / missing.
+                if tier == .fit,
+                   let raw = ImageRAWDecoder.demosaic(at: url, maxPixelSize: cap, draft: false) {
+                    return (raw.image, raw.nativeSize)
+                }
+                if let image = rawEmbeddedPreview(from: source, maxPixelSize: cap) {
+                    return (image, pixelSize)
+                }
+                return nil
+            }
+
             switch tier {
             case .scrub:
-                // Fast: accept embedded camera thumbs even when tiny.
                 if let image = thumbnailImage(
                     from: source,
                     maxPixelSize: cap,
@@ -103,14 +122,6 @@ enum ImageDisplayLoader {
                 }
 
             case .quick:
-                // Prefer embedded only when it’s actually useful (≥ ~half the requested preview).
-                if let image = thumbnailImage(
-                    from: source,
-                    maxPixelSize: cap,
-                    fromFullImage: false
-                ), longEdge(of: image) >= min(targetLongEdge * 0.45, 480) {
-                    return (image, pixelSize)
-                }
                 if let image = thumbnailImage(
                     from: source,
                     maxPixelSize: min(cap, 1024),
@@ -120,13 +131,6 @@ enum ImageDisplayLoader {
                 }
 
             case .fit:
-                // RAW: demosaic sensor data (CIRAWFilter). ImageIO IfAbsent/Always often
-                // returns the camera JPEG preview on NEF/CR2/ARW and looks soft forever.
-                if MediaKindDetector.isCameraRAW(url),
-                   let raw = loadRAWDemosaic(at: url, maxPixelSize: cap) {
-                    return raw
-                }
-                // JPEG/HEIC/PNG: always decode from full pixels — never IfAbsent embedded thumbs.
                 if let image = thumbnailImage(
                     from: source,
                     maxPixelSize: cap,
@@ -140,29 +144,29 @@ enum ImageDisplayLoader {
         guard let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else {
             return nil
         }
-        return (image, image.size)
+        let display = ImageStudioCISource.displayNSImage(from: image)
+        return (display, display.size)
     }
 
-    /// Full RAW processor output scaled to `maxPixelSize`. `pixelSize` is native sensor size.
-    private static func loadRAWDemosaic(
-        at url: URL,
+    /// Embedded camera JPEG from NEF/CR2/ARW — fast. Crops grey/white letterbox bands.
+    private static func rawEmbeddedPreview(
+        from source: CGImageSource,
         maxPixelSize: CGFloat
-    ) -> (image: NSImage, pixelSize: CGSize)? {
-        guard let filter = CIRAWFilter(imageURL: url) else { return nil }
-        filter.isDraftModeEnabled = false
-        let native = filter.nativeSize
-        guard native.width > 1, native.height > 1 else { return nil }
-        let longEdge = max(native.width, native.height)
-        filter.scaleFactor = Float(min(1, maxPixelSize / longEdge))
-        guard let ciImage = filter.outputImage else { return nil }
-        let extent = ciImage.extent.integral
-        guard extent.width > 1, extent.height > 1,
-              let cgImage = rawCIContext.createCGImage(ciImage, from: extent)
+    ) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              cgImage.width > 1, cgImage.height > 1
         else {
             return nil
         }
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        return (image, native)
+        let cleaned = MediaThumbnailGenerator.removingUniformEdgeBands(cgImage)
+        return ImageStudioCISource.displayNSImage(from: cleaned)
     }
 
     /// - Parameter fromFullImage: `true` uses Always (decode/downsample source pixels).
@@ -175,7 +179,8 @@ enum ImageDisplayLoader {
         var options: [CFString: Any] = [
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false
         ]
         if fromFullImage {
             options[kCGImageSourceCreateThumbnailFromImageAlways] = true
@@ -185,7 +190,7 @@ enum ImageDisplayLoader {
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return ImageStudioCISource.displayNSImage(from: cgImage)
     }
 
     private static func longEdge(of image: NSImage) -> CGFloat {

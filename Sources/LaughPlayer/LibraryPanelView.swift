@@ -900,6 +900,7 @@ enum LibraryBrowseBatchAction {
     case play
     case addToQueue
     case remove
+    case editAsBatch
 }
 
 final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
@@ -939,6 +940,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         style: .labeled,
         toolTip: "Move selected items to Trash"
     )
+    private let batchDevelopButton = LibraryPillButton(
+        title: "Edit",
+        symbol: "slider.horizontal.3",
+        style: .labeled,
+        toolTip: "Open selected photos as a batch develop set"
+    )
     private let batchEditPopUp = LibraryPillPopUp(symbol: "ellipsis", toolTip: "Edit selection")
     private let layoutModeControl = LibraryLayoutModeSwitcher()
     private let galleryScaleSlider = NSSlider()
@@ -949,7 +956,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
     private let gridScroll = NSScrollView()
     private let collectionView = LibraryGridCollectionView()
     private let browseListScroll = NSScrollView()
-    private let browseListTable = NSTableView()
+    private let browseListTable = LibraryContextTableView()
     private let recentListScroll = NSScrollView()
     private let recentListTable = NSTableView()
     private let breadcrumbStack = NSStackView()
@@ -1115,8 +1122,11 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         batchPlayButton.isHidden = !visible
         batchQueueButton.isHidden = !visible
         batchDeleteButton.isHidden = !visible
+        batchDevelopButton.isHidden = !visible
         batchEditPopUp.isHidden = !visible
         if visible {
+            let canBatchEdit = selectedImageCount() >= 2
+            batchDevelopButton.isEnabled = canBatchEdit
             refreshBatchEditMenu()
         }
     }
@@ -1197,6 +1207,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         batchDeleteButton.action = #selector(batchDeletePressed)
         batchDeleteButton.isHidden = true
 
+        batchDevelopButton.target = self
+        batchDevelopButton.action = #selector(batchDevelopPressed)
+        batchDevelopButton.isHidden = true
+
         batchEditPopUp.isHidden = true
         refreshBatchEditMenu()
 
@@ -1204,8 +1218,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         updateLayoutControl()
 
         galleryScaleSlider.minValue = 0
-        galleryScaleSlider.maxValue = 3
-        galleryScaleSlider.numberOfTickMarks = 4
+        galleryScaleSlider.maxValue = 4
+        galleryScaleSlider.numberOfTickMarks = 5
         galleryScaleSlider.allowsTickMarkValuesOnly = true
         galleryScaleSlider.isContinuous = false
         galleryScaleSlider.controlSize = .small
@@ -1214,7 +1228,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         galleryScaleSlider.target = self
         galleryScaleSlider.action = #selector(galleryScaleChanged)
         galleryScaleSlider.isHidden = true
-        galleryScaleSlider.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        galleryScaleSlider.widthAnchor.constraint(equalToConstant: 108).isActive = true
         updateGalleryScaleControl()
 
         layoutControlsStack.orientation = .horizontal
@@ -1325,6 +1339,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         addSubview(batchPlayButton)
         addSubview(batchQueueButton)
         addSubview(batchDeleteButton)
+        addSubview(batchDevelopButton)
         addSubview(batchEditPopUp)
         addSubview(searchField)
         addSubview(kindFilterPopUp)
@@ -1376,6 +1391,9 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         browseListTable.action = #selector(browseListClicked)
         browseListTable.doubleAction = #selector(browseListDoubleClicked)
         browseListTable.translatesAutoresizingMaskIntoConstraints = false
+        browseListTable.contextMenuProvider = { [weak self] event, table in
+            self?.listContextMenu(for: event, in: table)
+        }
 
         browseListScroll.documentView = browseListTable
         browseListScroll.hasVerticalScroller = true
@@ -1447,8 +1465,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             batchQueueButton.leadingAnchor.constraint(equalTo: batchPlayButton.trailingAnchor, constant: 6),
             batchDeleteButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             batchDeleteButton.leadingAnchor.constraint(equalTo: batchQueueButton.trailingAnchor, constant: 6),
+            batchDevelopButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            batchDevelopButton.leadingAnchor.constraint(equalTo: batchDeleteButton.trailingAnchor, constant: 6),
             batchEditPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            batchEditPopUp.leadingAnchor.constraint(equalTo: batchDeleteButton.trailingAnchor, constant: 6),
+            batchEditPopUp.leadingAnchor.constraint(equalTo: batchDevelopButton.trailingAnchor, constant: 6),
 
             sortPopUp.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             sortPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
@@ -1552,6 +1572,7 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         batchPlayButton.refreshChrome()
         batchQueueButton.refreshChrome()
         batchDeleteButton.refreshChrome()
+        batchDevelopButton.refreshChrome()
         batchEditPopUp.refreshChrome()
         sortPopUp.refreshChrome()
         kindFilterPopUp.refreshChrome()
@@ -1566,6 +1587,12 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         let deselect = NSMenuItem(title: "Deselect All", action: #selector(batchContextDeselectAll), keyEquivalent: "")
         deselect.target = self
         items.append(deselect)
+        if selectedImageCount() >= 2 {
+            items.append(.separator())
+            let editBatch = NSMenuItem(title: "Edit as Batch", action: #selector(batchDevelopPressed), keyEquivalent: "")
+            editBatch.target = self
+            items.append(editBatch)
+        }
         batchEditPopUp.setPullDownItems(items, iconSymbol: "ellipsis")
     }
 
@@ -2004,6 +2031,13 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         controller.clearMultiSelection()
     }
 
+    @objc private func batchDevelopPressed() {
+        let entries = controller.selectedEntries
+        guard selectedImageCount(in: entries) >= 2 else { return }
+        onBatchAction?(.editAsBatch, entries)
+        controller.clearMultiSelection()
+    }
+
     @objc private func recentListDoubleClicked() {
         openRecentListSelection()
     }
@@ -2281,6 +2315,22 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         return buildContextMenu(for: entry, itemIndex: indexPath.item)
     }
 
+    private func listContextMenu(for event: NSEvent, in tableView: NSTableView) -> NSMenu? {
+        let point = tableView.convert(event.locationInWindow, from: nil)
+        let row = tableView.row(at: point)
+        if row < 0 {
+            if controller.hasBatchSelection {
+                return buildEmptySpaceContextMenu()
+            }
+            return nil
+        }
+        if controller.selectedEntryIndices.contains(row), controller.hasBatchSelection {
+            return buildBatchContextMenu()
+        }
+        guard let entry = controller.entry(at: IndexPath(item: row, section: 0)) else { return nil }
+        return buildContextMenu(for: entry, itemIndex: row)
+    }
+
     private func indexPath(for event: NSEvent, in collectionView: NSCollectionView) -> IndexPath? {
         let point = collectionView.convert(event.locationInWindow, from: nil)
         if let indexPath = collectionView.indexPathForItem(at: point) {
@@ -2309,6 +2359,8 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
 
         append("Play", action: #selector(batchContextPlay), enabled: hasPlayable)
         append("Add to Queue", action: #selector(batchContextQueue), enabled: hasPlayable)
+        let imageCount = selectedImageCount(in: entries)
+        append("Edit as Batch", action: #selector(batchContextDevelop), enabled: imageCount >= 2)
         append("Move to Trash", action: #selector(batchContextTrash))
         menu.addItem(.separator())
         append("Select All", action: #selector(batchContextSelectAll))
@@ -2339,6 +2391,10 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         appendItem("Play", action: #selector(contextMenuPlay(_:)), enabled: hasPlayableMedia)
         appendItem("Play Next", action: #selector(contextMenuPlayNext(_:)), enabled: hasPlayableMedia)
         appendItem("Add to Queue", action: #selector(contextMenuAddToQueue(_:)), enabled: hasPlayableMedia)
+        if imageCount(for: entry) >= 1, controller.hasBatchSelection, selectedImageCount() >= 2 {
+            menu.addItem(.separator())
+            appendItem("Edit as Batch", action: #selector(batchContextDevelop))
+        }
         menu.addItem(.separator())
         appendItem("Rename", action: #selector(contextMenuRename(_:)))
         appendItem("Show in Finder", action: #selector(contextMenuShowInFinder(_:)))
@@ -2350,6 +2406,20 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
             appendItem("Deselect All", action: #selector(batchContextDeselectAll))
         }
         return menu
+    }
+
+    private func selectedImageCount(in entries: [LibraryBrowseEntry]? = nil) -> Int {
+        let source = entries ?? controller.selectedEntries
+        return source.reduce(0) { $0 + imageCount(for: $1) }
+    }
+
+    private func imageCount(for entry: LibraryBrowseEntry) -> Int {
+        switch entry.kind {
+        case .media(let file):
+            return file.kind == .image ? 1 : 0
+        case .folder(let url):
+            return controller.mediaFiles(in: url).filter { $0.kind == .image }.count
+        }
     }
 
     private func entryHasPlayableMedia(_ entry: LibraryBrowseEntry) -> Bool {
@@ -2387,6 +2457,13 @@ final class LibraryBrowseView: NSView, NSCollectionViewDataSource, NSCollectionV
         let entries = controller.selectedEntries
         guard !entries.isEmpty else { return }
         onBatchAction?(.addToQueue, entries)
+    }
+
+    @objc private func batchContextDevelop() {
+        let entries = controller.selectedEntries
+        guard selectedImageCount(in: entries) >= 2 else { return }
+        onBatchAction?(.editAsBatch, entries)
+        controller.clearMultiSelection()
     }
 
     @objc private func batchContextTrash() {
@@ -2504,6 +2581,14 @@ private class LibraryGridItemView: NSView {
             return collection.menu(for: event)
         }
         return super.menu(for: event)
+    }
+}
+
+private final class LibraryContextTableView: NSTableView {
+    var contextMenuProvider: ((NSEvent, NSTableView) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuProvider?(event, self) ?? super.menu(for: event)
     }
 }
 
