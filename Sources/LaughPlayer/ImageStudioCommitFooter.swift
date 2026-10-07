@@ -212,6 +212,8 @@ final class CommitFooterActionButton: NSButton {
         trackingAreaRef = area
     }
 
+    private var mouseDownInside = false
+
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
         isHovered = true
@@ -220,17 +222,36 @@ final class CommitFooterActionButton: NSButton {
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         isPressed = false
+        mouseDownInside = false
     }
 
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
+        mouseDownInside = true
         isPressed = true
-        super.mouseDown(with: event)
-        isPressed = false
     }
 
+    override func mouseDragged(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        mouseDownInside = bounds.contains(local)
+        isPressed = mouseDownInside
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        let inside = mouseDownInside && bounds.contains(local)
+        mouseDownInside = false
+        isPressed = false
+        guard isEnabled, inside else { return }
+        // Don’t rely on NSButton cell action — empty highlightsBy + hitTest bugs skipped clicks.
+        if let target, let action {
+            _ = target.perform(action, with: self)
+        }
+    }
+
+    /// `point` is in the superview’s coordinates — `bounds.contains` breaks offset chips.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        frame.contains(point) ? self : nil
     }
 
     override func viewDidChangeEffectiveAppearance() {

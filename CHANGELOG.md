@@ -6,6 +6,11 @@ Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is product
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-07
+
+### Fixed
+- Image studio Save / Discard / Save Preset / Export buttons respond to clicks again (hit-testing).
+
 ## [0.11.1] - 2026-10-07
 
 ### Fixed
