@@ -1,5 +1,15 @@
 import AppKit
 
+/// Shared idle / hover fills for browse toolbar pills (never system blue).
+enum LibraryToolbarPillChrome {
+    static func fill(hovered: Bool, appearance: NSAppearance) -> CGColor {
+        if hovered {
+            return LaughTheme.chromeActiveFill(appearance: appearance).cgColor
+        }
+        return LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
+    }
+}
+
 /// Fully rounded toolbar chip — content-sized stack so label never compresses.
 final class LibraryPillButton: NSButton {
     enum Style {
@@ -18,6 +28,13 @@ final class LibraryPillButton: NSButton {
     private let contentStack = NSStackView()
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false {
+        didSet {
+            guard oldValue != isHovered else { return }
+            refreshChrome()
+        }
+    }
 
     init(title: String, symbol: String?, style: Style, toolTip: String?) {
         self.style = style
@@ -54,9 +71,32 @@ final class LibraryPillButton: NSButton {
         layer?.cornerRadius = bounds.height / 2
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LibraryToolbarPillChrome.fill(hovered: isHovered, appearance: appearance)
         iconView.contentTintColor = .labelColor
         titleLabel.textColor = .labelColor
     }
@@ -155,6 +195,13 @@ final class LibraryPillPopUp: NSButton {
     private let symbolName: String
     private var itemsMenu = NSMenu()
     private let iconView = NSImageView()
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false {
+        didSet {
+            guard oldValue != isHovered else { return }
+            refreshChrome()
+        }
+    }
 
     init(symbol: String, toolTip: String) {
         self.symbolName = symbol
@@ -181,9 +228,32 @@ final class LibraryPillPopUp: NSButton {
         layer?.cornerRadius = bounds.height / 2
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LibraryToolbarPillChrome.fill(hovered: isHovered, appearance: appearance)
         iconView.contentTintColor = .labelColor
         applyIcon()
     }
@@ -260,6 +330,13 @@ final class LibraryLabeledPillMenu: NSButton {
     private let titleLabel = NSTextField(labelWithString: "")
     private let chevronView = NSImageView()
     private var itemsMenu = NSMenu()
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false {
+        didSet {
+            guard oldValue != isHovered else { return }
+            refreshChrome()
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -290,11 +367,34 @@ final class LibraryLabeledPillMenu: NSButton {
         layer?.cornerRadius = bounds.height / 2
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
     func refreshChrome() {
         let appearance = effectiveAppearance
-        layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
+        layer?.backgroundColor = LibraryToolbarPillChrome.fill(hovered: isHovered, appearance: appearance)
         iconView.contentTintColor = .labelColor
-        chevronView.contentTintColor = .secondaryLabelColor
+        chevronView.contentTintColor = isHovered ? .labelColor : .secondaryLabelColor
         titleLabel.textColor = .labelColor
     }
 

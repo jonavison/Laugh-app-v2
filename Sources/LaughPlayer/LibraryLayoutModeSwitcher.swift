@@ -7,16 +7,24 @@ final class LibraryLayoutModeSwitcher: NSView {
     private let modes = LibraryBrowseViewMode.allCases
     private let trackView = NSView()
     private let selectionPill = NSView()
+    private let hoverPill = NSView()
     private let buttonStack = NSStackView()
-    private var buttons: [NSButton] = []
+    private var buttons: [LibraryLayoutModeTabButton] = []
     private var selectedMode: LibraryBrowseViewMode = .gallery
+    private var hoveredMode: LibraryBrowseViewMode?
     private var selectionLeadingConstraint: NSLayoutConstraint?
     private var selectionWidthConstraint: NSLayoutConstraint?
+    private var hoverLeadingConstraint: NSLayoutConstraint?
+    private var hoverWidthConstraint: NSLayoutConstraint?
     private var suppressChange = false
 
     private let outerPadding: CGFloat = 3
     private let buttonWidth: CGFloat = 34
     private let controlHeight: CGFloat = 30
+
+    private var highlightedMode: LibraryBrowseViewMode {
+        hoveredMode ?? selectedMode
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -35,6 +43,9 @@ final class LibraryLayoutModeSwitcher: NSView {
     func setSelectedMode(_ mode: LibraryBrowseViewMode, animated: Bool = false) {
         suppressChange = true
         selectedMode = mode
+        if hoveredMode == mode {
+            hoveredMode = nil
+        }
         refreshSelection(animated: animated)
         suppressChange = false
     }
@@ -50,7 +61,9 @@ final class LibraryLayoutModeSwitcher: NSView {
         trackView.layer?.cornerRadius = radius
         let pillHeight = max(0, bounds.height - outerPadding * 2)
         selectionPill.layer?.cornerRadius = pillHeight / 2
+        hoverPill.layer?.cornerRadius = pillHeight / 2
         refreshSelection(animated: false)
+        refreshHoverPill(animated: false)
     }
 
     private func setup() {
@@ -61,7 +74,13 @@ final class LibraryLayoutModeSwitcher: NSView {
 
         trackView.wantsLayer = true
         trackView.translatesAutoresizingMaskIntoConstraints = false
+        trackView.layer?.masksToBounds = true
         addSubview(trackView)
+
+        hoverPill.wantsLayer = true
+        hoverPill.translatesAutoresizingMaskIntoConstraints = false
+        hoverPill.alphaValue = 0
+        trackView.addSubview(hoverPill)
 
         selectionPill.wantsLayer = true
         selectionPill.translatesAutoresizingMaskIntoConstraints = false
@@ -76,19 +95,15 @@ final class LibraryLayoutModeSwitcher: NSView {
 
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         for (index, mode) in modes.enumerated() {
-            let button = NSButton(title: "", target: self, action: #selector(tabPressed(_:)))
-            button.bezelStyle = .inline
-            button.isBordered = false
-            button.focusRingType = .none
+            let button = LibraryLayoutModeTabButton(mode: mode, symbolConfig: symbolConfig)
             button.tag = index
-            button.toolTip = mode.menuTitle
-            button.translatesAutoresizingMaskIntoConstraints = false
+            button.target = self
+            button.action = #selector(tabPressed(_:))
+            button.onHoverChange = { [weak self] mode, hovering in
+                self?.handleHover(mode, hovering: hovering)
+            }
             button.widthAnchor.constraint(equalToConstant: buttonWidth).isActive = true
             button.heightAnchor.constraint(equalToConstant: controlHeight - outerPadding * 2).isActive = true
-            if let image = NSImage(systemSymbolName: mode.symbolName, accessibilityDescription: mode.menuTitle) {
-                button.image = image.withSymbolConfiguration(symbolConfig)
-                button.imagePosition = .imageOnly
-            }
             buttons.append(button)
             buttonStack.addArrangedSubview(button)
         }
@@ -97,6 +112,10 @@ final class LibraryLayoutModeSwitcher: NSView {
         let width = selectionPill.widthAnchor.constraint(equalToConstant: buttonWidth)
         selectionLeadingConstraint = leading
         selectionWidthConstraint = width
+        let hLeading = hoverPill.leadingAnchor.constraint(equalTo: trackView.leadingAnchor, constant: outerPadding)
+        let hWidth = hoverPill.widthAnchor.constraint(equalToConstant: buttonWidth)
+        hoverLeadingConstraint = hLeading
+        hoverWidthConstraint = hWidth
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: controlHeight),
@@ -114,30 +133,82 @@ final class LibraryLayoutModeSwitcher: NSView {
             leading,
             width,
             selectionPill.topAnchor.constraint(equalTo: trackView.topAnchor, constant: outerPadding),
-            selectionPill.bottomAnchor.constraint(equalTo: trackView.bottomAnchor, constant: -outerPadding)
+            selectionPill.bottomAnchor.constraint(equalTo: trackView.bottomAnchor, constant: -outerPadding),
+            hLeading,
+            hWidth,
+            hoverPill.topAnchor.constraint(equalTo: trackView.topAnchor, constant: outerPadding),
+            hoverPill.bottomAnchor.constraint(equalTo: trackView.bottomAnchor, constant: -outerPadding)
         ])
 
         refreshChrome()
         refreshSelection(animated: false)
+        refreshHoverPill(animated: false)
     }
 
     private func refreshChrome() {
         let appearance = effectiveAppearance
         trackView.layer?.backgroundColor = LaughTheme.libraryToolbarPillFill(appearance: appearance).cgColor
         selectionPill.layer?.backgroundColor = LaughTheme.chromeActiveFill(appearance: appearance).cgColor
-        for (index, button) in buttons.enumerated() {
-            let selected = modes[index] == selectedMode
-            button.contentTintColor = selected ? .labelColor : .secondaryLabelColor
+        hoverPill.layer?.backgroundColor = LaughTheme.chromeActiveFill(appearance: appearance).cgColor
+        for button in buttons {
+            let emphasized = button.mode == highlightedMode
+            button.contentTintColor = emphasized ? .labelColor : .secondaryLabelColor
+        }
+    }
+
+    private func handleHover(_ mode: LibraryBrowseViewMode, hovering: Bool) {
+        if hovering {
+            hoveredMode = mode
+        } else if hoveredMode == mode {
+            hoveredMode = nil
+        }
+        refreshChrome()
+        refreshHoverPill(animated: true)
+    }
+
+    private func refreshHoverPill(animated: Bool) {
+        let show: Bool
+        let index: Int?
+        if let hoveredMode,
+           let i = modes.firstIndex(of: hoveredMode),
+           hoveredMode != selectedMode {
+            show = true
+            index = i
+        } else {
+            show = false
+            index = nil
+        }
+        if let index {
+            positionPill(leading: hoverLeadingConstraint, width: hoverWidthConstraint, at: index, animated: animated)
+        }
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                self.hoverPill.animator().alphaValue = show ? 1 : 0
+            }
+        } else {
+            hoverPill.alphaValue = show ? 1 : 0
         }
     }
 
     private func refreshSelection(animated: Bool) {
         guard let index = modes.firstIndex(of: selectedMode) else { return }
+        positionPill(leading: selectionLeadingConstraint, width: selectionWidthConstraint, at: index, animated: animated)
+        refreshChrome()
+        refreshHoverPill(animated: animated)
+    }
+
+    private func positionPill(
+        leading: NSLayoutConstraint?,
+        width: NSLayoutConstraint?,
+        at index: Int,
+        animated: Bool
+    ) {
         let originX = outerPadding + CGFloat(index) * buttonWidth
         let apply = {
-            self.selectionLeadingConstraint?.constant = originX
-            self.selectionWidthConstraint?.constant = self.buttonWidth
-            self.refreshChrome()
+            leading?.constant = originX
+            width?.constant = self.buttonWidth
             self.layoutSubtreeIfNeeded()
         }
         if animated {
@@ -158,8 +229,68 @@ final class LibraryLayoutModeSwitcher: NSView {
         let mode = modes[index]
         guard mode != selectedMode else { return }
         selectedMode = mode
+        hoveredMode = nil
         refreshSelection(animated: true)
         guard !suppressChange else { return }
         onChange?(mode)
+    }
+}
+
+private final class LibraryLayoutModeTabButton: NSButton {
+    let mode: LibraryBrowseViewMode
+    var onHoverChange: ((LibraryBrowseViewMode, Bool) -> Void)?
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovered = false {
+        didSet {
+            guard oldValue != isHovered else { return }
+            onHoverChange?(mode, isHovered)
+        }
+    }
+
+    init(mode: LibraryBrowseViewMode, symbolConfig: NSImage.SymbolConfiguration) {
+        self.mode = mode
+        super.init(frame: .zero)
+        bezelStyle = .inline
+        isBordered = false
+        focusRingType = .none
+        title = ""
+        toolTip = mode.menuTitle
+        translatesAutoresizingMaskIntoConstraints = false
+        if let image = NSImage(systemSymbolName: mode.symbolName, accessibilityDescription: mode.menuTitle) {
+            self.image = image.withSymbolConfiguration(symbolConfig)
+            imagePosition = .imageOnly
+        }
+        contentTintColor = .secondaryLabelColor
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
     }
 }

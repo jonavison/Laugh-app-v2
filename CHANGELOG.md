@@ -6,6 +6,11 @@ Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is product
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-07
+
+### Fixed
+- Library browse toolbar pills (Open, Play All, Options, sort) and Gallery/Grid/List tabs show a clear grey hover wash.
+
 ## [0.11.0] - 2026-10-07
 
 ### Added
