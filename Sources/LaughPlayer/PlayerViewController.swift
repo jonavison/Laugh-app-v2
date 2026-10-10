@@ -396,6 +396,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private var activePreviewFullTargetURL: URL?
     private var activePreviewSourceDurationSec: Double?
     private var activePlayableDurationSec: Double = 0
+    /// Capped incomplete preview is a finished package. Re-opening it at an fMP4 chunk
+    /// boundary restarts playback and crashes Tahoe inside nested layout.
+    private var activePreviewRefusesExtend = false
     private var progressiveExtendInProgress = false
     private var lastProgressiveExtendWallTime: CFAbsoluteTime = 0
     private var progressiveExtentMonitorToken: Int = 0
@@ -835,6 +838,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         imageStudioCommitFooter.resetAllButton.action = #selector(imageStudioResetAllPressed)
         imageStudioCommitFooter.exportButton.target = self
         imageStudioCommitFooter.exportButton.action = #selector(imageStudioExportPressed)
+        imageStudioCommitFooter.batchExportButton.target = self
+        imageStudioCommitFooter.batchExportButton.action = #selector(imageStudioBatchExportPressed)
         imageStudioCommitFooter.savePresetButton.target = self
         imageStudioCommitFooter.savePresetButton.action = #selector(imageStudioSavePresetPressed)
         rightSettingsSheet.addSubview(imageStudioCommitFooter)
@@ -1676,7 +1681,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func scheduleMpvEmbed(sourceURL: URL, generation: Int, attempt: Int) {
         let attemptEmbed = { [weak self] in
             guard let self, generation == self.videoLoadGeneration else { return }
-            self.view.layoutSubtreeIfNeeded()
+            // Do not force nested layoutSubtreeIfNeeded — on Tahoe that recurses into
+            // DesignLibrary-backed vibrancy and can SIGSEGV. Bounds from the last pass are enough.
             let surfaceReady = self.playerSurfaceView.window != nil
                 && self.playerSurfaceView.bounds.width > 1
                 && self.playerSurfaceView.bounds.height > 1
@@ -2700,6 +2706,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             }
         }
         leftImageInfoSheet.editsView.configure(items: items, thumbnails: thumbs)
+        updateImageStudioCommitFooter()
     }
 
     func debugInfo(window: NSWindow?) -> String {
@@ -4172,9 +4179,6 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func styleRightSettingsPanel() {
         let appearance = view.effectiveAppearance
         // Shared column chrome for Video/Audio/Subtitles and Edits/Presets.
-        rightSettingsSheet.material = .contentBackground
-        rightSettingsSheet.blendingMode = .withinWindow
-        rightSettingsSheet.state = .active
         rightSettingsSheet.wantsLayer = true
         rightSettingsSheet.layer?.cornerRadius = 0
         rightSettingsSheet.layer?.masksToBounds = true
@@ -4711,8 +4715,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             message: notice.message,
             actionTitle: notice.actionTitle
         )
-        view.addSubview(compatibilityBanner, positioned: .above, relativeTo: rightSettingsSheet)
-        raisePlaybackChromeToFront()
+        // Defer z-order — calling raisePlaybackChromeToFront / addSubview during an active
+        // display-cycle layout recurses into macOS DesignLibrary (SwiftUI HStack) and can
+        // SIGSEGV on Tahoe (NaN executor / nested NSView layout).
+        if compatibilityBanner.superview == nil {
+            view.addSubview(compatibilityBanner, positioned: .above, relativeTo: nil)
+        }
     }
 
     /// When bundled ffmpeg is available, remux and retry; otherwise show the user-facing explanation.
@@ -4896,6 +4904,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     guard sessionToken == self.fallbackSessionToken else { return }
                     self.activePreviewSourceDurationSec = sourceDuration
                     self.updateSeekBarPreparingState()
+                    self.updateTimelineUI()
                 }
             }
 
@@ -4904,14 +4913,20 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             var waited: UInt64 = 0
 
             func attachChunkedPreviewIfPossible(waitedMs: Double) async -> Bool {
+                let incompleteSource = IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL)
+                // Incomplete + still-writing fMP4 fights AVPlayer for disk (choppy picture).
+                // Short AAC caps finish in ~1s — wait for a finished dense package.
+                if incompleteSource, FFmpegVideoFallback.isRemuxing(outputURL: previewURL) {
+                    return false
+                }
+
                 let readable = await FFmpegVideoFallback.isPreviewReadableEnoughForPlayback(url: previewURL)
                     || FFmpegVideoFallback.isOutputReadyForPlayback(at: previewURL)
                 guard readable else { return false }
 
                 // Finished sparse remuxes of incomplete torrents advance the clock with a frozen
                 // frame — refuse attach and wipe so a capped remux can replace them.
-                if !FFmpegVideoFallback.isRemuxing(outputURL: previewURL),
-                   IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL),
+                if incompleteSource,
                    FFmpegVideoFallback.remuxLooksTooSparseForPlayback(at: previewURL) {
                     PlaybackTrace.emit(
                         "[DEBUG-fallback] discard sparse progressive preview (would freeze) path=\(previewURL.lastPathComponent)"
@@ -4920,6 +4935,12 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     return false
                 }
 
+                // Probe once off the main thread; skip the 3s extent monitor for incomplete
+                // capped packages so ffmpeg -i doesn't fight AVPlayer for the same file.
+                let incompletePlayableSec = incompleteSource
+                    ? (FFmpegVideoFallback.remuxOutputDurationSec(at: previewURL) ?? 0)
+                    : 0
+
                 await MainActor.run {
                     guard sessionToken == self.fallbackSessionToken else { return }
                     self.fallbackInProgress = false
@@ -4927,7 +4948,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     self.fallbackLastMethod = "remux-preview"
                     self.fallbackConvertedOutputPaths.insert(previewURL.path)
                     // Keep the still-downloading tip visible; don't clear it on preview start.
-                    if !IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
+                    if !incompleteSource {
                         self.hideCompatibilityFailure()
                     }
                     if rawResumeTargetSec.isFinite, rawResumeTargetSec > 2 {
@@ -4943,27 +4964,32 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                     let sourceDuration = self.activePreviewSourceDurationSec
                     PlaybackTrace.emit("[DEBUG-fallback] chunked preview start waitedMs=\(waitedMs) sourceDur=\(sourceDuration ?? 0)s")
                     self.activePreviewFullTargetURL = fullTargetURL
-                    self.activePlayableDurationSec = 0
-                    _ = FFmpegVideoFallback.ensureBackgroundFullRemux(
-                        inputURL: inputURL,
-                        outputURL: fullTargetURL
-                    )
+                    self.activePlayableDurationSec = incompletePlayableSec
+                    self.activePreviewRefusesExtend = incompleteSource
+                    if !incompleteSource {
+                        _ = FFmpegVideoFallback.ensureBackgroundFullRemux(
+                            inputURL: inputURL,
+                            outputURL: fullTargetURL
+                        )
+                    }
                     self.resolveAndAttach(
                         playableURL: previewURL,
                         sourceURL: inputURL,
                         generation: activeGeneration
                     )
-                    self.startProgressiveExtentMonitor(
-                        previewURL: previewURL,
-                        sessionToken: sessionToken
-                    )
-                    self.scheduleUpgradeToFullRemux(
-                        previewURL: previewURL,
-                        fullTargetURL: fullTargetURL,
-                        sourceURL: inputURL,
-                        generation: activeGeneration,
-                        sessionToken: sessionToken
-                    )
+                    if !incompleteSource {
+                        self.startProgressiveExtentMonitor(
+                            previewURL: previewURL,
+                            sessionToken: sessionToken
+                        )
+                        self.scheduleUpgradeToFullRemux(
+                            previewURL: previewURL,
+                            fullTargetURL: fullTargetURL,
+                            sourceURL: inputURL,
+                            generation: activeGeneration,
+                            sessionToken: sessionToken
+                        )
+                    }
                 }
                 return true
             }
@@ -5027,11 +5053,21 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 await MainActor.run {
                     guard sessionToken == self.fallbackSessionToken else { return }
                     self.fallbackInProgress = false
-                    self.leavePlaybackPrepareUI()
-                    self.showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: inputURL))
                     self.fallbackStartedAt = nil
                     self.fallbackResumeTargetSec = nil
                     self.fallbackLastMethod = nil
+                    // Progressive remux can refuse a hollow middle; mpv often still plays the
+                    // contiguous head directly until it hits undownloaded pieces.
+                    if MpvPlaybackController.isAvailable(), MpvPresentCapability.canPresentPicture {
+                        PlaybackTrace.emit(
+                            "[DEBUG-fallback] progressive unavailable while downloading — DirectMpv head play path=\(inputURL.lastPathComponent)"
+                        )
+                        self.showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: inputURL))
+                        self.startDirectMpvPlayback(sourceURL: inputURL, generation: activeGeneration)
+                        return
+                    }
+                    self.leavePlaybackPrepareUI()
+                    self.showCompatibilityFailure(PlaybackErrorFormatter.stillDownloadingNotice(for: inputURL))
                     PlaybackTrace.emit("[DEBUG-fallback] progressive preview unavailable while downloading")
                 }
                 return
@@ -5073,6 +5109,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             activePreviewSourceDurationSec = nil
         }
         activePlayableDurationSec = 0
+        activePreviewRefusesExtend = false
         progressiveExtendInProgress = false
         progressiveExtentMonitorToken += 1
         progressiveSeekToken += 1
@@ -5085,6 +5122,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
 
     /// Re-open the growing fragmented MP4 when AVPlayer hits a ~36s fMP4 chunk boundary.
     private func extendProgressivePlaybackIfNeeded(force: Bool = false) -> Bool {
+        // Incomplete downloads play a finished short package. AVPlayer still reports a
+        // short fMP4 duration (~30s), and re-attaching here tears the window down mid-playback.
+        guard !activePreviewRefusesExtend else { return false }
         guard isPreviewPlaybackActive,
               !progressiveExtendInProgress,
               let previewURL = observedItemPlayableURL,
@@ -7142,15 +7182,17 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             || imageSurfaceView.flipVertical
         let developActive = imageAdjustSession.isDirty || geometryActive
         let unsaved = hasUnsavedDevelopChanges
-        let hasSaved = currentMediaURL.map { ImageDevelopEditStore.hasEdit(forPath: $0.path) } ?? false
         let selectionDirty = imageSelectionSession.hasSelection
+        let batchExport = imageBatchSelection.isActive
         let show = activeMediaKind == .image
-            && (developActive || unsaved || hasSaved || selectionDirty)
+            && currentMediaURL != nil
             && playbackLibraryOverlay == .closed
             && !isImageCropMode
         imageStudioCommitFooter.isHidden = !show
         imageStudioCommitFooter.setShowsUnsavedCommit(unsaved)
         imageStudioCommitFooter.setShowsReset(developActive || selectionDirty)
+        imageStudioCommitFooter.setShowsBatchExport(batchExport)
+        imageStudioCommitFooter.savePresetButton.isEnabled = !imageAdjustSession.effectiveParameters.isIdentity
         let height: CGFloat
         if !show {
             height = 0
@@ -7161,7 +7203,10 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         } else {
             height = ImageStudioCommitFooter.preferredHeightActionsOnly
         }
-        imageStudioCommitFooterHeightConstraint?.constant = height
+        let resolvedHeight = batchExport && show
+            ? height + ImageStudioCommitFooter.batchExportRowHeight
+            : height
+        imageStudioCommitFooterHeightConstraint?.constant = resolvedHeight
         if show {
             LaughTheme.applySettingsAccentChrome(in: imageStudioCommitFooter)
         }
@@ -7658,29 +7703,49 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         updateImageZoomPercentLabel()
     }
 
+    /// Look written for one still. The open photo uses the live session (dirty OK).
+    /// A batch member uses that still’s Dry/Wet mix and its own crop / rotation.
+    private func developEditForExport(of url: URL) -> ImageDevelopEdit {
+        let path = normalizedDevelopPath(url)
+        let saved = ImageDevelopEditStore.edit(forPath: path) ?? .identity
+        let owned = developWorkingByPath[path] ?? saved
+        let isOpen = currentMediaURL.map { normalizedDevelopPath($0) == path } ?? false
+        let geometry = isOpen ? currentDevelopSnapshot() : owned
+
+        let parameters: ImageAdjustParameters
+        if imageBatchSelection.isActive, imageBatchSelection.pathSet.contains(path) {
+            parameters = ImageAdjustParameters.mixed(
+                from: batchDryParamsByPath[path] ?? owned.parameters,
+                to: imageAdjustSession.effectiveParameters,
+                amount: batchMixByPath[path] ?? 1
+            )
+        } else if isOpen {
+            parameters = imageAdjustSession.effectiveParameters
+        } else {
+            parameters = owned.parameters
+        }
+
+        return ImageDevelopEdit(
+            parameters: parameters,
+            rotationQuarterTurns: geometry.rotationQuarterTurns,
+            flipHorizontal: geometry.flipHorizontal,
+            flipVertical: geometry.flipVertical,
+            cropNormalized: geometry.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(geometry.straightenRadians)
+        )
+    }
+
     @objc private func imageStudioExportPressed() {
         guard activeMediaKind == .image, let source = currentMediaURL else { return }
-        let parameters = imageAdjustSession.effectiveParameters
-        let turns = imageSurfaceView.rotationQuarterTurns
-        let crop = imageSurfaceView.appliedCropNormalized
-        let straighten = imageSurfaceView.appliedStraightenRadians
-        let flipH = imageSurfaceView.flipHorizontal
-        let flipV = imageSurfaceView.flipVertical
-        let hasGeometry = turns != 0
-            || flipH
-            || flipV
-            || !ImageCropGeometry.isIdentity(crop)
-            || !ImageCropGeometry.isIdentityStraighten(straighten)
-        guard !parameters.isIdentity || hasGeometry else { return }
         guard let window = view.window else { return }
-
+        let edit = developEditForExport(of: source)
         let pixelSize = ImageExportWriter.geometryPixelSize(
             sourceURL: source,
-            quarterTurns: turns,
-            cropNormalized: crop,
-            straightenRadians: straighten,
-            flipHorizontal: flipH,
-            flipVertical: flipV
+            quarterTurns: edit.rotationQuarterTurns,
+            cropNormalized: edit.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(edit.straightenRadians),
+            flipHorizontal: edit.flipHorizontal,
+            flipVertical: edit.flipVertical
         ) ?? CGSize(width: 1920, height: 1080)
 
         let sheet = ImageExportOptionsSheetController(sourcePixelSize: pixelSize)
@@ -7690,16 +7755,38 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         sheet.onContinue = { [weak self] options in
             self?.imageExportOptionsSheet = nil
-            self?.presentImageExportSavePanel(
-                source: source,
-                options: options,
-                parameters: parameters,
-                quarterTurns: turns,
-                cropNormalized: crop,
-                straightenRadians: straighten,
-                flipHorizontal: flipH,
-                flipVertical: flipV
-            )
+            self?.presentImageExportSavePanel(source: source, options: options, edit: edit)
+        }
+        sheet.present(asSheetOn: window)
+    }
+
+    @objc private func imageStudioBatchExportPressed() {
+        guard activeMediaKind == .image, imageBatchSelection.isActive else { return }
+        guard let window = view.window else { return }
+        let reference = currentMediaURL ?? imageBatchSelection.orderedURLs[0]
+        let edit = developEditForExport(of: reference)
+        let pixelSize = ImageExportWriter.geometryPixelSize(
+            sourceURL: reference,
+            quarterTurns: edit.rotationQuarterTurns,
+            cropNormalized: edit.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(edit.straightenRadians),
+            flipHorizontal: edit.flipHorizontal,
+            flipVertical: edit.flipVertical
+        ) ?? CGSize(width: 1920, height: 1080)
+        let count = imageBatchSelection.count
+        let sheet = ImageExportOptionsSheetController(
+            sourcePixelSize: pixelSize,
+            title: "Export Batch",
+            continueTitle: "Choose Folder…",
+            note: "Writes a new file for each of the \(count) photos. Originals stay unchanged."
+        )
+        imageExportOptionsSheet = sheet
+        sheet.onCancel = { [weak self] in
+            self?.imageExportOptionsSheet = nil
+        }
+        sheet.onContinue = { [weak self] options in
+            self?.imageExportOptionsSheet = nil
+            self?.presentBatchExportFolderPanel(options: options)
         }
         sheet.present(asSheetOn: window)
     }
@@ -7707,12 +7794,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     private func presentImageExportSavePanel(
         source: URL,
         options: ImageExportOptions,
-        parameters: ImageAdjustParameters,
-        quarterTurns: Int,
-        cropNormalized: CGRect?,
-        straightenRadians: CGFloat,
-        flipHorizontal: Bool,
-        flipVertical: Bool
+        edit: ImageDevelopEdit
     ) {
         guard let window = view.window else { return }
         let panel = NSSavePanel()
@@ -7730,47 +7812,44 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             if finalURL.pathExtension.lowercased() != expectedExt {
                 finalURL = finalURL.deletingPathExtension().appendingPathExtension(expectedExt)
             }
-            self?.performImageExport(
-                source: source,
-                destination: finalURL,
-                parameters: parameters,
-                quarterTurns: quarterTurns,
-                cropNormalized: cropNormalized,
-                straightenRadians: straightenRadians,
-                flipHorizontal: flipHorizontal,
-                flipVertical: flipVertical,
-                exportOptions: options
-            )
+            self?.performImageExport(source: source, destination: finalURL, edit: edit, exportOptions: options)
+        }
+    }
+
+    private func presentBatchExportFolderPanel(options: ImageExportOptions) {
+        guard let window = view.window else { return }
+        let urls = imageBatchSelection.orderedURLs
+        guard urls.count >= 2 else { return }
+        let jobs: [(source: URL, edit: ImageDevelopEdit)] = urls.map { url in
+            (url, developEditForExport(of: url))
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Export"
+        panel.title = "Export Batch"
+        panel.message = "Choose a folder. Each photo is written as a new file."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let folder = panel.url else { return }
+            self?.performBatchImageExport(jobs: jobs, folder: folder, exportOptions: options)
         }
     }
 
     private func performImageExport(
         source: URL,
         destination: URL,
-        parameters: ImageAdjustParameters,
-        quarterTurns: Int,
-        cropNormalized: CGRect?,
-        straightenRadians: CGFloat,
-        flipHorizontal: Bool,
-        flipVertical: Bool,
+        edit: ImageDevelopEdit,
         exportOptions: ImageExportOptions
     ) {
         if destination.standardizedFileURL == source.standardizedFileURL {
             presentImageExportAlert(title: "Choose a new file", message: "Export never overwrites the original.")
             return
         }
-        imageStudioCommitFooter.exportButton.isEnabled = false
+        setImageExportButtonsEnabled(false)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = ImageExportWriter.renderCGImage(
-                sourceURL: source,
-                parameters: parameters,
-                quarterTurns: quarterTurns,
-                cropNormalized: cropNormalized,
-                straightenRadians: straightenRadians,
-                flipHorizontal: flipHorizontal,
-                flipVertical: flipVertical,
-                exportOptions: exportOptions
-            )
+            let image = Self.renderExportImage(source: source, edit: edit, exportOptions: exportOptions)
             var writeError: Error?
             if let image {
                 do {
@@ -7780,7 +7859,7 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }
             }
             DispatchQueue.main.async {
-                self?.imageStudioCommitFooter.exportButton.isEnabled = true
+                self?.setImageExportButtonsEnabled(true)
                 if image == nil {
                     self?.presentImageExportAlert(title: "Export failed", message: "Could not render the edited image.")
                 } else if let writeError {
@@ -7788,6 +7867,86 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 }
             }
         }
+    }
+
+    private func performBatchImageExport(
+        jobs: [(source: URL, edit: ImageDevelopEdit)],
+        folder: URL,
+        exportOptions: ImageExportOptions
+    ) {
+        var reserved = Set<String>()
+        var planned: [(source: URL, destination: URL, edit: ImageDevelopEdit)] = []
+        for job in jobs {
+            guard let destination = ImageExportWriter.uniqueExportURL(
+                for: job.source,
+                in: folder,
+                format: exportOptions.format,
+                reserved: reserved
+            ) else { continue }
+            reserved.insert(destination.standardizedFileURL.path)
+            planned.append((job.source, destination, job.edit))
+        }
+        guard !planned.isEmpty else {
+            presentImageExportAlert(title: "Export failed", message: "Could not choose file names that leave the originals untouched.")
+            return
+        }
+        setImageExportButtonsEnabled(false)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var written = 0
+            var failed = 0
+            for job in planned {
+                guard let image = Self.renderExportImage(
+                    source: job.source,
+                    edit: job.edit,
+                    exportOptions: exportOptions
+                ) else {
+                    failed += 1
+                    continue
+                }
+                do {
+                    try ImageExportWriter.write(image, to: job.destination, options: exportOptions)
+                    written += 1
+                } catch {
+                    failed += 1
+                }
+            }
+            DispatchQueue.main.async {
+                self?.setImageExportButtonsEnabled(true)
+                if written == 0 {
+                    self?.presentImageExportAlert(
+                        title: "Export failed",
+                        message: "Could not write the batch."
+                    )
+                } else if failed > 0 {
+                    self?.presentImageExportAlert(
+                        title: "Export finished",
+                        message: "Wrote \(written) of \(written + failed) photos. \(failed) could not be written."
+                    )
+                }
+            }
+        }
+    }
+
+    private func setImageExportButtonsEnabled(_ enabled: Bool) {
+        imageStudioCommitFooter.exportButton.isEnabled = enabled
+        imageStudioCommitFooter.batchExportButton.isEnabled = enabled
+    }
+
+    private static func renderExportImage(
+        source: URL,
+        edit: ImageDevelopEdit,
+        exportOptions: ImageExportOptions
+    ) -> CGImage? {
+        ImageExportWriter.renderCGImage(
+            sourceURL: source,
+            parameters: edit.parameters,
+            quarterTurns: edit.rotationQuarterTurns,
+            cropNormalized: edit.cropNormalized?.cgRect,
+            straightenRadians: CGFloat(edit.straightenRadians),
+            flipHorizontal: edit.flipHorizontal,
+            flipVertical: edit.flipVertical,
+            exportOptions: exportOptions
+        )
     }
 
     private func presentImageExportAlert(title: String, message: String) {
@@ -10720,6 +10879,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
     }
 
     private func setImmersiveChromeVisible(_ visible: Bool, animated: Bool) {
+        // Video playback must not run NSAnimationContext. Tahoe flushes that group
+        // from the display-cycle layout and crashes in DesignLibrary.
+        let animated = activeMediaKind == .video ? false : animated
         let libraryOpen = playbackLibraryOverlay != .closed
         let shouldShowTitleBar: Bool = {
             if isImageSlideshowActive { return false }
@@ -10730,11 +10892,9 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             && !isImageSlideshowActive
             && (visible || immersiveChromePinnedVisible)
         guard shouldShowTitleBar != isTitleBarChromeShowing else {
-            if shouldShowTitleBar {
-                delegate?.playerViewController(self, setImmersiveChromeVisible: true, animated: animated)
-                updateTitleBarChromeStrip(visible: true, animated: animated)
-                relayoutLibraryChromeForTitleBar()
-            }
+            // Already showing. Do not reorder the title strip or rewrite its constraints —
+            // mouse-move does this every event, and Tahoe SIGSEGVs in DesignLibrary while
+            // that nested layout is flushing an animation.
             if usesImmersiveChrome, shouldShowPlaybackBar != immersiveChromeVisible {
                 immersiveChromeVisible = shouldShowPlaybackBar
                 applyPlaybackBarVisible(shouldShowPlaybackBar, animated: animated)
@@ -10897,23 +11057,8 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
                 self.raiseTitleBarChromeToFront()
             }
         }
-        guard animated else {
-            apply()
-            return
-        }
-        if visible {
-            titleBarChromeStrip.isHidden = false
-            raiseTitleBarChromeToFront()
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = ImmersiveWindowChrome.animationDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            self.titleBarChromeStrip.animator().alphaValue = visible ? 1 : 0
-        } completionHandler: {
-            if !visible {
-                self.titleBarChromeStrip.isHidden = true
-            }
-        }
+        _ = animated
+        apply()
     }
 
     private func relayoutLibraryChromeForTitleBar() {
@@ -10931,23 +11076,14 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         }
         let bar = activeMediaKind == .image ? imageControlsContainer : controlsContainer
         guard activeMediaKind == .video || activeMediaKind == .image else { return }
-        // Drop any in-flight animator() alpha so a prior immersive show cannot win.
-        bar.layer?.removeAllAnimations()
-
-        if !animated || !allowVisible {
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.current.duration = 0
-            bar.alphaValue = allowVisible ? 1 : 0
-            bar.isHidden = !allowVisible
-            NSAnimationContext.endGrouping()
+        let show = allowVisible
+        if bar.isHidden == !show, abs(bar.alphaValue - (show ? 1 : 0)) < 0.01 {
             return
         }
-
-        bar.isHidden = false
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = ImmersiveWindowChrome.animationDuration
-            bar.animator().alphaValue = 1
-        }
+        bar.layer?.removeAllAnimations()
+        _ = animated
+        bar.alphaValue = show ? 1 : 0
+        bar.isHidden = !show
     }
 
     private func refreshImmersiveChromePinnedState() {
@@ -11397,7 +11533,15 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
         let itemDurationSec = CMTimeGetSeconds(currentItem.duration)
         let currentSec = CMTimeGetSeconds(player.currentTime())
         let durationSec: Double
-        if isPreviewPlaybackActive, let sourceDuration = activePreviewSourceDurationSec, sourceDuration > 0 {
+        if activePreviewRefusesExtend {
+            // The preview package is capped (~2 min). The bar shows the movie length.
+            guard let sourceDuration = activePreviewSourceDurationSec, sourceDuration > 1 else {
+                totalTimeLabel.stringValue = "--:--"
+                updateSeekBarPreparingState()
+                return
+            }
+            durationSec = sourceDuration
+        } else if isPreviewPlaybackActive, let sourceDuration = activePreviewSourceDurationSec, sourceDuration > 0 {
             durationSec = sourceDuration
         } else if itemDurationSec.isFinite && itemDurationSec > 0 {
             durationSec = itemDurationSec
@@ -11406,10 +11550,18 @@ final class PlayerViewController: NSViewController, MediaLibraryDelegate {
             return
         }
         if durationSec.isFinite && durationSec > 0 {
-            seekSlider.maxValue = durationSec
-            if !isSeekBarPreparing {
-                seekSlider.doubleValue = max(0, min(currentSec, durationSec))
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if abs(seekSlider.maxValue - durationSec) > 0.5 {
+                seekSlider.maxValue = durationSec
             }
+            if !isSeekBarPreparing {
+                let clamped = max(0, min(currentSec, durationSec))
+                if abs(seekSlider.doubleValue - clamped) > 0.04 {
+                    seekSlider.doubleValue = clamped
+                }
+            }
+            CATransaction.commit()
             currentTimeLabel.stringValue = formatTime(currentSec)
             totalTimeLabel.stringValue = formatTime(durationSec)
         }

@@ -65,11 +65,11 @@ Responsiveness means UI feedback remains effectively immediate during playback a
 
 ## ImageBatchCatalog
 
-`ImageBatchCatalog` is the **Batch** tab of the left docked column: a 16:9 tile grid of stills in **ImageBatchSelection** (catalog-quality thumbnails, per-tile **Dry / Wet** mix on hover, hover trash to drop one still, count, **Clear selection**). Empty state when fewer than two are selected (“Select 2+ in the filmstrip”). Selecting 2+ in **ImageFolderCarousel** opens the left column (if needed) and switches to this tab. File export stays on the right **ImageStudioCommitFooter** (**ImageExport** of the open still).
+`ImageBatchCatalog` is the **Batch** tab of the left docked column: a 16:9 tile grid of stills in **ImageBatchSelection** (catalog-quality thumbnails, per-tile **Dry / Wet** mix on hover, hover trash to drop one still, count, **Clear selection**). Empty state when fewer than two are selected (“Select 2+ in the filmstrip”). Selecting 2+ in **ImageFolderCarousel** opens the left column (if needed) and switches to this tab. File export stays on the right **ImageStudioCommitFooter**: **ImageExport** for the open still, **BatchImageExport** for the set.
 
 ## ImageAdjustSettings
 
-`ImageAdjustSettings` is the **Edits** tab in the right **edit sidebar** for **ImageMedia**: display-only develop controls (Core Image graph on `ImageAdjustParameters`) that do not rewrite the file on disk. Tools are listed under outline groups (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**). Each **ImageDevelopTool** is a row that expands into controls when available; unfinished tools stay visible but grayed (“Coming soon”). Interactive drags render a capped **preview** proxy; after settle the surface re-renders at full resolution. The sibling **Presets** tab (Looks / Mood / Film / Saved) applies named looks over the same parameter model. When the current adjusts (or display crop/rotation) are not identity, an **ImageStudioCommitFooter** at the bottom of the sidebar offers **Reset**, **ImageExport**, and **ImageUserPreset** save. Clearing a saved look lives on **ImageEditsCatalog** (hover trash), not this footer. Zoom/rotate/crop stay on the floating image bar; Before/After on **ImageStudioMetaBar** compares identity vs current adjusts via **ImageAdjustSession** presentation.
+`ImageAdjustSettings` is the **Edits** tab in the right **edit sidebar** for **ImageMedia**: display-only develop controls (Core Image graph on `ImageAdjustParameters`) that do not rewrite the file on disk. Tools are listed under outline groups (**Essentials**, **Landscape**, **Creative**, **Portrait**, **Professional**). Each **ImageDevelopTool** is a row that expands into controls when available; unfinished tools stay visible but grayed (“Coming soon”). Interactive drags render a capped **preview** proxy; after settle the surface re-renders at full resolution. The sibling **Presets** tab (Looks / Mood / Film / Saved) applies named looks over the same parameter model. An **ImageStudioCommitFooter** at the bottom of the sidebar offers **ImageExport** whenever a photo is open, and **BatchImageExport** when a batch is active. **Reset** and **ImageUserPreset** save appear with the develop chrome. Clearing a saved look lives on **ImageEditsCatalog** (hover trash), not this footer. Zoom/rotate/crop stay on the floating image bar; Before/After on **ImageStudioMetaBar** compares identity vs current adjusts via **ImageAdjustSession** presentation.
 
 Opening **ImageMedia** hides the left **MediaLibraryPanel** / folders and docks full-height **ImageInfo** (left) + edit (right) columns beside a content column of photo + meta bar + **ImageFolderCarousel** (carousel does not extend under either sidebar). Opening Library during **ImageMedia** mirrors video: full folder management fills the window and the current photo moves to the bottom-right mini preview until the panel is closed or expanded.
 
@@ -93,7 +93,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## BatchImageExport
 
-`BatchImageExport` is not a v1 catalog control. File-out is **ImageExport** from the open still on the right **ImageStudioCommitFooter**. A later multi-file export can reuse each target’s **ImageDevelopEdit**.
+`BatchImageExport` writes a new file for every still in the active **ImageBatchSelection** (2+). It uses the same options sheet as **ImageExport**, then a folder picker. Each still is rendered from its own look: Dry/Wet mix while the batch is active, otherwise its working copy or saved **ImageDevelopEdit**, plus that still’s crop / rotation. The open still includes unsaved tweaks. It never overwrites a source file and does not imply **Save Develop**. It lives on the right **ImageStudioCommitFooter** (**Export Batch…**), not as a control inside **ImageBatchCatalog**.
 
 ## ImageBatchSelection
 
@@ -129,7 +129,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## ImageStudioCommitFooter
 
-`ImageStudioCommitFooter` is the bottom bar of the right **edit sidebar** during **ImageMedia**. It appears while **ImageAdjustParameters** differ from identity, display geometry (crop / straighten / rotation) is active, a **SelectionMask** is present, or a saved **ImageDevelopEdit** exists, and holds develop commit actions above **ImageUserPreset** save and **ImageExport**. **Reset** sets the live session develop params (and related studio state per existing rules) toward identity and leaves a **DirtyDevelopSession** — Save would persist “no look”; Don’t Save keeps the previous saved document. **Clear saved look** is not on this footer — it lives on **ImageEditsCatalog** (hover trash, with confirm). **Save Develop** / **Discard Develop** sit with these when dirty. Crop / straighten / rotation still use their own Cancel. Selection matte clear stays aligned with current footer rules unless a later decision splits it.
+`ImageStudioCommitFooter` is the bottom bar of the right **edit sidebar** during **ImageMedia**. **Export…** is available whenever a photo is open. **Export Batch…** appears when **ImageBatchSelection** is active. Develop commit actions (**Save Develop** / **Discard Develop** / **Reset**) appear while **ImageAdjustParameters** differ from identity, display geometry is active, a **SelectionMask** is present, or a saved **ImageDevelopEdit** exists, above **ImageUserPreset** save and export. **Reset** sets the live session develop params (and related studio state per existing rules) toward identity and leaves a **DirtyDevelopSession** — Save would persist “no look”; Don’t Save keeps the previous saved document. **Clear saved look** is not on this footer — it lives on **ImageEditsCatalog** (hover trash, with confirm). **Save Develop** / **Discard Develop** sit with these when dirty. Crop / straighten / rotation still use their own Cancel. Selection matte clear stays aligned with current footer rules unless a later decision splits it.
 
 ## ImageCrop
 
@@ -137,7 +137,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 
 ## ImageExport
 
-`ImageExport` writes a new still of the current **ImageMedia** from the live **ImageAdjustSession** (including a **DirtyDevelopSession** — unsaved tweaks are included). It never replaces the source file and does not imply **Save Develop**. When a **SelectionMask** exists, **Export Cutout** writes a separate transparent PNG of the subject matte (also never overwrites the source). v1 has no batch-catalog export; export the open still from the right sidebar.
+`ImageExport` writes a new still of the current **ImageMedia** from the live **ImageAdjustSession** (including a **DirtyDevelopSession** — unsaved tweaks are included). An unedited photo can still be exported (format / size). It never replaces the source file and does not imply **Save Develop**. When the open still is in an active batch, the file uses that still’s Dry/Wet mix, matching the picture. When a **SelectionMask** exists, **Export Cutout** writes a separate transparent PNG of the subject matte (also never overwrites the source). **Export…** and **Export Batch…** both live on the right sidebar.
 
 ## ImageUserPreset
 
@@ -395,7 +395,7 @@ Tool roadmap (waves, ease, section map): `docs/image-studio-develop-roadmap.md`.
 ## Flagged ambiguities
 
 - “Session sticky across image switches” described today’s code, not the product model — resolved: ownership is **ImageDevelopEdit** per path; session is only the live surface for the open image (option C / Luminar-like).
-- “Batch edit” must not mean live multi-master slider sync in v1 — resolved: batch means **BatchLookApply**; file-out is **ImageExport** of the open still.
+- “Batch edit” must not mean live multi-master slider sync in v1 — resolved: batch means **BatchLookApply**. File-out is **ImageExport** of the open still, or **BatchImageExport** of the set.
 - Persistence location vs commit semantics — resolved: store is in-app (**A**); commit is explicit Save / Don’t Save (**DirtyDevelopSession**), not silent always-write.
 - Dirty gate timing — amended: **no modal on leave image**; stash per-path working copies; prompt **Save All / Don’t Save / Cancel** on **quit only**.
 - Export vs Save — resolved: **ImageExport** uses live session including dirty (option A); does not auto-save.

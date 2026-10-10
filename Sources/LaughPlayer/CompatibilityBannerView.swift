@@ -1,7 +1,9 @@
 import AppKit
 
 /// Non-blocking tip-style banner for playback / compatibility notices.
-final class CompatibilityBannerView: NSVisualEffectView {
+/// Plain `NSView` (not `NSVisualEffectView`) — Tahoe routes `.hudWindow` vibrancy through
+/// DesignLibrary/SwiftUI and can SIGSEGV during nested window layout.
+final class CompatibilityBannerView: NSView {
     private let iconView = NSImageView()
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let actionButton = NSButton(title: "", target: nil, action: nil)
@@ -30,13 +32,12 @@ final class CompatibilityBannerView: NSVisualEffectView {
     }
 
     private func setup() {
-        material = .hudWindow
-        blendingMode = .withinWindow
-        state = .active
         wantsLayer = true
         layer?.cornerRadius = 10
+        layer?.masksToBounds = true
         isHidden = true
         translatesAutoresizingMaskIntoConstraints = false
+        refreshPlateFill()
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.contentTintColor = Self.tipIconColor
@@ -48,8 +49,8 @@ final class CompatibilityBannerView: NSVisualEffectView {
 
         messageLabel.font = .systemFont(ofSize: 12, weight: .medium)
         messageLabel.textColor = .labelColor
-        messageLabel.maximumNumberOfLines = 0
-        messageLabel.lineBreakMode = .byWordWrapping
+        messageLabel.maximumNumberOfLines = 1
+        messageLabel.lineBreakMode = .byTruncatingTail
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
         messageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -123,7 +124,7 @@ final class CompatibilityBannerView: NSVisualEffectView {
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.isBordered = false
-        closeButton.bezelStyle = .accessoryBarAction
+        closeButton.bezelStyle = .inline
         closeButton.setButtonType(.momentaryPushIn)
         closeButton.focusRingType = .none
         closeButton.toolTip = "Dismiss"
@@ -145,15 +146,25 @@ final class CompatibilityBannerView: NSVisualEffectView {
         }
     }
 
+    private func refreshPlateFill() {
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let fill = isDark
+            ? NSColor(calibratedWhite: 0.14, alpha: 0.94)
+            : NSColor(calibratedWhite: 0.97, alpha: 0.96)
+        layer?.backgroundColor = fill.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(isDark ? 0.45 : 0.35).cgColor
+    }
+
     private func refreshCloseChromeFill() {
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // Light wash circle — readable on the HUD tip without stretching the glyph.
         let fill = NSColor.labelColor.withAlphaComponent(isDark ? 0.18 : 0.10)
         closeChrome.layer?.backgroundColor = fill.cgColor
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        refreshPlateFill()
         refreshCloseChromeFill()
     }
 

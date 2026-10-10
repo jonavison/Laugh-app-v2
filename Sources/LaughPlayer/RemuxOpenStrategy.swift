@@ -1,8 +1,8 @@
 import Foundation
 
-/// Chooses remux strategies for fast open. Progressive preview stays without subs so
-/// playback starts in seconds. Full remux includes text embeds when present; bitmap
-/// (PGS) cannot remux — overlay (subtitle-only mpv) / OpenSubtitles / sidecars cover that.
+/// Chooses remux strategies for fast open. Progressive preview muxes text embeds
+/// (SRT/ASS → mov_text) — cheap and required because incomplete torrents never get a
+/// full remux upgrade. Bitmap (PGS) cannot remux — overlay / OpenSubtitles / sidecars.
 enum RemuxOpenStrategy: Equatable {
     case firstAudioNoSubs
     case firstAudioWithTextSubs
@@ -11,9 +11,9 @@ enum RemuxOpenStrategy: Equatable {
     case allAudioWithSubs
     case progressivePreviewStereo
 
-    /// Fragmented preview: never wait on subtitle remux.
+    /// Fragmented preview: A/V (+ AAC when needed) with text embeds when present.
     static func progressive(needsAudioTranscode: Bool) -> RemuxOpenStrategy {
-        needsAudioTranscode ? .progressivePreviewStereo : .firstAudioNoSubs
+        needsAudioTranscode ? .progressivePreviewStereo : .firstAudioWithTextSubs
     }
 
     /// Background / full remux: A/V first; mux text embeds when the source has them.

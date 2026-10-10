@@ -6,6 +6,18 @@ Marketing versions use **pre-1.0** semver (`0.y.z`) until LaughPlayer is product
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-10
+
+### Added
+- Image studio can export the open photo or the whole batch. **Export…** writes this photo (including an unedited one). **Export Batch…** appears when two or more photos are selected and writes each one, with its own look, into a folder you choose. Originals stay unchanged.
+
+### Fixed
+- Incomplete torrent playback (E-AC-3/AC-3 MKV): remux the contiguous downloaded head into a finished MP4 (not a 2-minute fragment that freezes); attach waits until that package is done; compact still-downloading tip; DirectMpv head-play if progressive still fails.
+- Progressive remux includes every embedded text subtitle (SRT → mov_text), English first. Bitmap PGS stays out. Incomplete files never upgrade to a full remux, so a 2-track cap hid the rest.
+- Still-downloading tip no longer reorders the full chrome stack mid-layout (Tahoe DesignLibrary crash).
+- Video chrome no longer animates or reorders the title strip on mouse move. That pass ran inside window layout and crashed in DesignLibrary while an incomplete file was playing.
+- Incomplete playback no longer reopens the short preview around the 30s fMP4 boundary. That reattach ran only for still-downloading files and crashed during window layout. The seek bar keeps the real movie length.
+
 ## [0.11.2] - 2026-10-07
 
 ### Fixed

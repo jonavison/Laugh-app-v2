@@ -899,10 +899,13 @@ enum FFmpegVideoFallback {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: bundled)
         let strategy = progressivePreviewStrategy(for: inputURL)
+        // Incomplete packages are attached only after ffmpeg exits. A normal MP4 has a
+        // real duration; fragmented empty_moov makes AVPlayer stall around the first
+        // fragment (~30s) and the picture freezes.
         process.arguments = remuxArguments(
             inputURL: inputURL,
             outputURL: previewURL,
-            fragmented: true,
+            fragmented: !incomplete,
             strategy: strategy,
             maxDurationSec: durationCap
         )
@@ -955,16 +958,37 @@ enum FFmpegVideoFallback {
     private static func progressiveRemuxDurationCapSec(for inputURL: URL) -> Double? {
         if IncompleteMediaProbe.looksLikeIncompleteDownload(at: inputURL) {
             let head = IncompleteMediaProbe.contiguousHeadFraction(at: inputURL)
-            guard head >= 0.02 else { return nil }
-            guard let duration = probeSourceDurationSec(for: inputURL), duration.isFinite, duration > 1 else {
-                return nil
-            }
-            return max(15, duration * head * 0.90)
+            let duration = probeSourceDurationSec(for: inputURL)
+            return progressiveDurationCapSec(
+                contiguousHeadFraction: head,
+                sourceDurationSec: duration
+            )
         }
         if requiresFragmentedAudioTranscode(for: inputURL) {
             return audioTranscodePreviewCapSec
         }
         return nil
+    }
+
+    /// Pure policy for incomplete progressive caps (testable).
+    ///
+    /// Stop before the first hollow slab (`duration × head × 0.70`). A hard 2-minute AAC
+    /// cap left the picture frozen on the last frame while the bar still showed the movie.
+    /// The 120s window is only for a complete file's quick preview while a full remux runs.
+    static func progressiveDurationCapSec(
+        contiguousHeadFraction head: Double,
+        sourceDurationSec: Double?,
+        audioTranscodeCapSec: Double = audioTranscodePreviewCapSec
+    ) -> Double? {
+        guard head >= 0.02 else { return nil }
+        let headCap: Double
+        if let sourceDurationSec, sourceDurationSec.isFinite, sourceDurationSec > 1 {
+            // Holes often appear before the first all-zero slab sample.
+            headCap = max(15, sourceDurationSec * head * 0.70)
+        } else {
+            headCap = audioTranscodeCapSec
+        }
+        return headCap
     }
 
     private static func remuxArguments(
@@ -1004,8 +1028,13 @@ enum FFmpegVideoFallback {
         switch strategy {
         case .allAudioWithSubs:
             args += ["-map", "0:s?", "-c:s", "mov_text"]
-        case .firstAudioWithTextSubs:
-            for subIndex in probeTextSubtitleStreamIndices(for: inputURL) {
+        case .firstAudioWithTextSubs, .progressivePreviewStereo:
+            // Incomplete torrents never upgrade to a full remux, so this package is the
+            // only caption source. Map every text track (PGS stays excluded).
+            let subIndices = fragmented
+                ? probeProgressiveTextSubtitleStreamIndices(for: inputURL)
+                : probeTextSubtitleStreamIndices(for: inputURL)
+            for subIndex in subIndices {
                 args += ["-map", "0:s:\(subIndex)", "-c:s", "mov_text"]
             }
         default:
@@ -1212,6 +1241,14 @@ enum FFmpegVideoFallback {
             }
         }
         return indices
+    }
+
+    private static func probeProgressiveTextSubtitleStreamIndices(for inputURL: URL) -> [Int] {
+        guard isAvailable() else { return [] }
+        let stderr = runCapturingStderr(arguments: ["-hide_banner", "-i", inputURL.path])
+        return FFmpegProbeParser.progressiveTextSubtitleIndices(
+            from: FFmpegProbeParser.parseSubtitleStreams(from: stderr)
+        )
     }
 
     private static func probeFirstTextSubtitleStreamIndex(for inputURL: URL) -> Int? {

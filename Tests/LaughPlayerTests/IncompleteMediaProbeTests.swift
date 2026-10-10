@@ -73,7 +73,10 @@ final class IncompleteMediaProbeTests: XCTestCase {
         XCTAssertTrue(IncompleteMediaProbe.looksLikeIncompleteDownload(at: url))
         let notice = PlaybackErrorFormatter.stillDownloadingNotice(for: url)
         XCTAssertEqual(notice.kind, .stillDownloading)
-        XCTAssertTrue(notice.message.lowercased().contains("download"))
+        let lowered = notice.message.lowercased()
+        XCTAssertTrue(lowered.contains("download") || lowered.contains("incomplete"))
+        XCTAssertFalse(lowered.contains("\n"))
+        XCTAssertLessThan(notice.message.count, 80)
     }
 
     func testSparsePreallocationIsIncomplete() throws {

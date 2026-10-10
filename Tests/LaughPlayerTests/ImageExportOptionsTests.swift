@@ -75,6 +75,30 @@ final class ImageExportOptionsTests: XCTestCase {
         XCTAssertEqual(ImageExportOptions.Format.from(url: URL(fileURLWithPath: "/a.jpg")), .jpeg)
     }
 
+    func testUniqueExportURLNeverReplacesSource() {
+        let folder = URL(fileURLWithPath: "/tmp/exports")
+        let source = URL(fileURLWithPath: "/tmp/exports/Photo-edited.jpg")
+        let url = ImageExportWriter.uniqueExportURL(for: source, in: folder, format: .jpeg)
+        XCTAssertEqual(url?.lastPathComponent, "Photo-edited-2.jpg")
+        XCTAssertNotEqual(url?.standardizedFileURL.path, source.standardizedFileURL.path)
+    }
+
+    func testUniqueExportURLReservesNamesInsideOneBatch() {
+        let folder = URL(fileURLWithPath: "/tmp/exports")
+        let first = URL(fileURLWithPath: "/tmp/a/Photo.NEF")
+        let second = URL(fileURLWithPath: "/tmp/b/Photo.CR2")
+        let firstURL = ImageExportWriter.uniqueExportURL(for: first, in: folder, format: .jpeg)
+        let reserved = Set([firstURL!.standardizedFileURL.path])
+        let secondURL = ImageExportWriter.uniqueExportURL(
+            for: second,
+            in: folder,
+            format: .jpeg,
+            reserved: reserved
+        )
+        XCTAssertEqual(firstURL?.lastPathComponent, "Photo-edited.jpg")
+        XCTAssertEqual(secondURL?.lastPathComponent, "Photo-edited-2.jpg")
+    }
+
     func testSuggestedFileNameUsesFormatExtension() {
         let source = URL(fileURLWithPath: "/tmp/Photo.NEF")
         XCTAssertTrue(ImageExportWriter.suggestedFileName(for: source, format: .webp).hasSuffix(".webp"))

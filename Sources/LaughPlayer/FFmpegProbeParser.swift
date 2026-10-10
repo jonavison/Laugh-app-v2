@@ -197,6 +197,51 @@ enum FFmpegProbeParser {
         return text.contains(where: { normalized == $0 || normalized.contains($0) })
     }
 
+    /// Every remuxable text track. English (non-SDH, then SDH) first, then the rest in
+    /// file order. Bitmap PGS/VobSub stays out — mov_text cannot carry those.
+    static func progressiveTextSubtitleIndices(
+        from streams: [FFmpegSubtitleStream],
+        maxCount: Int = .max
+    ) -> [Int] {
+        guard maxCount > 0 else { return [] }
+        let text = streams.filter { isTextSubtitleCodec($0.codec) }
+        guard !text.isEmpty else { return [] }
+
+        func isEnglish(_ stream: FFmpegSubtitleStream) -> Bool {
+            let lang = (stream.language ?? "").lowercased()
+            return lang == "eng" || lang == "en" || lang.hasPrefix("en-")
+        }
+        func isSDH(_ stream: FFmpegSubtitleStream) -> Bool {
+            let title = (stream.title ?? "").lowercased()
+            let line = title + " " + stream.codec.lowercased()
+            return title.contains("sdh")
+                || title.contains("hearing")
+                || line.contains("caption")
+        }
+
+        var picked: [Int] = []
+        var seen = Set<Int>()
+        func append(_ stream: FFmpegSubtitleStream) {
+            guard picked.count < maxCount, !seen.contains(stream.subtitleIndex) else { return }
+            seen.insert(stream.subtitleIndex)
+            picked.append(stream.subtitleIndex)
+        }
+
+        if let eng = text.first(where: { isEnglish($0) && !isSDH($0) }) {
+            append(eng)
+        } else if let eng = text.first(where: isEnglish) {
+            append(eng)
+        }
+        if let engExtra = text.first(where: { isEnglish($0) && !seen.contains($0.subtitleIndex) }) {
+            append(engExtra)
+        }
+        for stream in text {
+            append(stream)
+            if picked.count >= maxCount { break }
+        }
+        return picked
+    }
+
     /// True when the file has embedded bitmap subs and no remuxable text tracks.
     static func hasBitmapSubtitlesOnly(codecs: [String]) -> Bool {
         guard !codecs.isEmpty else { return false }

@@ -109,10 +109,14 @@ enum PlaybackErrorFormatter {
     }
 
     static func stillDownloadingNotice(for url: URL) -> PlaybackUserNotice {
-        var message = userMessage(kind: .stillDownloading, url: url, detail: nil)
-        if let fraction = IncompleteMediaProbe.downloadProgressFraction(at: url) {
-            let pct = Int((fraction * 100).rounded(.down))
-            message = "This video is still downloading (~\(pct)% on disk). You can watch the part that's ready from the start — if the picture freezes while time keeps moving, wait for more of the file to finish downloading."
+        let pct = IncompleteMediaProbe.downloadProgressFraction(at: url).map {
+            Int(($0 * 100).rounded(.down))
+        }
+        let message: String
+        if let pct {
+            message = "Video is still downloading or incomplete (~\(pct)%)."
+        } else {
+            message = "Video is still downloading or incomplete."
         }
         return PlaybackUserNotice(kind: .stillDownloading, message: message)
     }
@@ -296,7 +300,7 @@ enum PlaybackErrorFormatter {
         case .incompleteOrDamaged:
             return "This video's file header looks missing or damaged — often a download that hasn't finished, or a corrupt file. Wait for the download to finish (or re-download), then open it again."
         case .stillDownloading:
-            return "This video is still downloading. You can watch from the start, but playback may stop when it reaches parts that aren't on disk yet."
+            return "Video is still downloading or incomplete."
         case .bitmapSubtitlesOnly:
             return "This file’s embedded subs are bitmap (PGS). Laugh keeps sharp remux picture by default — search online for text subs, or use embedded subs (softer compatibility picture)."
         case .decoderUnavailable:

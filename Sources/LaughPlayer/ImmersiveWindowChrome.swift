@@ -46,11 +46,8 @@ enum ImmersiveWindowChrome {
         return max(52, strip + libraryContentGapBelowTitleChrome)
     }
 
-    static func applyFrostedPanelStyle(to effectView: NSVisualEffectView, leadingShadow: Bool) {
-        // withinWindow + opaque floor keeps panel color stable in windowed and fullscreen.
-        effectView.material = .contentBackground
-        effectView.blendingMode = .withinWindow
-        effectView.state = .active
+    static func applyFrostedPanelStyle(to effectView: NSView, leadingShadow: Bool) {
+        // Opaque plate — NSVisualEffectView on Tahoe crashes inside DesignLibrary during layout.
         effectView.wantsLayer = true
         effectView.layer?.cornerRadius = 0
         effectView.layer?.masksToBounds = false
@@ -81,19 +78,11 @@ enum ImmersiveWindowChrome {
         if alreadyApplied { return }
 
         window.title = title
-        let apply = {
-            window.titleVisibility = titleVisible ? .visible : .hidden
-            setStandardButtonsHidden(buttonsHidden, on: window)
-        }
-        guard animated else {
-            apply()
-            return
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = animationDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            apply()
-        }
+        // Never animate. On Tahoe the group commits inside a nested layout pass and
+        // DesignLibrary's SwiftUI HStack SIGSEGVs (`swift_getObjectType`).
+        _ = animated
+        window.titleVisibility = titleVisible ? .visible : .hidden
+        setStandardButtonsHidden(buttonsHidden, on: window)
     }
 
     private static func standardButtonsHiddenState(on window: NSWindow) -> Bool {
@@ -103,7 +92,7 @@ enum ImmersiveWindowChrome {
 }
 
 /// Info / Edits panel chrome — never starts a window drag under immersive background-move.
-final class ImmersivePanelVisualEffectView: NSVisualEffectView {
+final class ImmersivePanelVisualEffectView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
 }
 

@@ -14,6 +14,30 @@ enum ImageExportWriter {
         return "\(stem).\(format.pathExtension)"
     }
 
+    /// New file in `directory` for one still. Never returns the source path.
+    /// `reserved` holds destinations already claimed in this batch.
+    static func uniqueExportURL(
+        for source: URL,
+        in directory: URL,
+        format: ImageExportOptions.Format,
+        reserved: Set<String> = []
+    ) -> URL? {
+        let folder = directory.standardizedFileURL
+        let sourcePath = source.standardizedFileURL.path
+        let ext = format.pathExtension
+        let stem = source.deletingPathExtension().lastPathComponent
+        let base = stem.hasSuffix("-edited") ? stem : "\(stem)-edited"
+        var candidate = folder.appendingPathComponent("\(base).\(ext)")
+        var suffix = 2
+        let taken = reserved
+        while candidate.standardizedFileURL.path == sourcePath || taken.contains(candidate.standardizedFileURL.path) {
+            candidate = folder.appendingPathComponent("\(base)-\(suffix).\(ext)")
+            suffix += 1
+            if suffix > 999 { return nil }
+        }
+        return candidate
+    }
+
     static func suggestedCutoutFileName(for source: URL) -> String {
         let base = source.deletingPathExtension().lastPathComponent
         let stem = base.hasSuffix("-cutout") ? base : "\(base)-cutout"

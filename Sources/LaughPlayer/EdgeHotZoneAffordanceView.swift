@@ -118,6 +118,9 @@ final class EdgeHotZoneAffordanceView: NSView {
         _ = emphasized
         let targetAlpha: CGFloat = visible ? 1 : 0
         let show = visible
+        if isShowing == show, isHidden == !show, abs(alphaValue - targetAlpha) < 0.01 {
+            return
+        }
 
         let apply: () -> Void = { [weak self] in
             guard let self else { return }
@@ -126,20 +129,8 @@ final class EdgeHotZoneAffordanceView: NSView {
             self.isShowing = show
         }
 
-        if animated, window != nil {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = show ? 0.18 : 0.22
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                animator().alphaValue = targetAlpha
-            } completionHandler: { [weak self] in
-                guard let self else { return }
-                self.isHidden = !show
-                self.isShowing = show
-            }
-            if show { isHidden = false }
-        } else {
-            apply()
-        }
+        _ = animated
+        apply()
         applyChrome()
         needsLayout = true
     }

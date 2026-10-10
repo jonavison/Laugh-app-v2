@@ -73,6 +73,47 @@ final class FFmpegProbeParserTests: XCTestCase {
         XCTAssertEqual(FFmpegVideoFallback.audioTranscodePreviewCapSec, 120, accuracy: 0.1)
     }
 
+    func testProgressiveTextSubtitleIndicesPreferEnglishThenRest() {
+        let streams = [
+            FFmpegSubtitleStream(subtitleIndex: 0, language: "ger", title: nil, codec: "subrip"),
+            FFmpegSubtitleStream(subtitleIndex: 1, language: "eng", title: "English", codec: "subrip"),
+            FFmpegSubtitleStream(subtitleIndex: 2, language: "eng", title: "SDH", codec: "subrip"),
+            FFmpegSubtitleStream(subtitleIndex: 3, language: "spa", title: nil, codec: "subrip"),
+            FFmpegSubtitleStream(subtitleIndex: 4, language: "eng", title: nil, codec: "hdmv_pgs_subtitle")
+        ]
+        XCTAssertEqual(
+            FFmpegProbeParser.progressiveTextSubtitleIndices(from: streams),
+            [1, 2, 0, 3]
+        )
+    }
+
+    func testIncompleteEAC3ProgressiveCapUsesContiguousHead() {
+        // Same safe head as stream-copy. A 120s AAC cap froze the picture at 2:00.
+        let cap = FFmpegVideoFallback.progressiveDurationCapSec(
+            contiguousHeadFraction: 0.42,
+            sourceDurationSec: 8700
+        )
+        XCTAssertEqual(cap ?? -1, 8700 * 0.42 * 0.70, accuracy: 1)
+    }
+
+    func testIncompleteStreamCopyProgressiveCapUsesConservativeHead() {
+        let cap = FFmpegVideoFallback.progressiveDurationCapSec(
+            contiguousHeadFraction: 0.42,
+            sourceDurationSec: 8700
+        )
+        // 8700 * 0.42 * 0.70 ≈ 2558
+        XCTAssertEqual(cap ?? -1, 8700 * 0.42 * 0.70, accuracy: 1)
+    }
+
+    func testIncompleteProgressiveCapNilWhenNoContiguousHead() {
+        XCTAssertNil(
+            FFmpegVideoFallback.progressiveDurationCapSec(
+                contiguousHeadFraction: 0.01,
+                sourceDurationSec: 8700
+            )
+        )
+    }
+
     func testPreviewByteReadinessRejectsStubHeader() {
         XCTAssertFalse(FFmpegProbeParser.isPreviewByteReady(fileSize: 1032, containsMOOF: false))
         XCTAssertFalse(FFmpegProbeParser.isPreviewByteReady(fileSize: 128 * 1024, containsMOOF: false))

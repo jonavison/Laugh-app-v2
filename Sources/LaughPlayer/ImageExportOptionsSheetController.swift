@@ -25,13 +25,20 @@ final class ImageExportOptionsSheetController: NSWindowController {
     private var qualityLabeledRow: NSView!
 
     private let continueButton = NSButton(title: "Continue…", target: nil, action: nil)
+    private let noteText: String
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
 
     /// Longest-edge target while that mode is active (shown in the width field).
     private var longestEdgeTarget: Int = 0
     private var suppressFieldSync = false
 
-    init(sourcePixelSize: CGSize, initial: ImageExportOptions = ImageExportOptionsStore.load()) {
+    init(
+        sourcePixelSize: CGSize,
+        initial: ImageExportOptions = ImageExportOptionsStore.load(),
+        title: String = "Export Image",
+        continueTitle: String = "Continue…",
+        note: String = "Writes a new file. The original stays unchanged."
+    ) {
         self.sourcePixelSize = CGSize(
             width: max(1, sourcePixelSize.width),
             height: max(1, sourcePixelSize.height)
@@ -45,6 +52,7 @@ final class ImageExportOptionsSheetController: NSWindowController {
             Int(max(self.sourcePixelSize.width, self.sourcePixelSize.height).rounded())
         )
         self.options = opts
+        self.noteText = note
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 380),
@@ -52,9 +60,10 @@ final class ImageExportOptionsSheetController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Export Image"
+        window.title = title
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        continueButton.title = continueTitle
         buildUI()
         applyOptionsToControls()
         refreshDynamicRows()
@@ -179,7 +188,7 @@ final class ImageExportOptionsSheetController: NSWindowController {
         qualityLabeledRow = labeledRow(title: "Quality:", control: qualityFields)
         form.addArrangedSubview(qualityLabeledRow)
 
-        let note = NSTextField(wrappingLabelWithString: "Writes a new file. The original stays unchanged.")
+        let note = NSTextField(wrappingLabelWithString: noteText)
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
         note.maximumNumberOfLines = 2

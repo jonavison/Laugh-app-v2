@@ -2,10 +2,11 @@ import XCTest
 @testable import LaughPlayer
 
 final class RemuxOpenStrategyTests: XCTestCase {
-    func testProgressiveNeverWaitsOnTextSubs() {
+    func testProgressiveIncludesTextSubs() {
+        // Incomplete torrents never get a full remux — progressive must carry captions.
         XCTAssertEqual(
             RemuxOpenStrategy.progressive(needsAudioTranscode: false),
-            .firstAudioNoSubs
+            .firstAudioWithTextSubs
         )
         XCTAssertEqual(
             RemuxOpenStrategy.progressive(needsAudioTranscode: true),

@@ -27,7 +27,13 @@ final class ImageStudioCommitFooter: NSView {
         title: "Export…",
         symbol: "square.and.arrow.up",
         emphasized: true,
-        toolTip: "Write a new file with these edits (original is unchanged)"
+        toolTip: "Export this photo as a new file. The original stays unchanged."
+    )
+    let batchExportButton = CommitFooterActionButton(
+        title: "Export Batch…",
+        symbol: "square.and.arrow.up.on.square",
+        emphasized: true,
+        toolTip: "Export every photo in the batch as a new file. Each keeps its own look. Originals stay unchanged."
     )
     let savePresetButton = CommitFooterActionButton(
         title: "Save Preset",
@@ -44,11 +50,14 @@ final class ImageStudioCommitFooter: NSView {
     private let commitRow = NSStackView()
     private let resetRow = NSStackView()
     private let actionsRow = NSStackView()
+    private let batchRow = NSStackView()
 
     static let preferredHeightFull: CGFloat = 154
     static let preferredHeightUnsaved: CGFloat = 112
     static let preferredHeightSavedOnly: CGFloat = 68
     static let preferredHeightActionsOnly: CGFloat = 68
+    /// Extra stack row (spacing + button) when Export Batch is showing.
+    static let batchExportRowHeight: CGFloat = 44
     /// Legacy name — full develop chrome.
     static let preferredHeight: CGFloat = preferredHeightFull
 
@@ -64,6 +73,11 @@ final class ImageStudioCommitFooter: NSView {
     /// Legacy: Reset All visibility (selection / develop identity chrome).
     func setShowsResetAll(_ show: Bool) {
         setShowsReset(show)
+    }
+
+    func setShowsBatchExport(_ show: Bool) {
+        batchExportButton.isHidden = !show
+        batchRow.isHidden = !show
     }
 
     override init(frame frameRect: NSRect) {
@@ -98,6 +112,13 @@ final class ImageStudioCommitFooter: NSView {
         actionsRow.addArrangedSubview(savePresetButton)
         actionsRow.addArrangedSubview(exportButton)
 
+        batchRow.orientation = .horizontal
+        batchRow.alignment = .centerY
+        batchRow.spacing = 10
+        batchRow.distribution = .fillEqually
+        batchRow.translatesAutoresizingMaskIntoConstraints = false
+        batchRow.addArrangedSubview(batchExportButton)
+
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 10
@@ -105,9 +126,11 @@ final class ImageStudioCommitFooter: NSView {
         column.addArrangedSubview(commitRow)
         column.addArrangedSubview(resetRow)
         column.addArrangedSubview(actionsRow)
+        column.addArrangedSubview(batchRow)
         commitRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         resetRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         actionsRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        batchRow.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
 
         addSubview(hairline)
         addSubview(column)
@@ -126,6 +149,7 @@ final class ImageStudioCommitFooter: NSView {
 
         setShowsUnsavedCommit(false)
         setShowsReset(false)
+        setShowsBatchExport(false)
         refreshActionButtonChrome()
     }
 
@@ -146,6 +170,7 @@ final class ImageStudioCommitFooter: NSView {
         resetButton.refreshChrome(appearance: appearance)
         savePresetButton.refreshChrome(appearance: appearance)
         exportButton.refreshChrome(appearance: appearance)
+        batchExportButton.refreshChrome(appearance: appearance)
     }
 }
 
